@@ -14,7 +14,7 @@
 //!
 //! ## Integration Modes
 //!
-//! 1. **Programmatic** — use the [`StravaScraper`] trait directly in your Rust code
+//! 1. **Programmatic** — use the [`ActivityScraper`] trait directly in your Rust code
 //! 2. **REST API** — run `dravr-sciotte-server serve` for HTTP endpoints
 //! 3. **MCP** — run `dravr-sciotte-server --transport stdio` for Claude integration
 //! 4. **CLI** — run `dravr-sciotte-server login` / `activities` subcommands
@@ -22,7 +22,7 @@
 //! ## Quick Start (Programmatic)
 //!
 //! ```rust,no_run
-//! use dravr_sciotte::{ChromeScraper, CachedScraper, StravaScraper};
+//! use dravr_sciotte::{ChromeScraper, CachedScraper, ActivityScraper};
 //! use dravr_sciotte::config::{ScraperConfig, CacheConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -44,7 +44,7 @@ pub mod models;
 /// Configuration: OAuth, scraper, cache settings
 pub mod config;
 
-/// Core `StravaScraper` trait
+/// Core `ActivityScraper` trait
 pub mod types;
 
 /// OAuth flow helpers and encrypted session persistence
@@ -62,4 +62,4 @@ pub mod cache;
 // Re-export primary types for consumers
 pub use cache::CachedScraper;
 pub use scraper::ChromeScraper;
-pub use types::StravaScraper;
+pub use types::ActivityScraper;

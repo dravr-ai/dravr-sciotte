@@ -1,4 +1,4 @@
-// ABOUTME: Core StravaScraper trait defining the scraping interface
+// ABOUTME: Core ActivityScraper trait defining the scraping interface
 // ABOUTME: Implemented by the chromiumoxide-based scraper and wrapped by the cache layer
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -18,7 +18,7 @@ use crate::models::{Activity, ActivityParams, AuthSession};
 /// 3. **MCP** — run `dravr-sciotte-server --transport stdio` for Claude integration
 /// 4. **CLI** — run `dravr-sciotte-server login` / `activities` commands
 #[async_trait]
-pub trait StravaScraper: Send + Sync {
+pub trait ActivityScraper: Send + Sync {
     /// Open a visible browser so the user can log in to Strava manually.
     /// Waits for login to complete, captures session cookies, and returns
     /// an authenticated session. No API credentials required.

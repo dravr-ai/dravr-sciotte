@@ -11,7 +11,7 @@ use crate::protocol::{CallToolResult, ToolDefinition};
 use crate::state::SharedState;
 use crate::tools::McpTool;
 
-use dravr_sciotte::StravaScraper;
+use dravr_sciotte::ActivityScraper;
 
 /// Check authentication status
 pub struct AuthStatusTool;

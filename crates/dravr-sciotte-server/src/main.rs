@@ -14,7 +14,7 @@ use dravr_sciotte::cache::CachedScraper;
 use dravr_sciotte::config::CacheConfig;
 use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::scraper::ChromeScraper;
-use dravr_sciotte::StravaScraper;
+use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::transport::stdio::StdioTransport;
 use dravr_sciotte_mcp::transport::McpTransport;
 use dravr_sciotte_mcp::{build_tool_registry, McpServer, ServerState};
