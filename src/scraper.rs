@@ -674,6 +674,13 @@ fn merge_detail_into_activity(activity: &mut Activity, detail: &serde_json::Valu
         &["W", "w"],
     );
 
+    // Max speed from embedded JSON (m/s as string)
+    if activity.max_speed.is_none() {
+        activity.max_speed = detail["max_speed"]
+            .as_str()
+            .and_then(|s| s.trim().parse().ok());
+    }
+
     merge_optional_string(&mut activity.pace, detail, "pace");
     merge_optional_string(&mut activity.gap, detail, "gap");
     merge_optional_string(&mut activity.weather, detail, "weather");
