@@ -1,42 +1,75 @@
-# dravr-sciotte
+# Sciotte — Sport Activity Scraper
 
-Sport activity scraper with headless Chrome, TOML-configurable providers, and in-memory caching.
+[![crates.io](https://img.shields.io/crates/v/dravr-sciotte.svg)](https://crates.io/crates/dravr-sciotte)
+[![docs.rs](https://docs.rs/dravr-sciotte/badge.svg)](https://docs.rs/dravr-sciotte)
+[![CI](https://github.com/dravr-ai/dravr-sciotte/actions/workflows/ci.yml/badge.svg)](https://github.com/dravr-ai/dravr-sciotte/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](LICENSE.md)
 
-Logs into sport platforms via a browser (no API credentials needed), scrapes training data from activity pages, and exposes it through four integration surfaces: Rust trait, REST API, MCP server, and CLI.
+Sport activity scraper with headless Chrome, TOML-configurable providers, and in-memory caching. Logs into sport platforms via a browser (no API credentials needed), scrapes training data from activity pages, and exposes it through four integration surfaces: Rust trait, REST API, MCP server, and CLI.
+
+## Table of Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [REST API Server](#rest-api-server-dravr-sciotte-server)
+- [MCP Server](#mcp-server-dravr-sciotte-mcp)
+- [Library Usage](#library-usage-rust-trait)
+- [Provider Configuration](#provider-configuration)
+- [Activity Data Model](#activity-data-model)
+- [Docker](#docker)
+- [Architecture](#architecture)
+- [License](#license)
 
 ## Install
 
-### Homebrew
+### Homebrew (macOS / Linux) — recommended
 
-```sh
+```bash
 brew tap dravr-ai/tap
 brew install dravr-sciotte
 ```
 
-### Cargo
+This installs two binaries:
 
-```sh
-cargo install dravr-sciotte-server dravr-sciotte-mcp
+- **`dravr-sciotte-server`** — REST API + MCP server + CLI (start with `dravr-sciotte-server serve`)
+- **`dravr-sciotte-mcp`** — standalone MCP server for editor integration
+
+Once installed, login and scrape:
+
+```bash
+dravr-sciotte-server login
+dravr-sciotte-server activities --limit 20
 ```
 
 ### Docker
 
-```sh
+```bash
 docker pull ghcr.io/dravr-ai/dravr-sciotte:latest
 docker run -p 3000:3000 ghcr.io/dravr-ai/dravr-sciotte
+```
+
+### Cargo (library)
+
+```toml
+[dependencies]
+dravr-sciotte = "0.1"
 ```
 
 ## Quick Start
 
 ```bash
-# Login (opens a browser — log in to your account)
+# Login (opens a browser — log in to your account, no API keys needed)
 dravr-sciotte-server login
 
-# List activities (fast, from the training page)
-dravr-sciotte-server activities --limit 20
+# List activities (fast, from the training page — paginated)
+dravr-sciotte-server activities --limit 50
 
 # List with full detail (navigates each activity page for HR, cadence, weather, device, etc.)
 dravr-sciotte-server activities --limit 5 --detail --format json
+
+# Auto-login + fetch in one command
+dravr-sciotte-server activities --login --limit 10
 
 # Start REST + MCP server
 dravr-sciotte-server serve --port 3000
@@ -47,149 +80,113 @@ dravr-sciotte-server --transport stdio
 
 ## How It Works
 
-1. **Browser login** — opens a visible Chrome window to the provider's login page. You log in normally. Session cookies are captured and encrypted at rest.
+1. **Browser login** — opens a visible Chrome window to the provider's login page. You log in normally. Session cookies are captured and encrypted at rest (AES-256-GCM).
 2. **List page scraping** — navigates to the training/activity list page in headless Chrome, extracts activity rows using CSS selectors defined in the provider TOML.
-3. **Detail enrichment** (opt-in via `--detail`) — navigates into each activity page and extracts full metrics using a JS snippet from the provider TOML.
-4. **Pagination** — automatically clicks the "next page" button to load more than the initial 20 activities.
+3. **Pagination** — automatically clicks the "next page" button to load more than the initial 20 activities.
+4. **Detail enrichment** (opt-in via `--detail`) — navigates into each activity page and extracts full metrics (HR, cadence, weather, device, gear) using a JS snippet from the provider TOML, including structured data from embedded JSON.
 5. **Caching** — results are cached in-memory with configurable TTL (default 15 min).
 
-## MCP Server Configuration
+## REST API Server (`dravr-sciotte-server`)
 
-### Claude Desktop
+A unified HTTP server with built-in MCP support that serves scraped activity data. Supports `--transport stdio` for MCP-only mode (editor integration).
 
-Add to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "dravr-sciotte": {
-      "command": "dravr-sciotte-mcp"
-    }
-  }
-}
-```
-
-### Claude Code
-
-Add to your Claude Code MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "dravr-sciotte": {
-      "command": "dravr-sciotte-mcp"
-    }
-  }
-}
-```
-
-### MCP over HTTP
-
-Start the server and use the `/mcp` endpoint:
+### Usage
 
 ```bash
-dravr-sciotte-server serve --port 3000
-```
+# Start on localhost:3000
+dravr-sciotte-server serve
 
-```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
+# Specify port and host
+dravr-sciotte-server serve --port 8080 --host 0.0.0.0
 
-### MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `auth_status` | Check session status |
-| `browser_login` | Open browser for login |
-| `get_activities` | Scrape activity list |
-| `get_activity` | Scrape single activity detail |
-| `cache_status` | Cache hit/miss stats |
-| `cache_clear` | Clear cached data |
-
-## REST API
-
-Start the server:
-
-```bash
-dravr-sciotte-server serve --port 3000
+# MCP-only mode via stdio (for editor/client integration)
+dravr-sciotte-server --transport stdio
 ```
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/auth/login` | Trigger browser login |
-| GET | `/auth/status` | Check authentication |
-| GET | `/api/activities?limit=20` | List activities |
-| GET | `/api/activities/{id}` | Activity detail |
-| GET | `/health` | Health check |
-| POST | `/mcp` | MCP HTTP transport |
+| `POST` | `/auth/login` | Trigger browser login |
+| `GET` | `/auth/status` | Check authentication |
+| `GET` | `/api/activities?limit=20` | List scraped activities |
+| `GET` | `/api/activities/{id}` | Single activity detail |
+| `GET` | `/health` | Health check with cache stats |
+| `POST` | `/mcp` | MCP Streamable HTTP (JSON-RPC 2.0) |
+
+### MCP Streamable HTTP
+
+The server also speaks [MCP](https://modelcontextprotocol.io/) at `POST /mcp`, accepting JSON-RPC 2.0 requests. Any MCP-compatible client can connect over HTTP instead of stdio.
+
+```bash
+# MCP initialize handshake
+curl http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl"}}}'
+
+# List available tools
+curl http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+Add `Accept: text/event-stream` to receive SSE-wrapped responses instead of plain JSON.
 
 ### Authentication
 
-Set `DRAVR_SCIOTTE_API_KEY` to require a bearer token for REST endpoints:
+Optional. Set `DRAVR_SCIOTTE_API_KEY` to require bearer token auth on all endpoints. When unset, all requests are allowed through (localhost development mode).
 
 ```bash
-export DRAVR_SCIOTTE_API_KEY="your-secret-key"
+DRAVR_SCIOTTE_API_KEY=my-secret dravr-sciotte-server serve
+curl http://localhost:3000/api/activities -H "Authorization: Bearer my-secret"
 ```
+
+## MCP Server (`dravr-sciotte-mcp`)
+
+A library and standalone binary that exposes the activity scraper via the [Model Context Protocol](https://modelcontextprotocol.io/). Connect any MCP-compatible client (Claude Desktop, Claude Code, editors, custom agents) to scrape sport activities.
+
+### Usage
 
 ```bash
-curl -H "Authorization: Bearer your-secret-key" http://localhost:3000/api/activities
+# Stdio transport (default — for editor/client integration)
+dravr-sciotte-mcp
+
+# HTTP transport (for network-accessible deployments)
+dravr-sciotte-mcp --transport http --host 0.0.0.0 --port 3000
 ```
 
-### Example Response
+### MCP Tools
 
-```bash
-curl http://localhost:3000/api/activities?limit=1
-```
+| Tool | Description |
+|------|-------------|
+| `auth_status` | Check if the session is authenticated and valid |
+| `browser_login` | Open a browser window for the user to log in (no API keys needed) |
+| `get_activities` | Scrape activities from the training page |
+| `get_activity` | Scrape detailed data for a single activity by ID |
+| `cache_status` | Get cache hit/miss statistics and entry counts |
+| `cache_clear` | Clear all cached activity data |
+
+### Client Configuration
+
+Add to your MCP client config (e.g. Claude Desktop `claude_desktop_config.json`):
 
 ```json
 {
-  "count": 1,
-  "activities": [
-    {
-      "id": "17766351832",
-      "name": "Morning Trail Run",
-      "sport_type": "trail_running",
-      "start_date": "2026-03-18T00:00:00Z",
-      "duration_seconds": 3137,
-      "distance_meters": 7560.0,
-      "elevation_gain": 178.0,
-      "average_heart_rate": 128,
-      "max_heart_rate": 158,
-      "calories": 600,
-      "temperature": -18.0,
-      "weather": "Clear",
-      "device_name": "Garmin fēnix 6S Pro",
-      "gear_name": "Salomon Spikecross (224.2 km)",
-      "provider": "scraper"
+  "mcpServers": {
+    "dravr-sciotte": {
+      "command": "dravr-sciotte-mcp"
     }
-  ]
+  }
 }
 ```
 
-## CLI
-
-```bash
-dravr-sciotte-server login                                    # Browser login
-dravr-sciotte-server activities --limit 50                    # List activities (paginated)
-dravr-sciotte-server activities --limit 5 --detail            # Full metrics per activity
-dravr-sciotte-server activities --detail --format json        # JSON output
-dravr-sciotte-server activities --login --limit 10            # Force re-login + fetch
-dravr-sciotte-server auth-status                              # Check session
-dravr-sciotte-server serve --port 3000                        # Start REST + MCP server
-dravr-sciotte-server --transport stdio                        # MCP stdio for Claude
-```
+For Claude Code, add the same configuration to your MCP settings.
 
 ## Library Usage (Rust Trait)
 
-Add to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-dravr-sciotte = { version = "0.1" }
+dravr-sciotte = "0.1"
 ```
 
 ```rust
@@ -197,22 +194,30 @@ use dravr_sciotte::{ChromeScraper, CachedScraper, ActivityScraper};
 use dravr_sciotte::config::CacheConfig;
 use dravr_sciotte::models::ActivityParams;
 
-let scraper = ChromeScraper::default_config();
-let cached = CachedScraper::new(scraper, &CacheConfig::default());
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let scraper = ChromeScraper::default_config();
+    let cached = CachedScraper::new(scraper, &CacheConfig::default());
 
-// Browser login (opens Chrome, user logs in, cookies captured)
-let session = cached.browser_login().await?;
+    // Browser login (opens Chrome, user logs in, cookies captured)
+    let session = cached.browser_login().await?;
 
-// Scrape activities
-let params = ActivityParams { limit: Some(20), ..Default::default() };
-let activities = cached.get_activities(&session, &params).await?;
+    // Scrape activities
+    let params = ActivityParams { limit: Some(20), ..Default::default() };
+    let activities = cached.get_activities(&session, &params).await?;
+
+    for activity in &activities {
+        println!("{}: {} ({})", activity.id, activity.name, activity.sport_type);
+    }
+    Ok(())
+}
 ```
+
+All scraping is driven by a TOML provider config. The `ActivityScraper` trait can be wrapped by platform crates (e.g. `pierre-scraper`) with error bridging, following the same pattern as embacle's `LlmProvider`.
 
 ## Provider Configuration
 
 Scraping rules are defined in TOML files under `providers/`. The default provider is Strava (`providers/strava.toml`), compiled into the binary.
-
-### Example: Strava (`providers/strava.toml`)
 
 ```toml
 [provider]
@@ -239,9 +244,7 @@ suffer_score = "td.col-suffer-score"
 [detail_page]
 url_template = "https://www.strava.com/activities/{id}"
 js_extract = '''
-(function() {
-    // ... JS that extracts activity data and returns JSON ...
-})()
+(function() { /* JS that extracts all activity data and returns JSON */ })()
 '''
 ```
 
@@ -265,40 +268,64 @@ Activities scraped from detail pages include:
 | Location | city, region, country |
 | Other | perceived_exertion, sport_type_detail, workout_type |
 
+## Docker
+
+Pull the image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/dravr-ai/dravr-sciotte:latest
+```
+
+The image includes `dravr-sciotte-server`, `dravr-sciotte-mcp`, and Chromium for headless scraping.
+
+```bash
+# Start the REST + MCP server
+docker run -p 3000:3000 ghcr.io/dravr-ai/dravr-sciotte
+
+# Mount session directory for persistent login
+docker run -p 3000:3000 \
+  -v ~/.config/dravr-sciotte:/home/dravr/.config/dravr-sciotte \
+  ghcr.io/dravr-ai/dravr-sciotte
+
+# Run the MCP server
+docker run --entrypoint dravr-sciotte-mcp ghcr.io/dravr-ai/dravr-sciotte
+```
+
 ## Architecture
 
 ```
-dravr-sciotte/
-├── providers/strava.toml          # Provider config (selectors, JS, URLs)
-├── src/                           # Core library
-│   ├── provider.rs                # TOML config loading and JS generation
-│   ├── scraper.rs                 # Chrome-based scraping engine
-│   ├── models.rs                  # Activity data model
-│   ├── cache.rs                   # In-memory TTL cache
-│   ├── auth.rs                    # Session encryption/persistence
-│   └── types.rs                   # ActivityScraper trait
-├── crates/dravr-sciotte-mcp/      # MCP server (stdio + HTTP)
-└── crates/dravr-sciotte-server/   # REST API + CLI
+Your Application
+    └── dravr-sciotte (this library)
+            │
+            ├── Provider Config (TOML-driven)
+            │   └── providers/strava.toml → login URLs, CSS selectors, JS extraction
+            │
+            ├── Chrome Scraper (chromiumoxide CDP)
+            │   ├── browser_login()     → visible Chrome, user logs in, cookies captured
+            │   ├── get_activities()    → headless Chrome, list page + pagination
+            │   └── get_activity()      → headless Chrome, detail page JS extraction
+            │
+            ├── Cache Layer (moka TTL cache)
+            │   └── CachedScraper      → wraps ActivityScraper with in-memory TTL cache
+            │
+            ├── Auth Persistence (AES-256-GCM)
+            │   └── ~/.config/dravr-sciotte/session.enc
+            │
+            ├── MCP Server (library + binary crate)
+            │   └── dravr-sciotte-mcp  → JSON-RPC 2.0 over stdio or HTTP/SSE
+            │
+            └── Unified REST API + MCP + CLI (binary crate)
+                └── dravr-sciotte-server → REST endpoints, MCP HTTP, CLI commands
 ```
 
-## Workspace Crates
+The core `ActivityScraper` trait:
+- **`browser_login()`** — open browser, capture session
+- **`get_activities()`** — scrape activity list with pagination
+- **`get_activity()`** — scrape single activity detail
+- **`is_authenticated()`** — check session validity
 
-| Crate | Description |
-|-------|-------------|
-| `dravr-sciotte` | Core library — trait, models, scraping engine, cache, auth |
-| `dravr-sciotte-mcp` | MCP server (stdio + HTTP/SSE) with 6 tools |
-| `dravr-sciotte-server` | Unified REST API + MCP HTTP + CLI binary |
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CHROME_PATH` | Path to Chrome/Chromium binary | auto-detect |
-| `DRAVR_SCIOTTE_API_KEY` | Bearer token for REST auth | none (open) |
-| `DRAVR_SCIOTTE_CACHE_TTL` | Cache TTL in seconds | 900 (15 min) |
-| `DRAVR_SCIOTTE_CACHE_MAX` | Max cache entries | 100 |
-| `DRAVR_SCIOTTE_SESSION_DIR` | Session storage directory | `~/.config/dravr-sciotte/` |
+For detailed API docs see [docs.rs/dravr-sciotte](https://docs.rs/dravr-sciotte).
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under MIT OR Apache-2.0.
