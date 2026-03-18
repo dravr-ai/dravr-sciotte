@@ -185,16 +185,15 @@ impl ActivityScraper for ChromeScraper {
         let target_count = params.limit.unwrap_or(20) as usize;
         let js = self.provider.list_extraction_js();
 
-        // Paginate the training page: the page shows ~20 activities at a time.
-        // We scroll to load more rows until we have enough or no new rows appear.
+        // Paginate the training page: it shows ~20 activities per page with a "next" button.
+        // We extract each page and click next until we have enough activities.
         let mut all_items: Vec<serde_json::Value> = Vec::new();
-        let mut previous_count = 0;
 
         loop {
             match extract_via_js(&page, &js).await {
                 Ok(items) => {
-                    all_items = items;
-                    debug!(count = all_items.len(), "Activities found on page");
+                    debug!(count = items.len(), "Activities found on current page");
+                    all_items.extend(items);
                 }
                 Err(e) => {
                     warn!(error = %e, "List page JS extraction failed");
@@ -202,24 +201,39 @@ impl ActivityScraper for ChromeScraper {
                 }
             }
 
-            // Stop if we have enough or no new rows loaded
-            if all_items.len() >= target_count || all_items.len() == previous_count {
+            if all_items.len() >= target_count {
                 break;
             }
 
-            previous_count = all_items.len();
+            // Click the "next page" button if it exists
+            let has_next = page
+                .evaluate(
+                    r#"(function() {
+                        var btn = document.querySelector("button.next_page");
+                        if (btn && !btn.disabled) { btn.click(); return true; }
+                        return false;
+                    })()"#,
+                )
+                .await
+                .ok()
+                .and_then(|r| r.value().and_then(serde_json::Value::as_bool))
+                .unwrap_or(false);
 
-            // Scroll down to trigger loading more activities
-            let scroll_result = page
-                .evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                .await;
-            if scroll_result.is_err() {
+            if !has_next {
+                debug!("No more pages available");
                 break;
             }
 
-            tokio::time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 2)).await;
+            info!(
+                collected = all_items.len(),
+                target = target_count,
+                "Loading next page of activities"
+            );
+            tokio::time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 3)).await;
         }
 
+        // Truncate to target and deduplicate by ID
+        deduplicate_by_id(&mut all_items);
         let mut activities = parse_js_activity_items(&all_items);
         apply_activity_filters(&mut activities, params);
 
@@ -759,6 +773,16 @@ fn merge_optional_string(field: &mut Option<String>, data: &serde_json::Value, k
         return;
     }
     *field = data[key].as_str().map(String::from);
+}
+
+/// Remove duplicate activity items by ID, preserving first occurrence
+fn deduplicate_by_id(items: &mut Vec<serde_json::Value>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| {
+        item["id"]
+            .as_str()
+            .is_some_and(|id| seen.insert(id.to_owned()))
+    });
 }
 
 /// Apply sport type and limit filters to an activity list
