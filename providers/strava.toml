@@ -1,0 +1,141 @@
+# Provider configuration for Strava (www.strava.com)
+# Defines login flow, list page selectors, and detail page JS extraction
+
+[provider]
+name = "strava"
+login_url = "https://www.strava.com/login"
+login_success_patterns = ["/dashboard", "/athlete", "/onboarding", "strava.com/feed"]
+login_failure_patterns = ["/login", "/session", "/oauth"]
+
+[list_page]
+url = "https://www.strava.com/athlete/training"
+row_selector = "tr.training-activity-row"
+link_selector = 'a[data-field-name="name"]'
+id_regex = '/\/activities\/(\d+)/'
+
+[list_page.fields]
+name = 'a[data-field-name="name"]'
+sport_type = 'td[data-field-name="sport_type"]'
+date = "td.col-date"
+time = 'td[data-field-name="time"]'
+distance = "td.col-dist"
+elevation = "td.col-elev"
+suffer_score = "td.col-suffer-score"
+
+[detail_page]
+url_template = "https://www.strava.com/activities/{id}"
+js_extract = '''
+(function() {
+    const data = {};
+
+    // Activity name from h2 or second heading
+    const headings = document.querySelectorAll('h1, h2');
+    headings.forEach(function(h) {
+        const text = h.textContent.trim();
+        if (text.includes('\u2013') || text.includes('-')) {
+            // h1 format: "Athlete Name \u2013 Trail Run" or "Athlete Name - Trail Run"
+            const sep = text.includes('\u2013') ? '\u2013' : '-';
+            data.type = text.split(sep).pop().trim();
+        } else if (!data.name && !text.includes('Recent') && !text.includes('Strava')) {
+            data.name = text;
+        }
+    });
+
+    // Primary inline stats: Distance, Moving Time, Pace, Relative Effort, Speed, HR, Power, Cadence
+    document.querySelectorAll('ul.inline-stats li').forEach(function(li) {
+        const text = li.textContent.trim();
+        if (text.includes('Distance')) {
+            data.distance = text.replace('Distance', '').trim();
+        } else if (text.includes('Moving Time') || text.includes('de d\u00e9placement')) {
+            data.moving_time = text.replace(/Moving Time|Dur\u00e9e de d\u00e9placement/i, '').trim();
+        } else if (text.includes('Pace') || text.includes('Allure')) {
+            data.pace = text.replace(/Pace|Allure/i, '').trim();
+        } else if (text.includes('Relative Effort') || text.includes('Effort relat')) {
+            data.relative_effort = text.replace(/Relative Effort|Effort relatif/i, '').trim();
+        } else if (text.includes('Speed') || text.includes('Vitesse')) {
+            data.avg_speed = text.replace(/Speed|Vitesse/i, '').trim();
+        } else if (text.includes('Avg HR') || text.includes('FC moy')) {
+            data.avg_hr = text.replace(/Avg HR|FC moy\.?/i, '').trim();
+        } else if (text.includes('Max HR') || text.includes('FC max')) {
+            data.max_hr = text.replace(/Max HR|FC max\.?/i, '').trim();
+        } else if (text.includes('Power') || text.includes('Puissance')) {
+            data.avg_power = text.replace(/Power|Puissance/i, '').trim();
+        } else if (text.includes('Cadence')) {
+            data.cadence = text.replace('Cadence', '').trim();
+        }
+    });
+
+    // Secondary stats: Elevation, Calories, Elapsed Time
+    const moreStats = document.querySelector('div.more-stats');
+    if (moreStats) {
+        const text = moreStats.textContent;
+        const elevMatch = text.match(/(?:Elevation|D\u00e9nivel\u00e9 positif)\s*([\d,.]+)\s*m/i);
+        if (elevMatch) data.elevation = elevMatch[1];
+        const calMatch = text.match(/(?:Calories|Calories)\s*([\d,.]+)/i);
+        if (calMatch) data.calories = calMatch[1];
+        const elapsedMatch = text.match(/(?:Elapsed Time|Temps \u00e9coul\u00e9)\s*([\d:]+)/i);
+        if (elapsedMatch) data.elapsed_time = elapsedMatch[1];
+    }
+
+    // Weather stats (English and French)
+    document.querySelectorAll('div.weather-stat').forEach(function(stat) {
+        const text = stat.textContent.trim();
+        if (/^(Clear|Cloudy|Overcast|Rain|Snow|D\u00e9gag|Nuageux|Couvert|Pluie|Neige)/i.test(text) && !text.includes('\u00b0')) {
+            data.weather = text;
+        } else if (/Temp\u00e9rature|Temperature/i.test(text)) {
+            data.temperature = text.replace(/Temp\u00e9rature|Temperature/i, '').trim();
+        } else if (/Humidit\u00e9|Humidity/i.test(text)) {
+            data.humidity = text.replace(/Humidit\u00e9|Humidity/i, '').trim();
+        } else if (/Ressenti|Feels like/i.test(text)) {
+            data.feels_like = text.replace(/Ressenti|Feels like/i, '').trim();
+        } else if (/Vitesse du vent|Wind Speed/i.test(text)) {
+            data.wind_speed = text.replace(/Vitesse du vent|Wind Speed/i, '').trim();
+        } else if (/Direction du vent|Wind Direction/i.test(text)) {
+            data.wind_direction = text.replace(/Direction du vent|Wind Direction/i, '').trim();
+        }
+    });
+
+    // Location from the date/location line
+    const timeEl = document.querySelector('time');
+    if (timeEl) {
+        const container = timeEl.closest('div') || timeEl.parentElement;
+        if (container) {
+            const fullText = container.textContent.trim();
+            const dashIdx = fullText.lastIndexOf(' - ');
+            if (dashIdx > 0) {
+                data.location = fullText.substring(dashIdx + 3).trim();
+            }
+        }
+    }
+
+    // Device name
+    const allText = document.body.textContent;
+    const devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS|Fitbit|Samsung)[^\n,]*/i);
+    if (devMatch) data.device = devMatch[0].trim();
+
+    // Gear/shoes
+    const gearMatch = allText.match(/(?:Chaussures|Shoes|V\u00e9lo|Bike):\s*([^\n]+)/i);
+    if (gearMatch) data.gear = gearMatch[1].trim();
+
+    // Perceived exertion
+    const peMatch = allText.match(/(?:Perceived Exertion|Effort ressenti)\s*:?\s*([\w\s\u00e9]+?)(?:\n|$)/i);
+    if (peMatch) data.perceived_exertion = peMatch[1].trim();
+
+    // Heart rate from body text if not found above
+    const statsText = document.querySelector('.activity-stats, .spans8')?.textContent || '';
+    if (!data.avg_hr) {
+        const hrMatch = statsText.match(/(\d+)\s*bpm/i);
+        if (hrMatch) data.avg_hr = hrMatch[1];
+    }
+    if (!data.cadence) {
+        const cadMatch = statsText.match(/(\d+)\s*(?:ppm|rpm|spm)/i);
+        if (cadMatch) data.cadence = cadMatch[1];
+    }
+
+    // GAP / VAP
+    const gapMatch = allText.match(/(?:VAP|GAP)\s+([\d:]+\s*\/km)/i);
+    if (gapMatch) data.gap = gapMatch[1].trim();
+
+    return JSON.stringify(data);
+})()
+'''

@@ -70,11 +70,11 @@ name = "dravr-sciotte"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Strava training data scraper with headless Chrome, OAuth, and in-memory caching"
+description = "Sport activity scraper with headless Chrome, TOML-configurable providers, and in-memory caching"
 repository = "https://github.com/dravr-ai/dravr-sciotte"
 homepage = "https://github.com/dravr-ai/dravr-sciotte"
 documentation = "https://docs.rs/dravr-sciotte"
-keywords = ["strava", "scraper", "fitness", "training", "headless-chrome"]
+keywords = ["scraper", "fitness", "training", "headless-chrome", "sport"]
 categories = ["web-programming::http-client", "command-line-utilities"]
 readme = "README.md"
 exclude = [".claude/", ".githooks/", ".github/", "scripts/"]
@@ -101,6 +101,7 @@ tokio = { version = "1.45", features = ["process", "io-util", "time", "rt", "mac
 tracing = "0.1"
 base64 = "0.22"
 dirs = "6"
+toml = "0.8"
 urlencoding = "2"
 
 [dev-dependencies]

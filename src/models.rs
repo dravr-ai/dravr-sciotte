@@ -58,45 +58,50 @@ pub enum SportType {
 }
 
 impl SportType {
-    /// Parse a Strava activity type string into a `SportType`
+    /// Parse a Strava activity type string into a `SportType`.
+    /// Handles both API identifiers and display names (with or without spaces)
+    /// as well as French labels ("Course à pied", "Ski de fond").
     #[must_use]
     pub fn from_strava(strava_type: &str) -> Self {
-        match strava_type {
-            "Run" => Self::Run,
-            "Ride" => Self::Ride,
-            "Swim" => Self::Swim,
-            "Walk" => Self::Walk,
-            "Hike" => Self::Hike,
-            "VirtualRide" => Self::VirtualRide,
-            "VirtualRun" => Self::VirtualRun,
-            "Workout" => Self::Workout,
+        match strava_type.trim() {
+            // API identifiers (camelCase)
+            "Run" | "Course à pied" => Self::Run,
+            "Ride" | "Sortie à vélo" => Self::Ride,
+            "Swim" | "Natation" => Self::Swim,
+            "Walk" | "Marche" => Self::Walk,
+            "Hike" | "Randonnée" => Self::Hike,
+            "VirtualRide" | "Virtual Ride" => Self::VirtualRide,
+            "VirtualRun" | "Virtual Run" => Self::VirtualRun,
+            "Workout" | "Exercice" => Self::Workout,
             "Yoga" => Self::Yoga,
-            "EBikeRide" => Self::EbikeRide,
-            "MountainBikeRide" => Self::MountainBike,
-            "GravelRide" => Self::GravelRide,
-            "CrossCountrySkiing" => Self::CrossCountrySkiing,
-            "AlpineSkiing" | "AlpineSki" => Self::AlpineSkiing,
+            "EBikeRide" | "E-Bike Ride" => Self::EbikeRide,
+            "MountainBikeRide" | "Mountain Bike Ride" => Self::MountainBike,
+            "GravelRide" | "Gravel Ride" => Self::GravelRide,
+            "CrossCountrySkiing" | "Cross-Country Skiing" | "Nordic Ski" | "Ski de fond" => {
+                Self::CrossCountrySkiing
+            }
+            "AlpineSkiing" | "AlpineSki" | "Alpine Ski" | "Ski alpin" => Self::AlpineSkiing,
             "Snowboarding" | "Snowboard" => Self::Snowboarding,
-            "Snowshoe" => Self::Snowshoe,
-            "IceSkate" => Self::IceSkating,
-            "BackcountrySki" => Self::BackcountrySkiing,
-            "Kayaking" => Self::Kayaking,
-            "Canoeing" => Self::Canoeing,
-            "Rowing" => Self::Rowing,
-            "StandUpPaddling" => Self::Paddleboarding,
-            "Surfing" => Self::Surfing,
-            "Kitesurf" => Self::Kitesurfing,
-            "WeightTraining" => Self::StrengthTraining,
-            "Crossfit" => Self::Crossfit,
+            "Snowshoe" | "Raquette" => Self::Snowshoe,
+            "IceSkate" | "Ice Skate" | "Ice Skating" | "Patin à glace" => Self::IceSkating,
+            "BackcountrySki" | "Backcountry Ski" | "Ski de randonnée" => Self::BackcountrySkiing,
+            "Kayaking" | "Kayak" => Self::Kayaking,
+            "Canoeing" | "Canot" | "Canoë" => Self::Canoeing,
+            "Rowing" | "Aviron" => Self::Rowing,
+            "StandUpPaddling" | "Stand Up Paddling" => Self::Paddleboarding,
+            "Surfing" | "Surf" => Self::Surfing,
+            "Kitesurf" | "Kitesurfing" => Self::Kitesurfing,
+            "WeightTraining" | "Weight Training" | "Musculation" => Self::StrengthTraining,
+            "Crossfit" | "CrossFit" => Self::Crossfit,
             "Pilates" => Self::Pilates,
-            "RockClimbing" => Self::RockClimbing,
-            "TrailRun" => Self::TrailRunning,
-            "Soccer" => Self::Soccer,
-            "Basketball" => Self::Basketball,
+            "RockClimbing" | "Rock Climbing" | "Escalade" => Self::RockClimbing,
+            "TrailRun" | "Trail Run" | "Trail" | "Course de trail" => Self::TrailRunning,
+            "Soccer" | "Football" => Self::Soccer,
+            "Basketball" | "Basket" => Self::Basketball,
             "Tennis" => Self::Tennis,
             "Golf" => Self::Golf,
-            "Skateboard" => Self::Skateboarding,
-            "InlineSkate" => Self::InlineSkating,
+            "Skateboard" | "Skateboarding" => Self::Skateboarding,
+            "InlineSkate" | "Inline Skate" | "Inline Skating" | "Roller" => Self::InlineSkating,
             other => Self::Other(other.to_owned()),
         }
     }
@@ -271,11 +276,57 @@ pub struct Activity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
 
+    // Environmental conditions
+    /// Temperature during activity (Celsius)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Feels-like temperature (Celsius)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feels_like: Option<f32>,
+    /// Humidity percentage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub humidity: Option<f32>,
+    /// Wind speed (km/h)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_speed: Option<f32>,
+    /// Wind direction (e.g., "NW", "SE")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wind_direction: Option<String>,
+    /// Weather condition (e.g., "Clear", "Cloudy")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weather: Option<String>,
+
+    // Pace
+    /// Average pace (e.g., "6:55 /km")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pace: Option<String>,
+    /// Grade Adjusted Pace (e.g., "6:25 /km")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap: Option<String>,
+
+    // Timing
+    /// Elapsed time in seconds (includes stopped time)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_time_seconds: Option<u64>,
+
+    // Device and gear
+    /// Recording device (e.g., "Garmin fēnix 6S Pro")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// Gear used (e.g., "Salomon Spikecross (224.2 km)")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gear_name: Option<String>,
+
+    // Perceived exertion
+    /// Perceived exertion level (e.g., "Moderate", "Hard")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub perceived_exertion: Option<String>,
+
     // Classification
     /// Workout type (0=default, 1=race, 2=long run, 3=workout)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workout_type: Option<u32>,
-    /// Detailed sport type from Strava (e.g., "`MountainBikeRide`", "`TrailRun`")
+    /// Detailed sport type from Strava (e.g., "Trail Run", "Nordic Ski")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sport_type_detail: Option<String>,
 
@@ -307,6 +358,9 @@ pub struct ActivityParams {
     /// Filter by sport type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sport_type: Option<String>,
+    /// Navigate into each activity detail page for full metrics (slower but richer data)
+    #[serde(default)]
+    pub enrich_details: bool,
 }
 
 // ============================================================================
@@ -400,6 +454,18 @@ mod tests {
             city: None,
             region: None,
             country: None,
+            temperature: None,
+            feels_like: None,
+            humidity: None,
+            wind_speed: None,
+            wind_direction: None,
+            weather: None,
+            pace: None,
+            gap: None,
+            elapsed_time_seconds: None,
+            device_name: None,
+            gear_name: None,
+            perceived_exertion: None,
             workout_type: None,
             sport_type_detail: None,
             segment_efforts: None,

@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dravr_sciotte::cache::CachedScraper;
-use dravr_sciotte::config::{CacheConfig, ScraperConfig};
+use dravr_sciotte::config::CacheConfig;
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte_mcp::transport::http::HttpTransport;
 use dravr_sciotte_mcp::transport::stdio::StdioTransport;
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let cli = Cli::parse();
 
-    let scraper = ChromeScraper::new(ScraperConfig::default());
+    let scraper = ChromeScraper::default_config();
     let cached = CachedScraper::new(scraper, &CacheConfig::default());
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
     let tools = build_tool_registry();
