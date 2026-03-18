@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte-mcp"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte-server"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
