@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dravr_sciotte::cache::CachedScraper;
-use dravr_sciotte::config::{CacheConfig, ScraperConfig};
+use dravr_sciotte::config::CacheConfig;
 use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::StravaScraper;
@@ -55,7 +55,7 @@ enum Command {
     },
     /// Login to Strava (opens a browser window)
     Login,
-    /// Scrape and display activities from Strava (auto-login if needed)
+    /// Scrape and display activities (auto-login if needed)
     Activities {
         /// Maximum number of activities
         #[arg(long, default_value = "20")]
@@ -69,6 +69,9 @@ enum Command {
         /// Force re-login even if a session exists
         #[arg(long)]
         login: bool,
+        /// Navigate into each activity detail page for full metrics (HR, cadence, weather, etc.)
+        #[arg(long)]
+        detail: bool,
     },
     /// Check authentication status
     AuthStatus,
@@ -96,7 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             sport_type,
             format,
             login,
-        }) => run_activities(limit, sport_type, format, login).await,
+            detail,
+        }) => run_activities(limit, sport_type, format, login, detail).await,
         Some(Command::AuthStatus) => run_auth_status().await,
         Some(Command::CacheClear) => {
             run_cache_clear();
@@ -116,7 +120,7 @@ async fn run_server(
     host: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::new(ScraperConfig::default());
+    let scraper = ChromeScraper::default_config();
     let cached = CachedScraper::new(scraper, &CacheConfig::default());
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
@@ -137,7 +141,7 @@ async fn run_server(
 }
 
 async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::new(ScraperConfig::default());
+    let scraper = ChromeScraper::default_config();
     let cached = CachedScraper::new(scraper, &CacheConfig::default());
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
@@ -151,7 +155,7 @@ async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 }
 
 async fn run_login() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::new(ScraperConfig::default());
+    let scraper = ChromeScraper::default_config();
 
     println!("Opening browser for Strava login...");
     println!("Log in to Strava in the browser window that opens.");
@@ -172,8 +176,9 @@ async fn run_activities(
     sport_type: Option<String>,
     format: String,
     force_login: bool,
+    detail: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::new(ScraperConfig::default());
+    let scraper = ChromeScraper::default_config();
     let cached = CachedScraper::new(scraper, &CacheConfig::default());
 
     let session = if force_login {
@@ -195,6 +200,7 @@ async fn run_activities(
     let params = ActivityParams {
         limit: Some(limit),
         sport_type,
+        enrich_details: detail,
         ..Default::default()
     };
 

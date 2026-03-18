@@ -1,4 +1,4 @@
-# ABOUTME: Multi-stage Docker build for dravr-sciotte-server and dravr-sciotte-mcp binaries
+# ABOUTME: Multi-stage Docker build for sport activity scraper server and MCP binaries
 # ABOUTME: Runtime uses debian:bookworm-slim with Chromium for headless scraping
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0

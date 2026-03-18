@@ -9,9 +9,9 @@ name = "dravr-sciotte-mcp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "MCP server for dravr-sciotte — expose Strava scraping via Model Context Protocol"
+description = "MCP server for dravr-sciotte — expose sport activity scraping via Model Context Protocol"
 repository = "https://github.com/dravr-ai/dravr-sciotte"
-keywords = ["mcp", "strava", "scraper", "fitness", "training"]
+keywords = ["mcp", "scraper", "fitness", "training", "sport"]
 categories = ["web-programming::http-server"]
 readme = "../../README.md"
 

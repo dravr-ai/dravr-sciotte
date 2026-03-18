@@ -1,5 +1,5 @@
-// ABOUTME: Strava training data scraper with headless Chrome, OAuth, and in-memory caching
-// ABOUTME: Trait-based architecture with REST, MCP, and CLI integration surfaces
+// ABOUTME: Sport activity scraper with headless Chrome, browser login, and in-memory caching
+// ABOUTME: TOML-configurable providers (Strava, etc.) with REST, MCP, and CLI integration
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -8,8 +8,9 @@
 
 //! # dravr-sciotte
 //!
-//! A Strava training data scraper that authenticates via OAuth and uses headless
-//! Chrome to scrape activity data from `https://www.strava.com/athlete/training`.
+//! A sport activity scraper that uses headless Chrome to scrape training data
+//! from sport platforms. Provider configurations (URLs, selectors, JS extraction)
+//! are defined in TOML files, making it easy to add new providers.
 //!
 //! ## Integration Modes
 //!
@@ -49,7 +50,10 @@ pub mod types;
 /// OAuth flow helpers and encrypted session persistence
 pub mod auth;
 
-/// Chromiumoxide-based Strava scraper implementation
+/// TOML-based provider configuration (selectors, URLs, JS extraction rules)
+pub mod provider;
+
+/// Chromiumoxide-based scraper implementation driven by provider config
 pub mod scraper;
 
 /// In-memory TTL cache layer

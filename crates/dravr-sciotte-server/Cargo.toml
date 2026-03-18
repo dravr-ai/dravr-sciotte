@@ -9,9 +9,9 @@ name = "dravr-sciotte-server"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Unified REST API + MCP server + CLI for Strava training data scraping"
+description = "Unified REST API + MCP server + CLI for sport activity scraping"
 repository = "https://github.com/dravr-ai/dravr-sciotte"
-keywords = ["strava", "rest", "mcp", "scraper", "server"]
+keywords = ["sport", "rest", "mcp", "scraper", "server"]
 categories = ["web-programming::http-server"]
 readme = "../../README.md"
 
