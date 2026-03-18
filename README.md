@@ -4,6 +4,28 @@ Sport activity scraper with headless Chrome, TOML-configurable providers, and in
 
 Logs into sport platforms via a browser (no API credentials needed), scrapes training data from activity pages, and exposes it through four integration surfaces: Rust trait, REST API, MCP server, and CLI.
 
+## Install
+
+### Homebrew
+
+```sh
+brew tap dravr-ai/tap
+brew install dravr-sciotte
+```
+
+### Cargo
+
+```sh
+cargo install dravr-sciotte-server dravr-sciotte-mcp
+```
+
+### Docker
+
+```sh
+docker pull ghcr.io/dravr-ai/dravr-sciotte:latest
+docker run -p 3000:3000 ghcr.io/dravr-ai/dravr-sciotte
+```
+
 ## Quick Start
 
 ```bash
@@ -28,7 +50,163 @@ dravr-sciotte-server --transport stdio
 1. **Browser login** — opens a visible Chrome window to the provider's login page. You log in normally. Session cookies are captured and encrypted at rest.
 2. **List page scraping** — navigates to the training/activity list page in headless Chrome, extracts activity rows using CSS selectors defined in the provider TOML.
 3. **Detail enrichment** (opt-in via `--detail`) — navigates into each activity page and extracts full metrics using a JS snippet from the provider TOML.
-4. **Caching** — results are cached in-memory with configurable TTL (default 15 min).
+4. **Pagination** — automatically clicks the "next page" button to load more than the initial 20 activities.
+5. **Caching** — results are cached in-memory with configurable TTL (default 15 min).
+
+## MCP Server Configuration
+
+### Claude Desktop
+
+Add to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "dravr-sciotte": {
+      "command": "dravr-sciotte-mcp"
+    }
+  }
+}
+```
+
+### Claude Code
+
+Add to your Claude Code MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "dravr-sciotte": {
+      "command": "dravr-sciotte-mcp"
+    }
+  }
+}
+```
+
+### MCP over HTTP
+
+Start the server and use the `/mcp` endpoint:
+
+```bash
+dravr-sciotte-server serve --port 3000
+```
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `auth_status` | Check session status |
+| `browser_login` | Open browser for login |
+| `get_activities` | Scrape activity list |
+| `get_activity` | Scrape single activity detail |
+| `cache_status` | Cache hit/miss stats |
+| `cache_clear` | Clear cached data |
+
+## REST API
+
+Start the server:
+
+```bash
+dravr-sciotte-server serve --port 3000
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/auth/login` | Trigger browser login |
+| GET | `/auth/status` | Check authentication |
+| GET | `/api/activities?limit=20` | List activities |
+| GET | `/api/activities/{id}` | Activity detail |
+| GET | `/health` | Health check |
+| POST | `/mcp` | MCP HTTP transport |
+
+### Authentication
+
+Set `DRAVR_SCIOTTE_API_KEY` to require a bearer token for REST endpoints:
+
+```bash
+export DRAVR_SCIOTTE_API_KEY="your-secret-key"
+```
+
+```bash
+curl -H "Authorization: Bearer your-secret-key" http://localhost:3000/api/activities
+```
+
+### Example Response
+
+```bash
+curl http://localhost:3000/api/activities?limit=1
+```
+
+```json
+{
+  "count": 1,
+  "activities": [
+    {
+      "id": "17766351832",
+      "name": "Morning Trail Run",
+      "sport_type": "trail_running",
+      "start_date": "2026-03-18T00:00:00Z",
+      "duration_seconds": 3137,
+      "distance_meters": 7560.0,
+      "elevation_gain": 178.0,
+      "average_heart_rate": 128,
+      "max_heart_rate": 158,
+      "calories": 600,
+      "temperature": -18.0,
+      "weather": "Clear",
+      "device_name": "Garmin fēnix 6S Pro",
+      "gear_name": "Salomon Spikecross (224.2 km)",
+      "provider": "scraper"
+    }
+  ]
+}
+```
+
+## CLI
+
+```bash
+dravr-sciotte-server login                                    # Browser login
+dravr-sciotte-server activities --limit 50                    # List activities (paginated)
+dravr-sciotte-server activities --limit 5 --detail            # Full metrics per activity
+dravr-sciotte-server activities --detail --format json        # JSON output
+dravr-sciotte-server activities --login --limit 10            # Force re-login + fetch
+dravr-sciotte-server auth-status                              # Check session
+dravr-sciotte-server serve --port 3000                        # Start REST + MCP server
+dravr-sciotte-server --transport stdio                        # MCP stdio for Claude
+```
+
+## Library Usage (Rust Trait)
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+dravr-sciotte = { version = "0.1" }
+```
+
+```rust
+use dravr_sciotte::{ChromeScraper, CachedScraper, ActivityScraper};
+use dravr_sciotte::config::CacheConfig;
+use dravr_sciotte::models::ActivityParams;
+
+let scraper = ChromeScraper::default_config();
+let cached = CachedScraper::new(scraper, &CacheConfig::default());
+
+// Browser login (opens Chrome, user logs in, cookies captured)
+let session = cached.browser_login().await?;
+
+// Scrape activities
+let params = ActivityParams { limit: Some(20), ..Default::default() };
+let activities = cached.get_activities(&session, &params).await?;
+```
 
 ## Provider Configuration
 
@@ -69,55 +247,6 @@ js_extract = '''
 
 To add a new provider, create a TOML file with the same structure and load it via `ProviderConfig::from_file()`.
 
-## Integration Modes
-
-### CLI
-
-```bash
-dravr-sciotte-server login                          # Browser login
-dravr-sciotte-server activities --limit 10          # List activities
-dravr-sciotte-server activities --detail --format json  # Full detail as JSON
-dravr-sciotte-server auth-status                    # Check session
-dravr-sciotte-server serve --port 3000              # Start REST server
-```
-
-### REST API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/auth/login` | Trigger browser login |
-| GET | `/auth/status` | Check authentication |
-| GET | `/api/activities?limit=20` | List activities |
-| GET | `/api/activities/{id}` | Activity detail |
-| GET | `/health` | Health check |
-| POST | `/mcp` | MCP HTTP transport |
-
-### MCP (Model Context Protocol)
-
-6 tools available via stdio or HTTP transport:
-
-| Tool | Description |
-|------|-------------|
-| `auth_status` | Check session status |
-| `browser_login` | Open browser for login |
-| `get_activities` | Scrape activity list |
-| `get_activity` | Scrape single activity detail |
-| `cache_status` | Cache hit/miss stats |
-| `cache_clear` | Clear cached data |
-
-### Rust Trait
-
-```rust
-use dravr_sciotte::{ChromeScraper, CachedScraper, ActivityScraper};
-use dravr_sciotte::config::CacheConfig;
-
-let scraper = ChromeScraper::default_config();
-let cached = CachedScraper::new(scraper, &CacheConfig::default());
-
-let session = cached.browser_login().await?;
-let activities = cached.get_activities(&session, &params).await?;
-```
-
 ## Activity Data Model
 
 Activities scraped from detail pages include:
@@ -151,6 +280,14 @@ dravr-sciotte/
 ├── crates/dravr-sciotte-mcp/      # MCP server (stdio + HTTP)
 └── crates/dravr-sciotte-server/   # REST API + CLI
 ```
+
+## Workspace Crates
+
+| Crate | Description |
+|-------|-------------|
+| `dravr-sciotte` | Core library — trait, models, scraping engine, cache, auth |
+| `dravr-sciotte-mcp` | MCP server (stdio + HTTP/SSE) with 6 tools |
+| `dravr-sciotte-server` | Unified REST API + MCP HTTP + CLI binary |
 
 ## Environment Variables
 
