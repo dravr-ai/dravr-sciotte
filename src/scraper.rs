@@ -1,5 +1,5 @@
 // ABOUTME: Chromiumoxide-based sport activity scraper driven by TOML provider configs
-// ABOUTME: Implements StravaScraper trait using headless Chrome via CDP with configurable selectors
+// ABOUTME: Implements ActivityScraper trait using headless Chrome via CDP with configurable selectors
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -19,7 +19,7 @@ use crate::config::ScraperConfig;
 use crate::error::{ScraperError, ScraperResult};
 use crate::models::{Activity, ActivityParams, AuthSession, CookieData, SportType};
 use crate::provider::ProviderConfig;
-use crate::types::StravaScraper;
+use crate::types::ActivityScraper;
 
 const LOGIN_POLL_INTERVAL_MS: u64 = 500;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
@@ -123,7 +123,7 @@ impl ChromeScraper {
 }
 
 #[async_trait]
-impl StravaScraper for ChromeScraper {
+impl ActivityScraper for ChromeScraper {
     async fn browser_login(&self) -> ScraperResult<AuthSession> {
         info!(
             provider = %self.provider.provider.name,

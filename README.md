@@ -108,7 +108,7 @@ dravr-sciotte-server serve --port 3000              # Start REST server
 ### Rust Trait
 
 ```rust
-use dravr_sciotte::{ChromeScraper, CachedScraper, StravaScraper};
+use dravr_sciotte::{ChromeScraper, CachedScraper, ActivityScraper};
 use dravr_sciotte::config::CacheConfig;
 
 let scraper = ChromeScraper::default_config();
@@ -147,7 +147,7 @@ dravr-sciotte/
 │   ├── models.rs                  # Activity data model
 │   ├── cache.rs                   # In-memory TTL cache
 │   ├── auth.rs                    # Session encryption/persistence
-│   └── types.rs                   # StravaScraper trait
+│   └── types.rs                   # ActivityScraper trait
 ├── crates/dravr-sciotte-mcp/      # MCP server (stdio + HTTP)
 └── crates/dravr-sciotte-server/   # REST API + CLI
 ```

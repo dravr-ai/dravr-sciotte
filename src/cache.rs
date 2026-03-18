@@ -1,4 +1,4 @@
-// ABOUTME: In-memory TTL cache wrapping StravaScraper for activity data
+// ABOUTME: In-memory TTL cache wrapping ActivityScraper for activity data
 // ABOUTME: Uses moka concurrent cache with configurable TTL and max entries
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -15,7 +15,7 @@ use tracing::{debug, info};
 use crate::config::CacheConfig;
 use crate::error::ScraperResult;
 use crate::models::{Activity, ActivityParams, AuthSession};
-use crate::types::StravaScraper;
+use crate::types::ActivityScraper;
 
 /// Cache key combining session identity and query parameters
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -43,7 +43,7 @@ impl CacheKey {
     }
 }
 
-/// Cached wrapper around any `StravaScraper` implementation
+/// Cached wrapper around any `ActivityScraper` implementation
 pub struct CachedScraper<S> {
     inner: S,
     activity_cache: Cache<CacheKey, Vec<Activity>>,
@@ -52,7 +52,7 @@ pub struct CachedScraper<S> {
     misses: AtomicU64,
 }
 
-impl<S: StravaScraper> CachedScraper<S> {
+impl<S: ActivityScraper> CachedScraper<S> {
     /// Wrap a scraper with an in-memory TTL cache
     pub fn new(inner: S, config: &CacheConfig) -> Self {
         let ttl = Duration::from_secs(config.ttl_secs);
@@ -96,7 +96,7 @@ impl<S: StravaScraper> CachedScraper<S> {
 }
 
 #[async_trait]
-impl<S: StravaScraper> StravaScraper for CachedScraper<S> {
+impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
     async fn browser_login(&self) -> ScraperResult<AuthSession> {
         self.inner.browser_login().await
     }

@@ -16,7 +16,7 @@ use serde_json::json;
 use tracing::info;
 
 use dravr_sciotte::models::ActivityParams;
-use dravr_sciotte::StravaScraper;
+use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
 use dravr_sciotte_mcp::McpServer;
 

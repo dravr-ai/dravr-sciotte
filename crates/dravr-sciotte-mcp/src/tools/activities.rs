@@ -12,7 +12,7 @@ use crate::state::SharedState;
 use crate::tools::McpTool;
 
 use dravr_sciotte::models::ActivityParams;
-use dravr_sciotte::StravaScraper;
+use dravr_sciotte::ActivityScraper;
 
 /// Scrape activities from the Strava training page
 pub struct GetActivitiesTool;
