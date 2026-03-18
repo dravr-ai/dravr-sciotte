@@ -113,27 +113,65 @@ js_extract = '''
     const devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS|Fitbit|Samsung)[^\n,]*/i);
     if (devMatch) data.device = devMatch[0].trim();
 
-    // Gear/shoes
-    const gearMatch = allText.match(/(?:Chaussures|Shoes|V\u00e9lo|Bike):\s*([^\n]+)/i);
-    if (gearMatch) data.gear = gearMatch[1].trim();
+    // Gear/shoes — find the gear section and extract name + distance
+    var gearLinks = document.querySelectorAll('a[href*="/gear/"]');
+    if (gearLinks.length > 0) {
+        // Pick the last gear link (the one in the activity detail, not the sidebar)
+        var gearLink = gearLinks[gearLinks.length - 1];
+        var gearText = gearLink.textContent.trim().replace(/\s+/g, ' ');
+        // Also grab the distance from the parent container
+        var gearContainer = gearLink.closest('div, span, li');
+        if (gearContainer) {
+            var fullText = gearContainer.textContent.trim().replace(/\s+/g, ' ');
+            // Strip labels like "Shoes:", "Chaussures:"
+            fullText = fullText.replace(/^(Shoes|Chaussures|V[eé]lo|Bike)\s*:\s*/i, '');
+            data.gear = fullText;
+        } else {
+            data.gear = gearText;
+        }
+    }
 
     // Perceived exertion
     const peMatch = allText.match(/(?:Perceived Exertion|Effort ressenti)\s*:?\s*([\w\s\u00e9]+?)(?:\n|$)/i);
     if (peMatch) data.perceived_exertion = peMatch[1].trim();
 
-    // Heart rate from body text if not found above
-    const statsText = document.querySelector('.activity-stats, .spans8')?.textContent || '';
+    // Try to extract structured data from the embedded activity JSON
+    // Strava embeds a rich JSON blob via .similarActivitiesData() or pageView data
+    var scripts = document.querySelectorAll('script');
+    for (var s = 0; s < scripts.length; s++) {
+        var src = scripts[s].textContent || '';
+        var jsonMatch = src.match(/activity_values.*?"values"\s*:\s*(\{[^}]+\})/);
+        if (jsonMatch) {
+            try {
+                var vals = JSON.parse(jsonMatch[1]);
+                if (!data.avg_hr && vals.avg_hr) data.avg_hr = String(vals.avg_hr);
+                if (!data.max_hr && vals.max_hr) data.max_hr = String(vals.max_hr);
+                if (!data.cadence && vals.avg_cadence) data.cadence = String(vals.avg_cadence);
+                if (!data.max_cadence) data.max_cadence = String(vals.max_cadence || '');
+                if (!data.calories && vals.calories) data.calories = String(vals.calories);
+                if (!data.elevation && vals.elev_gain) data.elevation = String(vals.elev_gain);
+                if (vals.max_speed) data.max_speed = String(vals.max_speed);
+                if (vals.avg_speed) data.avg_speed_ms = String(vals.avg_speed);
+                if (vals.elapsed_time) data.elapsed_time_secs = String(vals.elapsed_time);
+                if (vals.total_steps) data.total_steps = String(vals.total_steps);
+                if (vals.grade_adjusted_distance) data.gap_distance = String(vals.grade_adjusted_distance);
+            } catch(e) {}
+            break;
+        }
+    }
+
+    // Fallback: search page text for HR/cadence if not found in JSON
     if (!data.avg_hr) {
-        const hrMatch = statsText.match(/(\d+)\s*bpm/i);
+        var hrMatch = allText.match(/(\d+)\s*bpm/i);
         if (hrMatch) data.avg_hr = hrMatch[1];
     }
     if (!data.cadence) {
-        const cadMatch = statsText.match(/(\d+)\s*(?:ppm|rpm|spm)/i);
+        var cadMatch = allText.match(/(\d+)\s*(?:ppm|rpm|spm)/i);
         if (cadMatch) data.cadence = cadMatch[1];
     }
 
     // GAP / VAP
-    const gapMatch = allText.match(/(?:VAP|GAP)\s+([\d:]+\s*\/km)/i);
+    var gapMatch = allText.match(/(?:VAP|GAP)\s+([\d:]+\s*\/km)/i);
     if (gapMatch) data.gap = gapMatch[1].trim();
 
     return JSON.stringify(data);
