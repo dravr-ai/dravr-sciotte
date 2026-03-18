@@ -6,7 +6,7 @@
 
 [package]
 name = "dravr-sciotte-server"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Unified REST API + MCP server + CLI for sport activity scraping"
@@ -24,8 +24,8 @@ name = "dravr-sciotte-server"
 path = "src/main.rs"
 
 [dependencies]
-dravr-sciotte = { path = "../..", version = "0.0.0" }
-dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.0.0" }
+dravr-sciotte = { path = "../..", version = "0.1.0" }
+dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.1.0" }
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
