@@ -113,22 +113,10 @@ js_extract = '''
     const devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS|Fitbit|Samsung)[^\n,]*/i);
     if (devMatch) data.device = devMatch[0].trim();
 
-    // Gear/shoes — find the gear section and extract name + distance
-    var gearLinks = document.querySelectorAll('a[href*="/gear/"]');
-    if (gearLinks.length > 0) {
-        // Pick the last gear link (the one in the activity detail, not the sidebar)
-        var gearLink = gearLinks[gearLinks.length - 1];
-        var gearText = gearLink.textContent.trim().replace(/\s+/g, ' ');
-        // Also grab the distance from the parent container
-        var gearContainer = gearLink.closest('div, span, li');
-        if (gearContainer) {
-            var fullText = gearContainer.textContent.trim().replace(/\s+/g, ' ');
-            // Strip labels like "Shoes:", "Chaussures:"
-            fullText = fullText.replace(/^(Shoes|Chaussures|V[eé]lo|Bike)\s*:\s*/i, '');
-            data.gear = fullText;
-        } else {
-            data.gear = gearText;
-        }
+    // Gear/shoes — extract from the gear section (div.gear span.gear-name)
+    var gearName = document.querySelector('.gear .gear-name, .gear-name');
+    if (gearName) {
+        data.gear = gearName.textContent.trim().replace(/\s+/g, ' ');
     }
 
     // Perceived exertion
