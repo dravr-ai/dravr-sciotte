@@ -1,0 +1,344 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Bump Version & Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      prev_tag: ${{ steps.bump.outputs.prev_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        run: |
+          CURRENT=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$CURRENT"
+
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          VERSION="${major}.${minor}.${patch}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${CURRENT} → ${VERSION}"
+
+          # Previous tag for changelog range
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Update root crate version (first occurrence only)
+          sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${VERSION}\"/" Cargo.toml
+
+          # Update subcrate package versions
+          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/dravr-sciotte-mcp/Cargo.toml
+          sed -i "s/^version = \"[0-9]*\.[0-9]*\.[0-9]*\"/version = \"${VERSION}\"/" crates/dravr-sciotte-server/Cargo.toml
+
+          # Update dependency version references in subcrates
+          sed -i "s/dravr-sciotte = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/dravr-sciotte = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/dravr-sciotte-mcp/Cargo.toml
+          sed -i "s/dravr-sciotte = { path = \"\.\.\/\.\.\", version = \"[^\"]*\"/dravr-sciotte = { path = \"\.\.\/\.\.\", version = \"${VERSION}\"/" crates/dravr-sciotte-server/Cargo.toml
+          sed -i "s/dravr-sciotte-mcp = { path = \"\.\.\/dravr-sciotte-mcp\", version = \"[^\"]*\"/dravr-sciotte-mcp = { path = \"\.\.\/dravr-sciotte-mcp\", version = \"${VERSION}\"/" crates/dravr-sciotte-server/Cargo.toml
+
+      - name: Update lockfile
+        run: cargo generate-lockfile
+
+      - name: Generate changelog
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          PREV_TAG="${{ steps.bump.outputs.prev_tag }}"
+          DATE=$(date +%Y-%m-%d)
+
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+
+          FEATURES=""
+          FIXES=""
+          OTHER=""
+
+          while IFS= read -r msg; do
+            [ -z "$msg" ] && continue
+            case "$msg" in
+              feat:*|feat\(*) FEATURES="${FEATURES}- ${msg}\n" ;;
+              fix:*|fix\(*)   FIXES="${FIXES}- ${msg}\n" ;;
+              docs:*|chore:*|test:*|ci:*|release:*) ;;
+              *) OTHER="${OTHER}- ${msg}\n" ;;
+            esac
+          done < <(git log "${RANGE}" --pretty=format:"%s" --no-merges)
+
+          BODY=""
+          [ -n "$FEATURES" ] && BODY="${BODY}### Added\n\n${FEATURES}\n"
+          [ -n "$FIXES" ]    && BODY="${BODY}### Fixed\n\n${FIXES}\n"
+          [ -n "$OTHER" ]    && BODY="${BODY}### Other\n\n${OTHER}\n"
+
+          HEADER="## [${VERSION}] — ${DATE}"
+
+          if [ -f CHANGELOG.md ]; then
+            TMPFILE=$(mktemp)
+            echo "# Changelog" > "$TMPFILE"
+            echo "" >> "$TMPFILE"
+            echo "$HEADER" >> "$TMPFILE"
+            echo "" >> "$TMPFILE"
+            echo -e "$BODY" >> "$TMPFILE"
+            tail -n +2 CHANGELOG.md >> "$TMPFILE"
+            mv "$TMPFILE" CHANGELOG.md
+          else
+            {
+              echo "# Changelog"
+              echo ""
+              echo "$HEADER"
+              echo ""
+              echo -e "$BODY"
+            } > CHANGELOG.md
+          fi
+
+      - name: Commit, tag, push
+        run: |
+          VERSION="${{ steps.bump.outputs.version }}"
+          git add -A
+          git commit -m "release: v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin main --tags
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-14
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          DIR="dravr-sciotte-v${VERSION}-${TARGET}"
+          mkdir "$DIR"
+          cp "target/${TARGET}/release/dravr-sciotte-mcp" "$DIR/"
+          cp "target/${TARGET}/release/dravr-sciotte-server" "$DIR/"
+          tar czf "${DIR}.tar.gz" "$DIR"
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ needs.version.outputs.version }}"
+          $TARGET = "${{ matrix.target }}"
+          $DIR = "dravr-sciotte-v${VERSION}-${TARGET}"
+          New-Item -ItemType Directory -Path $DIR
+          Copy-Item "target/${TARGET}/release/dravr-sciotte-mcp.exe" "$DIR/"
+          Copy-Item "target/${TARGET}/release/dravr-sciotte-server.exe" "$DIR/"
+          Compress-Archive -Path "$DIR/*" -DestinationPath "${DIR}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dravr-sciotte-${{ matrix.target }}
+          path: dravr-sciotte-v*.*
+
+  docker:
+    name: Docker Image
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/dravr-ai/dravr-sciotte:${{ needs.version.outputs.version }}
+            ghcr.io/dravr-ai/dravr-sciotte:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Publish Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish -p dravr-sciotte || echo "dravr-sciotte already published, continuing..."
+
+          echo "Waiting for crates.io to index dravr-sciotte..."
+          sleep 30
+
+          cargo publish -p dravr-sciotte-mcp || echo "dravr-sciotte-mcp already published, continuing..."
+
+          echo "Waiting for crates.io to index dravr-sciotte-mcp..."
+          sleep 30
+
+          cargo publish -p dravr-sciotte-server || echo "dravr-sciotte-server already published, continuing..."
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dravr-sciotte-*
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          body_path: CHANGELOG.md
+          files: artifacts/*
+
+  update-homebrew:
+    name: Update Homebrew
+    needs: [version, build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v4
+        with:
+          repository: dravr-ai/homebrew-tap
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Download artifacts for SHA computation
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dravr-sciotte-*
+          merge-multiple: true
+
+      - name: Update formula
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          SHA_ARM=$(shasum -a 256 artifacts/dravr-sciotte-v${VERSION}-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+          SHA_X86_MAC=$(shasum -a 256 artifacts/dravr-sciotte-v${VERSION}-x86_64-apple-darwin.tar.gz | awk '{print $1}')
+          SHA_LINUX=$(shasum -a 256 artifacts/dravr-sciotte-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz | awk '{print $1}')
+
+          cat > Formula/dravr-sciotte.rb <<FORMULA
+          # typed: false
+          # frozen_string_literal: true
+
+          class DravrSciotte < Formula
+            desc "Strava training data scraper with headless Chrome, OAuth, and in-memory caching"
+            homepage "https://github.com/dravr-ai/dravr-sciotte"
+            version "${VERSION}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/dravr-ai/dravr-sciotte/releases/download/v#{version}/dravr-sciotte-v#{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM}"
+              else
+                url "https://github.com/dravr-ai/dravr-sciotte/releases/download/v#{version}/dravr-sciotte-v#{version}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86_MAC}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/dravr-ai/dravr-sciotte/releases/download/v#{version}/dravr-sciotte-v#{version}-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "${SHA_LINUX}"
+            end
+
+            def install
+              bin.install "dravr-sciotte-server"
+              bin.install "dravr-sciotte-mcp"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/dravr-sciotte-server --version")
+              assert_match version.to_s, shell_output("#{bin}/dravr-sciotte-mcp --version")
+            end
+          end
+          FORMULA
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/dravr-sciotte.rb
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dravr-sciotte.rb
+          git commit -m "chore: bump dravr-sciotte to v${VERSION}"
+          git push
