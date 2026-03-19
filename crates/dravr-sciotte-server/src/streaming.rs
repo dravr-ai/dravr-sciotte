@@ -89,6 +89,13 @@ pub struct CredentialLoginRequest {
     pub email: String,
     /// User's password
     pub password: String,
+    /// Login method: "email" (default), "google", "apple"
+    #[serde(default = "default_login_method")]
+    pub method: String,
+}
+
+fn default_login_method() -> String {
+    "email".to_owned()
 }
 
 /// Request body for OTP/2FA code submission
@@ -358,7 +365,7 @@ pub async fn credential_login(
         let guard = state.read().await;
         guard
             .scraper()
-            .credential_login(&request.email, &request.password)
+            .credential_login(&request.email, &request.password, &request.method)
             .await
     };
 

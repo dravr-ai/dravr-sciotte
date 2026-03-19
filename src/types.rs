@@ -25,10 +25,19 @@ pub trait ActivityScraper: Send + Sync {
     async fn browser_login(&self) -> ScraperResult<AuthSession>;
 
     /// Log in programmatically with email and password.
-    /// Launches headless Chrome, fills the login form, handles cookie consent,
-    /// and detects success, failure, or OTP/2FA requirements.
+    ///
+    /// The `method` parameter selects the login flow:
+    /// - `"email"` — fill the provider's native login form directly
+    /// - `"google"` — click the Google OAuth button, fill Google's email/password form
+    /// - `"apple"` — click the Apple OAuth button, fill Apple's sign-in form
+    ///
     /// If OTP is required, the browser is kept alive for a follow-up `submit_otp` call.
-    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult>;
+    async fn credential_login(
+        &self,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult>;
 
     /// Submit a one-time password / 2FA code after `credential_login` returned `OtpRequired`.
     /// Reuses the browser page from the credential login attempt, fills the OTP field,

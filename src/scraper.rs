@@ -9,7 +9,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::input::{
+    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
+    InsertTextParams, MouseButton,
+};
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
+use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::page::ScreenshotParams;
 use chrono::{NaiveDateTime, Utc};
 use futures::StreamExt;
 use tokio::sync::Mutex;
@@ -17,20 +23,43 @@ use tracing::{debug, info, warn};
 
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult};
-use crate::js_utils::{escape_js_selector, escape_js_string};
+use crate::js_utils::escape_js_selector;
 use crate::models::{Activity, ActivityParams, AuthSession, CookieData, SportType};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
 const LOGIN_POLL_INTERVAL_MS: u64 = 500;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
-const PAGE_LOAD_WAIT_SECS: u64 = 2;
+const PAGE_LOAD_WAIT_SECS: u64 = 3;
 const FORM_INTERACTION_DELAY_MS: u64 = 300;
-const EMAIL_STEP_TIMEOUT_SECS: u64 = 5;
+const EMAIL_STEP_TIMEOUT_SECS: u64 = 10;
 const PASSWORD_STEP_TIMEOUT_SECS: u64 = 10;
 
 /// URL patterns that indicate an OTP/2FA page
 const OTP_URL_PATTERNS: &[&str] = &["verify", "2fa", "challenge", "mfa", "otp"];
+
+/// OAuth form selectors for third-party login pages (Google, Apple).
+/// These are universal — the same regardless of which provider uses them.
+struct OAuthFormSelectors {
+    email: &'static str,
+    email_next: &'static str,
+    password: &'static str,
+    password_next: &'static str,
+}
+
+const GOOGLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
+    email: r#"input[type="email"]"#,
+    email_next: r"#identifierNext button, #identifierNext",
+    password: r#"input[type="password"], input[name="Passwd"]"#,
+    password_next: r"#passwordNext button, #passwordNext",
+};
+
+const APPLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
+    email: r#"#account_name_text_field, input[type="text"]"#,
+    email_next: r#"#sign-in, button[type="submit"]"#,
+    password: r#"#password_text_field, input[type="password"]"#,
+    password_next: r#"#sign-in, button[type="submit"]"#,
+};
 
 /// Chrome-based sport activity scraper driven by a TOML provider configuration.
 ///
@@ -136,6 +165,115 @@ impl ChromeScraper {
         tokio::time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 2)).await;
         Ok(page)
     }
+
+    /// Direct credential login — fill the provider's native email/password form
+    async fn run_direct_credential_login(
+        &self,
+        page: &chromiumoxide::Page,
+        email: &str,
+        password: &str,
+    ) -> ScraperResult<LoginResult> {
+        let selectors = LoginSelectors::from_provider(&self.provider)?;
+
+        debug!(selector = selectors.email, "Filling email field");
+        fill_input_field(page, selectors.email, email).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+
+        let password_visible = element_exists(page, selectors.password).await;
+        debug!(password_visible, "Password field check after page load");
+
+        if !password_visible {
+            debug!("Submitting email, waiting for password field to appear");
+            click_element(page, selectors.button).await?;
+            let step = poll_for_next_step(
+                page,
+                &self.provider,
+                selectors.password,
+                EMAIL_STEP_TIMEOUT_SECS,
+            )
+            .await?;
+            if let StepOutcome::LoginResult(result) = step {
+                debug!("Login resolved during email step");
+                return Ok(result);
+            }
+            debug!("Password field appeared after email submit");
+        }
+
+        debug!(selector = selectors.password, "Filling password field");
+        fill_input_field(page, selectors.password, password).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        debug!("Clicking submit after password");
+        click_element(page, selectors.button).await?;
+
+        poll_credential_login_result(page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await
+    }
+
+    /// OAuth credential login — click provider OAuth button, then fill Google/Apple form
+    async fn run_oauth_credential_login(
+        &self,
+        page: &chromiumoxide::Page,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult> {
+        let oauth_button_selector = self
+            .provider
+            .provider
+            .login_oauth_buttons
+            .get(method)
+            .ok_or_else(|| ScraperError::Config {
+                reason: format!("No OAuth button selector configured for method: {method}"),
+            })?;
+
+        let oauth_form = match method {
+            "google" => &GOOGLE_OAUTH_SELECTORS,
+            "apple" => &APPLE_OAUTH_SELECTORS,
+            other => {
+                return Err(ScraperError::Config {
+                    reason: format!("Unsupported OAuth method: {other}"),
+                });
+            }
+        };
+
+        // Click the OAuth button on the provider's login page
+        debug!(method, "Clicking OAuth button on provider page");
+        click_element(page, oauth_button_selector).await?;
+        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+
+        // Fill email on the OAuth provider's page
+        debug!(selector = oauth_form.email, "Filling OAuth email field");
+        fill_input_field(page, oauth_form.email, email).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        debug!("Clicking Next after OAuth email");
+        click_element(page, oauth_form.email_next).await?;
+
+        // Wait for the password step
+        debug!("Waiting for OAuth password field");
+        let step = poll_for_next_step(
+            page,
+            &self.provider,
+            oauth_form.password,
+            EMAIL_STEP_TIMEOUT_SECS,
+        )
+        .await?;
+        if let StepOutcome::LoginResult(result) = step {
+            debug!("Login resolved during OAuth email step");
+            return Ok(result);
+        }
+
+        // Fill password on the OAuth provider's page
+        debug!(
+            selector = oauth_form.password,
+            "Filling OAuth password field"
+        );
+        fill_input_field(page, oauth_form.password, password).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        debug!("Clicking Next after OAuth password");
+        click_element(page, oauth_form.password_next).await?;
+
+        // Poll for final result — Google/Apple will redirect back to the provider
+        poll_credential_login_result(page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await
+    }
 }
 
 #[async_trait]
@@ -178,11 +316,15 @@ impl ActivityScraper for ChromeScraper {
         Ok(session)
     }
 
-    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult> {
-        let selectors = LoginSelectors::from_provider(&self.provider)?;
-
+    async fn credential_login(
+        &self,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult> {
         info!(
             provider = %self.provider.provider.name,
+            method,
             "Starting credential login"
         );
 
@@ -194,43 +336,20 @@ impl ActivityScraper for ChromeScraper {
                 reason: format!("Failed to open login page: {e}"),
             })?;
 
+        debug!("Waiting {PAGE_LOAD_WAIT_SECS}s for page JS to render");
         tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
         dismiss_cookie_dialog(&page).await;
 
-        // Step 1: Fill email
-        fill_input_field(&page, selectors.email, email).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
-
-        // Two-step login (e.g., Strava): password field not yet visible.
-        // Submit email first, wait for password field or an early result.
-        if !element_exists(&page, selectors.password).await {
-            click_element(&page, selectors.button).await?;
-            let step1 = poll_for_next_step(
-                &page,
-                &self.provider,
-                selectors.password,
-                EMAIL_STEP_TIMEOUT_SECS,
-            )
-            .await?;
-            match step1 {
-                StepOutcome::FieldAppeared => {}
-                StepOutcome::LoginResult(result) => {
-                    if matches!(result, LoginResult::OtpRequired) {
-                        *self.pending_otp_page.lock().await = Some(page);
-                    }
-                    return Ok(result);
-                }
+        let result = match method {
+            "google" | "apple" => {
+                self.run_oauth_credential_login(&page, email, password, method)
+                    .await?
             }
-        }
-
-        // Password field is now visible — fill and submit
-        fill_input_field(&page, selectors.password, password).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
-        click_element(&page, selectors.button).await?;
-
-        // Step 3: Poll for final result (success, OTP, or error)
-        let result =
-            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
+            _ => {
+                self.run_direct_credential_login(&page, email, password)
+                    .await?
+            }
+        };
 
         if matches!(result, LoginResult::OtpRequired) {
             *self.pending_otp_page.lock().await = Some(page);
@@ -514,6 +633,7 @@ async fn poll_for_next_step(
 
     loop {
         if tokio::time::Instant::now() > deadline {
+            save_timeout_screenshot(page, "step-timeout").await;
             return Err(ScraperError::Auth {
                 reason: format!(
                     "Login step timed out after {timeout_secs}s waiting for next field"
@@ -615,55 +735,167 @@ async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
     }
 }
 
-/// Fill an input field using React-compatible value setting.
-///
-/// Uses `Object.getOwnPropertyDescriptor` to call the native `HTMLInputElement` value
-/// setter, bypassing React's synthetic event system. Dispatches `input`, `change`,
-/// and `blur` events to trigger framework change handlers.
-async fn fill_input_field(
+/// Click at coordinates (x, y) via CDP mouse press + release
+async fn cdp_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> ScraperResult<()> {
+    let press = DispatchMouseEventParams {
+        r#type: DispatchMouseEventType::MousePressed,
+        x,
+        y,
+        modifiers: None,
+        timestamp: None,
+        button: Some(MouseButton::Left),
+        buttons: None,
+        click_count: Some(1),
+        force: None,
+        tangential_pressure: None,
+        tilt_x: None,
+        tilt_y: None,
+        twist: None,
+        delta_x: None,
+        delta_y: None,
+        pointer_type: None,
+    };
+    page.execute(press)
+        .await
+        .map_err(|e| ScraperError::Browser {
+            reason: format!("CDP mouse press failed: {e}"),
+        })?;
+
+    let release = DispatchMouseEventParams {
+        r#type: DispatchMouseEventType::MouseReleased,
+        x,
+        y,
+        modifiers: None,
+        timestamp: None,
+        button: Some(MouseButton::Left),
+        buttons: None,
+        click_count: Some(1),
+        force: None,
+        tangential_pressure: None,
+        tilt_x: None,
+        tilt_y: None,
+        twist: None,
+        delta_x: None,
+        delta_y: None,
+        pointer_type: None,
+    };
+    page.execute(release)
+        .await
+        .map_err(|e| ScraperError::Browser {
+            reason: format!("CDP mouse release failed: {e}"),
+        })?;
+    Ok(())
+}
+
+/// Select all text in the focused element and delete it via CDP key events
+async fn cdp_select_all_delete(page: &chromiumoxide::Page) {
+    let select_all = DispatchKeyEventParams {
+        r#type: DispatchKeyEventType::KeyDown,
+        modifiers: Some(if cfg!(target_os = "macos") { 4 } else { 2 }),
+        timestamp: None,
+        text: None,
+        unmodified_text: None,
+        key_identifier: None,
+        code: Some("KeyA".to_owned()),
+        key: Some("a".to_owned()),
+        windows_virtual_key_code: None,
+        native_virtual_key_code: None,
+        auto_repeat: None,
+        is_keypad: None,
+        is_system_key: None,
+        location: None,
+        commands: None,
+    };
+    let _ = page.execute(select_all).await;
+
+    let backspace = DispatchKeyEventParams {
+        r#type: DispatchKeyEventType::KeyDown,
+        modifiers: None,
+        timestamp: None,
+        text: None,
+        unmodified_text: None,
+        key_identifier: None,
+        code: Some("Backspace".to_owned()),
+        key: Some("Backspace".to_owned()),
+        windows_virtual_key_code: None,
+        native_virtual_key_code: None,
+        auto_repeat: None,
+        is_keypad: None,
+        is_system_key: None,
+        location: None,
+        commands: None,
+    };
+    let _ = page.execute(backspace).await;
+}
+
+/// Get the center coordinates of an element matching the selector
+async fn get_element_center(
     page: &chromiumoxide::Page,
     selector: &str,
-    value: &str,
-) -> ScraperResult<()> {
-    let escaped_value = escape_js_string(value);
-    let escaped_selector = escape_js_selector(selector);
+) -> ScraperResult<(f64, f64)> {
+    let escaped = escape_js_selector(selector);
     let js = format!(
         r#"(function() {{
-            var selectors = "{escaped_selector}".split(",").map(function(s) {{ return s.trim(); }});
+            var selectors = "{escaped}".split(",").map(function(s) {{ return s.trim(); }});
             var el = null;
             for (var i = 0; i < selectors.length; i++) {{
                 el = document.querySelector(selectors[i]);
                 if (el) break;
             }}
-            if (!el) return "not_found";
-            el.focus();
-            var nativeSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, "value"
-            ).set;
-            nativeSetter.call(el, "{escaped_value}");
-            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
-            el.dispatchEvent(new Event("change", {{ bubbles: true }}));
-            el.dispatchEvent(new Event("blur", {{ bubbles: true }}));
-            return "filled";
+            if (!el) return null;
+            var r = el.getBoundingClientRect();
+            return JSON.stringify({{x: r.x + r.width / 2, y: r.y + r.height / 2}});
         }})()"#
     );
 
     let result = page.evaluate(js).await.map_err(|e| ScraperError::Browser {
-        reason: format!("Failed to fill input '{selector}': {e}"),
+        reason: format!("Failed to locate '{selector}': {e}"),
     })?;
 
-    let status = result
+    let coords_str = result
         .value()
         .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_default();
+        .ok_or_else(|| ScraperError::Scraping {
+            reason: format!("Element not found for selector: {selector}"),
+        })?;
 
-    if status == "not_found" {
-        return Err(ScraperError::Scraping {
-            reason: format!("Input element not found for selector: {selector}"),
-        });
-    }
+    let coords: serde_json::Value =
+        serde_json::from_str(&coords_str).map_err(|e| ScraperError::Browser {
+            reason: format!("Failed to parse element coordinates: {e}"),
+        })?;
 
-    debug!(selector, "Input field filled");
+    Ok((
+        coords["x"].as_f64().unwrap_or(0.0),
+        coords["y"].as_f64().unwrap_or(0.0),
+    ))
+}
+
+/// Fill an input field using CDP click-to-focus + `InsertText`.
+///
+/// Uses CDP mouse events to click the input (getting native focus), then
+/// selects all existing text and replaces it via `Input.insertText`.
+/// This works with React, Angular, and other frameworks that intercept JS property setters.
+async fn fill_input_field(
+    page: &chromiumoxide::Page,
+    selector: &str,
+    value: &str,
+) -> ScraperResult<()> {
+    let (x, y) = get_element_center(page, selector).await?;
+
+    cdp_click_at(page, x, y).await?;
+    cdp_select_all_delete(page).await;
+
+    page.execute(InsertTextParams::new(value))
+        .await
+        .map_err(|e| ScraperError::Browser {
+            reason: format!("Failed to insert text into '{selector}': {e}"),
+        })?;
+
+    let _ = page
+        .evaluate("document.activeElement.dispatchEvent(new Event('change', {bubbles: true}))")
+        .await;
+
+    debug!(selector, "Input field filled via CDP InsertText");
     Ok(())
 }
 
@@ -713,6 +945,19 @@ async fn click_element(page: &chromiumoxide::Page, selector: &str) -> ScraperRes
 
     debug!(selector, "Element clicked");
     Ok(())
+}
+
+/// Save a debug screenshot to the temp directory, logging the path on success
+async fn save_timeout_screenshot(page: &chromiumoxide::Page, label: &str) {
+    let params = ScreenshotParams::builder()
+        .format(CaptureScreenshotFormat::Png)
+        .build();
+    if let Ok(data) = page.screenshot(params).await {
+        let path = std::env::temp_dir().join(format!("sciotte-{label}.png"));
+        if tokio::fs::write(&path, &data).await.is_ok() {
+            warn!("Timeout screenshot saved to {}", path.display());
+        }
+    }
 }
 
 /// Check if an element matching the selector exists in the DOM
@@ -772,6 +1017,7 @@ async fn poll_credential_login_result(
 
     loop {
         if tokio::time::Instant::now() > deadline {
+            save_timeout_screenshot(page, "login-timeout").await;
             return Err(ScraperError::Auth {
                 reason: "Credential login timed out".to_owned(),
             });
