@@ -44,6 +44,9 @@ pub struct ProviderIdentity {
     /// CSS selector for the login error message element
     #[serde(default)]
     pub login_error_selector: Option<String>,
+    /// CSS selector for the OTP/2FA code input field
+    #[serde(default)]
+    pub login_otp_selector: Option<String>,
     /// CSS selectors for OAuth login buttons, keyed by method name (e.g., "google", "apple")
     #[serde(default)]
     pub login_oauth_buttons: HashMap<String, String>,

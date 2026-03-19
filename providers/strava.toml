@@ -10,6 +10,7 @@ login_email_selector = '#email, input[name="email"]'
 login_password_selector = '#password, input[name="password"]'
 login_button_selector = 'button[type="submit"], #login-button'
 login_error_selector = '.alert-error, .alert-danger, [class*="error-message"]'
+login_otp_selector = 'input[name="code"], input[type="tel"], input[autocomplete="one-time-code"]'
 
 [provider.login_oauth_buttons]
 google = 'text:Sign In With Google'
