@@ -1,5 +1,5 @@
-// ABOUTME: Axum router wiring REST endpoints and MCP HTTP transport
-// ABOUTME: Mounts auth, activity, health, and MCP routes with optional auth middleware
+// ABOUTME: Axum router wiring REST, WebSocket streaming, and MCP HTTP transport
+// ABOUTME: Mounts auth, activity, browser streaming, health, and MCP routes with CORS
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -7,12 +7,14 @@
 use std::sync::Arc;
 
 use axum::extract::{Query, State};
+use axum::http::Method;
 use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use dravr_sciotte::models::ActivityParams;
@@ -22,15 +24,25 @@ use dravr_sciotte_mcp::McpServer;
 
 use crate::auth::auth_middleware;
 use crate::health::health_handler;
+use crate::streaming;
 
 /// Build the complete Axum router for the unified server
 pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(Any);
+
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/status", get(auth_status_handler))
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .layer(middleware::from_fn(auth_middleware))
+        .with_state(state.clone());
+
+    let browser_route = Router::new()
+        .route("/browser/login", get(streaming::browser_login_ws))
         .with_state(state.clone());
 
     let mcp_route = Router::new()
@@ -46,8 +58,10 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
 
     Router::new()
         .merge(api_routes)
+        .merge(browser_route)
         .merge(mcp_route)
         .merge(health_route)
+        .layer(cors)
 }
 
 // ============================================================================
