@@ -52,6 +52,11 @@ impl ChromeScraper {
         Self::new(ScraperConfig::default(), ProviderConfig::strava_default())
     }
 
+    /// Get a reference to the provider configuration
+    pub const fn provider(&self) -> &ProviderConfig {
+        &self.provider
+    }
+
     /// Get or create a headless browser instance for scraping
     async fn get_headless_browser(&self) -> ScraperResult<Arc<Browser>> {
         let mut guard = self.browser.lock().await;

@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sciotte Browser Stream Test</title>
+  <style>
+    body { font-family: system-ui; margin: 20px; background: #1a1a1a; color: #eee; }
+    canvas { border: 1px solid #444; cursor: pointer; display: block; margin: 10px 0; }
+    #status { padding: 8px 12px; background: #333; border-radius: 4px; margin: 10px 0; }
+    .success { background: #1a4d1a !important; }
+    .error { background: #4d1a1a !important; }
+    h1 { margin: 0 0 10px; font-size: 1.4em; }
+    .info { color: #888; font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>Sciotte — Browser Login Stream</h1>
+  <div id="status">Connecting...</div>
+  <canvas id="browser" width="1280" height="800"></canvas>
+  <p class="info">Click on the browser to interact. Type to enter text. All input is forwarded to Chrome.</p>
+
+  <script>
+    const canvas = document.getElementById('browser');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+    const host = window.location.hostname || 'localhost';
+    const port = window.location.port || '3000';
+    const ws = new WebSocket(`ws://${host}:${port}/browser/login`);
+    ws.binaryType = 'arraybuffer';
+
+    let frameCount = 0;
+
+    ws.onopen = () => { statusEl.textContent = 'Connected — waiting for browser...'; };
+    ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
+    ws.onerror = () => { statusEl.textContent = 'Connection error'; statusEl.className = 'error'; };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        frameCount++;
+        const blob = new Blob([event.data], { type: 'image/jpeg' });
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          URL.revokeObjectURL(img.src);
+        };
+        img.src = URL.createObjectURL(blob);
+        if (frameCount % 10 === 0) {
+          statusEl.textContent = `Streaming (${frameCount} frames)`;
+        }
+      } else {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'login_success') {
+          statusEl.textContent = `Login successful! Session: ${msg.session_id}`;
+          statusEl.className = 'success';
+        } else if (msg.type === 'login_failed') {
+          statusEl.textContent = `Login failed: ${msg.reason}`;
+          statusEl.className = 'error';
+        } else if (msg.type === 'status') {
+          statusEl.textContent = `${msg.state}: ${msg.message || msg.url || ''}`;
+        } else if (msg.type === 'error') {
+          statusEl.textContent = `Error: ${msg.message}`;
+          statusEl.className = 'error';
+        }
+      }
+    };
+
+    // Send resize on connect
+    ws.addEventListener('open', () => {
+      const rect = canvas.getBoundingClientRect();
+      ws.send(JSON.stringify({ type: 'resize', width: rect.width, height: rect.height }));
+    });
+
+    // Mouse click
+    canvas.addEventListener('click', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      ws.send(JSON.stringify({
+        type: 'click',
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      }));
+    });
+
+    // Mouse move (for hover effects)
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      ws.send(JSON.stringify({
+        type: 'mousemove',
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      }));
+    });
+
+    // Keyboard input
+    canvas.setAttribute('tabindex', '0');
+    canvas.addEventListener('keydown', (e) => {
+      e.preventDefault();
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        ws.send(JSON.stringify({ type: 'text', text: e.key }));
+      } else {
+        ws.send(JSON.stringify({ type: 'keydown', key: e.key, code: e.code }));
+      }
+    });
+
+    canvas.addEventListener('keyup', (e) => {
+      e.preventDefault();
+      if (e.key.length > 1 || e.ctrlKey || e.metaKey) {
+        ws.send(JSON.stringify({ type: 'keyup', key: e.key, code: e.code }));
+      }
+    });
+
+    // Scroll
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      ws.send(JSON.stringify({
+        type: 'scroll',
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+      }));
+    }, { passive: false });
+
+    // Focus canvas for keyboard
+    canvas.focus();
+  </script>
+</body>
+</html>
