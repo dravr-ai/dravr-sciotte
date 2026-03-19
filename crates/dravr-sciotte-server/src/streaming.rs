@@ -1,4 +1,4 @@
-// ABOUTME: WebSocket browser streaming for remote login via CDP screencast
+// ABOUTME: WebSocket browser streaming for remote login via CDP screenshot polling
 // ABOUTME: Streams Chrome JPEG frames to clients and dispatches input events back to Chrome
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -15,9 +15,8 @@ use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
     InsertTextParams, MouseButton,
 };
-use chromiumoxide::cdp::browser_protocol::page::{
-    EventScreencastFrame, ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams,
-};
+use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::page::ScreenshotParams;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -28,9 +27,9 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte_mcp::state::SharedState;
 
 const VIEWPORT_WIDTH: u32 = 1280;
-const VIEWPORT_HEIGHT: u32 = 800;
-const SCREENCAST_QUALITY: i64 = 60;
-const SCREENCAST_EVERY_NTH_FRAME: i64 = 2;
+const VIEWPORT_HEIGHT: u32 = 1024;
+const SCREENSHOT_QUALITY: i64 = 60;
+const SCREENSHOT_POLL_INTERVAL_MS: u64 = 80;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
 const URL_POLL_INTERVAL_MS: u64 = 500;
 
@@ -163,23 +162,32 @@ async fn run_streaming_session(
 
     send_status(&mut ws_sender, "navigating", &provider.provider.login_url).await;
 
-    // Start screencast
-    let screencast_params = StartScreencastParams {
-        format: Some(StartScreencastFormat::Jpeg),
-        quality: Some(SCREENCAST_QUALITY),
-        max_width: Some(i64::from(VIEWPORT_WIDTH)),
-        max_height: Some(i64::from(VIEWPORT_HEIGHT)),
-        every_nth_frame: Some(SCREENCAST_EVERY_NTH_FRAME),
-    };
-
-    page.execute(screencast_params)
-        .await
-        .map_err(|e| format!("Failed to start screencast: {e}"))?;
-
-    let mut frame_listener = page
-        .event_listener::<EventScreencastFrame>()
-        .await
-        .map_err(|e| format!("Failed to create frame listener: {e}"))?;
+    // Wait for page to load, then auto-dismiss cookie consent dialogs (Cookiebot, etc.)
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let dismiss_js = r#"
+        (function() {
+            var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                || document.querySelector('[data-cookiefirst-action="accept"]')
+                || document.querySelector('button[id*="accept"], button[class*="accept"]');
+            if (btn) { btn.click(); return 'dismissed'; }
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                try {
+                    var doc = iframes[i].contentDocument;
+                    if (doc) {
+                        var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                            || doc.querySelector('button[id*="accept"]');
+                        if (b) { b.click(); return 'dismissed_iframe'; }
+                    }
+                } catch(e) {}
+            }
+            return 'not_found';
+        })()
+    "#;
+    if let Ok(result) = page.evaluate(dismiss_js).await {
+        let val = result.value().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+        info!(result = %val, "Cookie dialog auto-dismiss attempt");
+    }
 
     let page_arc = Arc::new(page);
     let viewport = Arc::new(Mutex::new(ClientViewport::default()));
@@ -194,6 +202,8 @@ async fn run_streaming_session(
         tokio::spawn(async move { poll_for_login(&page_login, &provider_clone, login_tx).await });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
+    let mut screenshot_interval =
+        tokio::time::interval(Duration::from_millis(SCREENSHOT_POLL_INTERVAL_MS));
 
     loop {
         if tokio::time::Instant::now() > deadline {
@@ -203,7 +213,9 @@ async fn run_streaming_session(
         }
 
         tokio::select! {
-            // Login completed
+            biased; // Check branches in order: login > client input > screenshots
+
+            // Login completed (highest priority)
             result = &mut login_rx => {
                 if let Ok(session) = result {
                     if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
@@ -224,25 +236,13 @@ async fn run_streaming_session(
                 break;
             }
 
-            // Screencast frame from Chrome
-            Some(frame) = frame_listener.next() => {
-                let data: Vec<u8> = AsRef::<[u8]>::as_ref(&frame.data).to_vec();
-
-                let ack = ScreencastFrameAckParams::new(frame.session_id);
-                let _ = page_arc.execute(ack).await;
-
-                if ws_sender.send(Message::Binary(data.into())).await.is_err() {
-                    info!("Client disconnected during frame send");
-                    break;
-                }
-            }
-
-            // Client input
+            // Client input (second priority — must not be starved by screenshots)
             Some(msg) = ws_receiver.next() => {
                 match msg {
                     Ok(Message::Text(text)) => {
+                        info!(text = %text, "Received client input");
                         if let Err(e) = handle_client_input(&text, &page_arc, &viewport).await {
-                            debug!(error = %e, "Input dispatch failed");
+                            warn!(error = %e, "Input dispatch failed");
                         }
                     }
                     Ok(Message::Close(_)) | Err(_) => {
@@ -250,6 +250,26 @@ async fn run_streaming_session(
                         break;
                     }
                     _ => {}
+                }
+            }
+
+            // Screenshot polling (lowest priority)
+            _ = screenshot_interval.tick() => {
+                let params = ScreenshotParams::builder()
+                    .format(CaptureScreenshotFormat::Jpeg)
+                    .quality(SCREENSHOT_QUALITY)
+                    .build();
+                match page_arc.screenshot(params).await {
+                    Ok(data) if !data.is_empty() => {
+                        if ws_sender.send(Message::Binary(data.into())).await.is_err() {
+                            info!("Client disconnected during frame send");
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        debug!(error = %e, "Screenshot capture failed");
+                    }
                 }
             }
         }
@@ -480,11 +500,10 @@ async fn dispatch_key(
 }
 
 /// Scale client coordinates to Chrome viewport coordinates
-async fn scale_coords(x: f64, y: f64, viewport: &Mutex<ClientViewport>) -> (f64, f64) {
-    let vp = viewport.lock().await;
-    let cx = x * (f64::from(VIEWPORT_WIDTH) / vp.width);
-    let cy = y * (f64::from(VIEWPORT_HEIGHT) / vp.height);
-    (cx, cy)
+/// Client sends coordinates already scaled to Chrome viewport space (0..VIEWPORT_WIDTH, 0..VIEWPORT_HEIGHT).
+/// Pass them through directly to CDP — no further scaling needed.
+async fn scale_coords(x: f64, y: f64, _viewport: &Mutex<ClientViewport>) -> (f64, f64) {
+    (x, y)
 }
 
 /// Send a JSON status message over the WebSocket
@@ -510,6 +529,7 @@ async fn launch_streaming_browser() -> Result<Browser, Box<dyn std::error::Error
         .arg("--disable-dev-shm-usage")
         .arg("--disable-setuid-sandbox")
         .arg("--disable-blink-features=AutomationControlled")
+        .arg("--disable-popup-blocking")
         .arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         .build()
