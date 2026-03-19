@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::ScraperResult;
+use crate::error::{LoginResult, ScraperResult};
 use crate::models::{Activity, ActivityParams, AuthSession};
 
 /// Core trait for Strava training page scraping
@@ -23,6 +23,11 @@ pub trait ActivityScraper: Send + Sync {
     /// Waits for login to complete, captures session cookies, and returns
     /// an authenticated session. No API credentials required.
     async fn browser_login(&self) -> ScraperResult<AuthSession>;
+
+    /// Log in programmatically with email and password.
+    /// Launches headless Chrome, fills the login form, handles cookie consent,
+    /// and detects success, failure, or OTP/2FA requirements.
+    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult>;
 
     /// Check if a session is still valid (cookies not expired)
     async fn is_authenticated(&self, session: &AuthSession) -> bool;

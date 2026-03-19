@@ -4,6 +4,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ScraperError, ScraperResult};
@@ -30,6 +32,21 @@ pub struct ProviderIdentity {
     pub login_success_patterns: Vec<String>,
     /// URL patterns that indicate the user is NOT logged in
     pub login_failure_patterns: Vec<String>,
+    /// CSS selector for the email/username input field
+    #[serde(default)]
+    pub login_email_selector: Option<String>,
+    /// CSS selector for the password input field
+    #[serde(default)]
+    pub login_password_selector: Option<String>,
+    /// CSS selector for the login submit button
+    #[serde(default)]
+    pub login_button_selector: Option<String>,
+    /// CSS selector for the login error message element
+    #[serde(default)]
+    pub login_error_selector: Option<String>,
+    /// CSS selectors for OAuth login buttons, keyed by method name (e.g., "google", "apple")
+    #[serde(default)]
+    pub login_oauth_buttons: HashMap<String, String>,
 }
 
 /// Configuration for the list/training page

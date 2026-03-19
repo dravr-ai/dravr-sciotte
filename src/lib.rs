@@ -50,6 +50,9 @@ pub mod types;
 /// OAuth flow helpers and encrypted session persistence
 pub mod auth;
 
+/// JavaScript string escaping utilities for CDP evaluate calls
+pub mod js_utils;
+
 /// TOML-based provider configuration (selectors, URLs, JS extraction rules)
 pub mod provider;
 

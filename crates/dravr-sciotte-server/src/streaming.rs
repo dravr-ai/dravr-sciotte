@@ -1,5 +1,5 @@
-// ABOUTME: WebSocket browser streaming for remote login via CDP screenshot polling
-// ABOUTME: Streams Chrome JPEG frames to clients and dispatches input events back to Chrome
+// ABOUTME: Browser automation for login — credential-based REST and WebSocket screenshot streaming
+// ABOUTME: Handles email/password login, OAuth flows, and streams Chrome frames for interactive login
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -10,6 +10,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use axum::Json;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
@@ -19,11 +20,13 @@ use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
+use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use dravr_sciotte::models::{AuthSession, CookieData};
 use dravr_sciotte::provider::ProviderConfig;
+use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
 
 const VIEWPORT_WIDTH: u32 = 1280;
@@ -32,21 +35,7 @@ const SCREENSHOT_QUALITY: i64 = 60;
 const SCREENSHOT_POLL_INTERVAL_MS: u64 = 80;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
 const URL_POLL_INTERVAL_MS: u64 = 500;
-
-/// Client viewport dimensions for coordinate scaling
-struct ClientViewport {
-    width: f64,
-    height: f64,
-}
-
-impl Default for ClientViewport {
-    fn default() -> Self {
-        Self {
-            width: f64::from(VIEWPORT_WIDTH),
-            height: f64::from(VIEWPORT_HEIGHT),
-        }
-    }
-}
+const PAGE_LOAD_WAIT_SECS: u64 = 2;
 
 /// Input messages sent from the client over WebSocket
 #[derive(Debug, Deserialize)]
@@ -93,11 +82,22 @@ enum ClientMessage {
     },
 }
 
+/// Request body for credential-based login (no streaming)
+#[derive(Debug, Deserialize)]
+pub struct CredentialLoginRequest {
+    /// User's email or username
+    pub email: String,
+    /// User's password
+    pub password: String,
+}
+
 /// Query parameters for the WebSocket login endpoint
 #[derive(Debug, Deserialize)]
 pub struct BrowserLoginParams {
     /// Optional bearer token for authentication (WebSocket can't send headers from JS)
     token: Option<String>,
+    /// Login method: "direct" (default), "google", "apple"
+    method: Option<String>,
 }
 
 /// WebSocket upgrade handler for browser login streaming.
@@ -123,12 +123,13 @@ pub async fn browser_login_ws(
         }
     }
 
-    ws.on_upgrade(move |socket| handle_browser_login(socket, state))
+    let method = params.method.unwrap_or_default();
+    ws.on_upgrade(move |socket| handle_browser_login(socket, state, method))
         .into_response()
 }
 
 /// Core WebSocket handler that manages the Chrome session
-async fn handle_browser_login(socket: WebSocket, state: SharedState) {
+async fn handle_browser_login(socket: WebSocket, state: SharedState, method: String) {
     let provider = {
         let guard = state.read().await;
         guard.scraper().inner().provider().clone()
@@ -136,10 +137,11 @@ async fn handle_browser_login(socket: WebSocket, state: SharedState) {
 
     info!(
         provider = %provider.provider.name,
+        method = %method,
         "Browser streaming session started"
     );
 
-    if let Err(e) = run_streaming_session(socket, state, &provider).await {
+    if let Err(e) = run_streaming_session(socket, state, &provider, &method).await {
         error!(error = %e, "Browser streaming session failed");
     }
 }
@@ -149,6 +151,7 @@ async fn run_streaming_session(
     socket: WebSocket,
     state: SharedState,
     provider: &ProviderConfig,
+    method: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
@@ -162,35 +165,26 @@ async fn run_streaming_session(
 
     send_status(&mut ws_sender, "navigating", &provider.provider.login_url).await;
 
-    // Wait for page to load, then auto-dismiss cookie consent dialogs (Cookiebot, etc.)
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let dismiss_js = r#"
-        (function() {
-            var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
-                || document.querySelector('[data-cookiefirst-action="accept"]')
-                || document.querySelector('button[id*="accept"], button[class*="accept"]');
-            if (btn) { btn.click(); return 'dismissed'; }
-            var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                try {
-                    var doc = iframes[i].contentDocument;
-                    if (doc) {
-                        var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
-                            || doc.querySelector('button[id*="accept"]');
-                        if (b) { b.click(); return 'dismissed_iframe'; }
-                    }
-                } catch(e) {}
-            }
-            return 'not_found';
-        })()
-    "#;
-    if let Ok(result) = page.evaluate(dismiss_js).await {
-        let val = result.value().and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
-        info!(result = %val, "Cookie dialog auto-dismiss attempt");
+    tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+    dismiss_cookie_dialog(&page).await;
+
+    // For OAuth methods, click the provider button before starting screenshot streaming
+    if !method.is_empty() && method != "direct" {
+        if let Some(selector) = provider.provider.login_oauth_buttons.get(method) {
+            send_status(
+                &mut ws_sender,
+                "oauth",
+                &format!("Clicking {method} login..."),
+            )
+            .await;
+            click_oauth_button(&page, selector).await?;
+            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        } else {
+            return Err(format!("Unknown OAuth method: {method}").into());
+        }
     }
 
     let page_arc = Arc::new(page);
-    let viewport = Arc::new(Mutex::new(ClientViewport::default()));
 
     // Login detection via URL polling
     let page_login = Arc::clone(&page_arc);
@@ -241,7 +235,7 @@ async fn run_streaming_session(
                 match msg {
                     Ok(Message::Text(text)) => {
                         info!(text = %text, "Received client input");
-                        if let Err(e) = handle_client_input(&text, &page_arc, &viewport).await {
+                        if let Err(e) = handle_client_input(&text, &page_arc).await {
                             warn!(error = %e, "Input dispatch failed");
                         }
                     }
@@ -341,29 +335,183 @@ async fn poll_for_login(
     }
 }
 
+// ============================================================================
+// Credential Login (Flow 1 — no streaming, delegates to core library)
+// ============================================================================
+
+/// POST /auth/login-with-credentials handler.
+///
+/// Delegates to the core library's `credential_login()` which launches headless Chrome,
+/// fills email/password via JS, submits the form, and polls for login success.
+pub async fn credential_login(
+    State(state): State<SharedState>,
+    Json(request): Json<CredentialLoginRequest>,
+) -> impl IntoResponse {
+    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
+        let guard = state.read().await;
+        guard
+            .scraper()
+            .credential_login(&request.email, &request.password)
+            .await
+    };
+
+    match result {
+        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
+            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+                warn!(error = %e, "Failed to persist session to disk");
+            }
+            let session_id = session.session_id.clone();
+            let cookie_count = session.cookies.len();
+            state.write().await.add_session(session);
+
+            info!(session_id = %session_id, "Credential login successful");
+            Json(json!({
+                "status": "authenticated",
+                "session_id": session_id,
+                "cookie_count": cookie_count,
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+            info!("Credential login requires OTP/2FA");
+            Json(json!({
+                "status": "otp_required",
+                "reason": "Provider requires a one-time password or 2FA verification",
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+            warn!(reason = %reason, "Credential login rejected");
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "status": "failed",
+                    "reason": reason,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!(error = %e, "Credential login error");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "reason": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ============================================================================
+// WebSocket streaming helpers (cookie dismiss + OAuth click for streaming flow)
+// ============================================================================
+
+/// Auto-dismiss cookie consent dialogs for the WebSocket streaming flow.
+/// Delegates to the same JS logic used by the core library.
+async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
+    let dismiss_js = r#"
+        (function() {
+            var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                || document.querySelector('[data-cookiefirst-action="accept"]')
+                || document.querySelector('button[id*="accept"], button[class*="accept"]');
+            if (btn) { btn.click(); return 'dismissed'; }
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                try {
+                    var doc = iframes[i].contentDocument;
+                    if (doc) {
+                        var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                            || doc.querySelector('button[id*="accept"]');
+                        if (b) { b.click(); return 'dismissed_iframe'; }
+                    }
+                } catch(e) {}
+            }
+            return 'not_found';
+        })()
+    "#;
+    if let Ok(result) = page.evaluate(dismiss_js).await {
+        let val = result
+            .value()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        info!(result = %val, "Cookie dialog auto-dismiss attempt");
+    }
+}
+
+/// Click an OAuth provider button for the WebSocket streaming flow.
+///
+/// Supports CSS selectors and `text:` prefix for text-content matching.
+async fn click_oauth_button(
+    page: &chromiumoxide::Page,
+    selector: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let escaped_selector = dravr_sciotte::js_utils::escape_js_selector(selector);
+    let js = format!(
+        r#"(function() {{
+            var parts = "{escaped_selector}".split(",").map(function(s) {{ return s.trim(); }});
+            for (var i = 0; i < parts.length; i++) {{
+                var sel = parts[i];
+                if (sel.indexOf("text:") === 0) {{
+                    var text = sel.substring(5);
+                    var buttons = document.querySelectorAll("button, a, [role=button]");
+                    for (var j = 0; j < buttons.length; j++) {{
+                        if (buttons[j].textContent.trim().indexOf(text) !== -1) {{
+                            buttons[j].click();
+                            return "clicked";
+                        }}
+                    }}
+                }} else {{
+                    var el = document.querySelector(sel);
+                    if (el) {{ el.click(); return "clicked"; }}
+                }}
+            }}
+            return "not_found";
+        }})()"#
+    );
+
+    let result = page
+        .evaluate(js)
+        .await
+        .map_err(|e| format!("Failed to click OAuth button '{selector}': {e}"))?;
+
+    let status = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+
+    if status == "not_found" {
+        return Err(format!("OAuth button not found for selector: {selector}").into());
+    }
+
+    debug!(selector, "OAuth button clicked");
+    Ok(())
+}
+
 /// Handle a client input message by dispatching the appropriate CDP command
 async fn handle_client_input(
     text: &str,
     page: &chromiumoxide::Page,
-    viewport: &Mutex<ClientViewport>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let msg: ClientMessage = serde_json::from_str(text)?;
 
     match msg {
         ClientMessage::Click { x, y } => {
-            let (cx, cy) = scale_coords(x, y, viewport).await;
+            let (cx, cy) = scale_coords(x, y);
             dispatch_click(page, cx, cy).await?;
         }
         ClientMessage::Mousedown { x, y } => {
-            let (cx, cy) = scale_coords(x, y, viewport).await;
+            let (cx, cy) = scale_coords(x, y);
             dispatch_mouse(page, DispatchMouseEventType::MousePressed, cx, cy).await?;
         }
         ClientMessage::Mouseup { x, y } => {
-            let (cx, cy) = scale_coords(x, y, viewport).await;
+            let (cx, cy) = scale_coords(x, y);
             dispatch_mouse(page, DispatchMouseEventType::MouseReleased, cx, cy).await?;
         }
         ClientMessage::Mousemove { x, y } => {
-            let (cx, cy) = scale_coords(x, y, viewport).await;
+            let (cx, cy) = scale_coords(x, y);
             let params = DispatchMouseEventParams {
                 r#type: DispatchMouseEventType::MouseMoved,
                 x: cx,
@@ -390,7 +538,7 @@ async fn handle_client_input(
             delta_x,
             delta_y,
         } => {
-            let (cx, cy) = scale_coords(x, y, viewport).await;
+            let (cx, cy) = scale_coords(x, y);
             let params = DispatchMouseEventParams {
                 r#type: DispatchMouseEventType::MouseWheel,
                 x: cx,
@@ -421,9 +569,6 @@ async fn handle_client_input(
             page.execute(InsertTextParams::new(text)).await?;
         }
         ClientMessage::Resize { width, height } => {
-            let mut vp = viewport.lock().await;
-            vp.width = width;
-            vp.height = height;
             debug!(width, height, "Client viewport resized");
         }
     }
@@ -499,10 +644,10 @@ async fn dispatch_key(
     Ok(())
 }
 
-/// Scale client coordinates to Chrome viewport coordinates
-/// Client sends coordinates already scaled to Chrome viewport space (0..VIEWPORT_WIDTH, 0..VIEWPORT_HEIGHT).
+/// Scale client coordinates to Chrome viewport coordinates.
+/// Client sends coordinates already scaled to Chrome viewport space.
 /// Pass them through directly to CDP — no further scaling needed.
-async fn scale_coords(x: f64, y: f64, _viewport: &Mutex<ClientViewport>) -> (f64, f64) {
+fn scale_coords(x: f64, y: f64) -> (f64, f64) {
     (x, y)
 }
 
