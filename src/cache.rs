@@ -101,8 +101,13 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
         self.inner.browser_login().await
     }
 
-    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult> {
-        self.inner.credential_login(email, password).await
+    async fn credential_login(
+        &self,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult> {
+        self.inner.credential_login(email, password, method).await
     }
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
