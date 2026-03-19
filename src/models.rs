@@ -66,9 +66,9 @@ impl SportType {
         match strava_type.trim() {
             // API identifiers (camelCase)
             "Run" | "Course à pied" => Self::Run,
-            "Ride" | "Sortie à vélo" => Self::Ride,
+            "Ride" | "Sortie à vélo" | "Vélo" => Self::Ride,
             "Swim" | "Natation" => Self::Swim,
-            "Walk" | "Marche" => Self::Walk,
+            "Walk" | "Marche" | "Marche à pied" => Self::Walk,
             "Hike" | "Randonnée" => Self::Hike,
             "VirtualRide" | "Virtual Ride" => Self::VirtualRide,
             "VirtualRun" | "Virtual Run" => Self::VirtualRun,
@@ -77,9 +77,12 @@ impl SportType {
             "EBikeRide" | "E-Bike Ride" => Self::EbikeRide,
             "MountainBikeRide" | "Mountain Bike Ride" => Self::MountainBike,
             "GravelRide" | "Gravel Ride" => Self::GravelRide,
-            "CrossCountrySkiing" | "Cross-Country Skiing" | "Nordic Ski" | "Ski de fond" => {
-                Self::CrossCountrySkiing
-            }
+            "CrossCountrySkiing"
+            | "Cross-Country Skiing"
+            | "Nordic Ski"
+            | "Ski de fond"
+            | "Ski de fond classique"
+            | "Ski de fond skating" => Self::CrossCountrySkiing,
             "AlpineSkiing" | "AlpineSki" | "Alpine Ski" | "Ski alpin" => Self::AlpineSkiing,
             "Snowboarding" | "Snowboard" => Self::Snowboarding,
             "Snowshoe" | "Raquette" => Self::Snowshoe,

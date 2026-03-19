@@ -45,6 +45,9 @@ pub struct ListPageConfig {
     pub id_regex: String,
     /// CSS selectors for fields to extract from each row
     pub fields: ListFieldSelectors,
+    /// Optional custom JS for list extraction (overrides auto-generated JS from fields)
+    #[serde(default)]
+    pub js_extract: Option<String>,
 }
 
 /// CSS selectors for extracting fields from list page rows
@@ -103,9 +106,12 @@ impl ProviderConfig {
     /// with CSS selectors that contain single quotes.
     /// Generate the JS snippet for extracting activities from the list page.
     ///
-    /// Escapes double quotes in CSS selectors so they can be safely embedded
-    /// in JS string literals.
+    /// If the provider config has a custom `js_extract` in `list_page`, use that.
+    /// Otherwise, auto-generate JS from the CSS selectors in `fields`.
     pub fn list_extraction_js(&self) -> String {
+        if let Some(ref custom_js) = self.list_page.js_extract {
+            return custom_js.clone();
+        }
         let f = &self.list_page.fields;
         let esc = |s: &str| s.replace('"', r#"\""#);
 

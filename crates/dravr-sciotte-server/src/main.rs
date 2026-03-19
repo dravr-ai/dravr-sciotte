@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::path::Path;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
@@ -11,8 +12,9 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use dravr_sciotte::cache::CachedScraper;
-use dravr_sciotte::config::CacheConfig;
+use dravr_sciotte::config::{CacheConfig, ScraperConfig};
 use dravr_sciotte::models::ActivityParams;
+use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::transport::stdio::StdioTransport;
@@ -23,9 +25,13 @@ use dravr_sciotte_mcp::{build_tool_registry, McpServer, ServerState};
 #[command(
     name = "dravr-sciotte-server",
     version,
-    about = "Strava training data scraper"
+    about = "Sport activity scraper"
 )]
 struct Cli {
+    /// Provider config file (default: built-in strava)
+    #[arg(long, short, global = true)]
+    provider: Option<String>,
+
     /// Transport mode for MCP (when no subcommand)
     #[arg(long, default_value = "http")]
     transport: String,
@@ -91,16 +97,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let cli = Cli::parse();
 
+    let provider = load_provider_config(cli.provider.as_deref())?;
+
     match cli.command {
-        Some(Command::Serve { host, port }) => run_server(host, port).await,
-        Some(Command::Login) => run_login().await,
+        Some(Command::Serve { host, port }) => run_server(host, port, provider).await,
+        Some(Command::Login) => run_login(provider).await,
         Some(Command::Activities {
             limit,
             sport_type,
             format,
             login,
             detail,
-        }) => run_activities(limit, sport_type, format, login, detail).await,
+        }) => run_activities(limit, sport_type, format, login, detail, provider).await,
         Some(Command::AuthStatus) => run_auth_status().await,
         Some(Command::CacheClear) => {
             run_cache_clear();
@@ -108,20 +116,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         None => {
             if cli.transport == "stdio" {
-                run_mcp_stdio().await
+                run_mcp_stdio(provider).await
             } else {
-                run_server(cli.host, cli.port).await
+                run_server(cli.host, cli.port, provider).await
             }
         }
     }
 }
 
+/// Load provider config from a TOML file path, or use the built-in Strava default
+fn load_provider_config(
+    path: Option<&str>,
+) -> Result<ProviderConfig, Box<dyn std::error::Error + Send + Sync>> {
+    match path {
+        Some(p) => {
+            info!(provider = %p, "Loading provider config");
+            Ok(ProviderConfig::from_file(Path::new(p))?)
+        }
+        None => Ok(ProviderConfig::strava_default()),
+    }
+}
+
+fn create_scraper(provider: ProviderConfig) -> CachedScraper<ChromeScraper> {
+    let scraper = ChromeScraper::new(ScraperConfig::default(), provider);
+    CachedScraper::new(scraper, &CacheConfig::default())
+}
+
 async fn run_server(
     host: String,
     port: u16,
+    provider: ProviderConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::default_config();
-    let cached = CachedScraper::new(scraper, &CacheConfig::default());
+    let cached = create_scraper(provider);
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
     if let Ok(Some(session)) = dravr_sciotte::auth::load_session().await {
@@ -140,9 +166,10 @@ async fn run_server(
     Ok(())
 }
 
-async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::default_config();
-    let cached = CachedScraper::new(scraper, &CacheConfig::default());
+async fn run_mcp_stdio(
+    provider: ProviderConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cached = create_scraper(provider);
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
     if let Ok(Some(session)) = dravr_sciotte::auth::load_session().await {
@@ -154,14 +181,16 @@ async fn run_mcp_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     StdioTransport.serve(server).await
 }
 
-async fn run_login() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::default_config();
+async fn run_login(
+    provider: ProviderConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cached = create_scraper(provider);
 
-    println!("Opening browser for Strava login...");
-    println!("Log in to Strava in the browser window that opens.");
+    println!("Opening browser for login...");
+    println!("Complete the login in the browser window that opens.");
     println!("The browser will close automatically once login is detected.\n");
 
-    let session = scraper.browser_login().await?;
+    let session = cached.browser_login().await?;
 
     dravr_sciotte::auth::save_session(&session).await?;
 
@@ -177,12 +206,12 @@ async fn run_activities(
     format: String,
     force_login: bool,
     detail: bool,
+    provider: ProviderConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let scraper = ChromeScraper::default_config();
-    let cached = CachedScraper::new(scraper, &CacheConfig::default());
+    let cached = create_scraper(provider);
 
     let session = if force_login {
-        println!("Opening browser for Strava login...");
+        println!("Opening browser for login...");
         let s = cached.browser_login().await?;
         dravr_sciotte::auth::save_session(&s).await?;
         println!("Login successful!\n");
@@ -204,7 +233,7 @@ async fn run_activities(
         ..Default::default()
     };
 
-    println!("Scraping activities from Strava...");
+    println!("Scraping activities...");
     let activities = cached.get_activities(&session, &params).await?;
 
     if activities.is_empty() {
