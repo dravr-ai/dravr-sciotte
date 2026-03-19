@@ -94,12 +94,38 @@ enum ClientMessage {
     },
 }
 
-/// WebSocket upgrade handler for browser login streaming
+/// Query parameters for the WebSocket login endpoint
+#[derive(Debug, Deserialize)]
+pub struct BrowserLoginParams {
+    /// Optional bearer token for authentication (WebSocket can't send headers from JS)
+    token: Option<String>,
+}
+
+/// WebSocket upgrade handler for browser login streaming.
+///
+/// Accepts optional `?token=` query param for authentication since
+/// browser WebSocket API cannot send custom headers.
 pub async fn browser_login_ws(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<BrowserLoginParams>,
 ) -> impl IntoResponse {
+    // Validate bearer token if DRAVR_SCIOTTE_API_KEY is set
+    if let Ok(expected) = std::env::var("DRAVR_SCIOTTE_API_KEY") {
+        let provided = params.token.as_deref().unwrap_or("");
+        let is_valid: bool =
+            subtle::ConstantTimeEq::ct_eq(provided.as_bytes(), expected.as_bytes()).into();
+        if !is_valid {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid or missing token",
+            )
+                .into_response();
+        }
+    }
+
     ws.on_upgrade(move |socket| handle_browser_login(socket, state))
+        .into_response()
 }
 
 /// Core WebSocket handler that manages the Chrome session
@@ -185,7 +211,7 @@ async fn run_streaming_session(
                     }
                     let session_id = session.session_id.clone();
                     let cookie_count = session.cookies.len();
-                    state.write().await.set_session(session);
+                    state.write().await.add_session(session);
 
                     let msg = serde_json::json!({
                         "type": "login_success",
