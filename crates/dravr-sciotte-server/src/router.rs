@@ -1,16 +1,16 @@
 // ABOUTME: Axum router wiring REST, WebSocket streaming, and MCP HTTP transport
-// ABOUTME: Mounts auth, activity, browser streaming, health, and MCP routes with CORS
+// ABOUTME: Multi-session support via X-Session-Id header, CORS, and session management endpoints
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
-use axum::http::Method;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, Method};
 use axum::middleware;
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
@@ -36,6 +36,8 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/status", get(auth_status_handler))
+        .route("/auth/sessions", get(list_sessions_handler))
+        .route("/auth/sessions/{id}", delete(delete_session_handler))
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .layer(middleware::from_fn(auth_middleware))
@@ -65,10 +67,22 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
 }
 
 // ============================================================================
+// Session resolution helper
+// ============================================================================
+
+/// Extract session ID from the `X-Session-Id` header, falling back to the latest session
+fn resolve_session_id(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
+
+// ============================================================================
 // Auth Handlers
 // ============================================================================
 
-/// POST /auth/login — launch browser for user to log in to Strava
+/// POST /auth/login — launch browser for user login
 async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
     let session = {
         let guard = state.read().await;
@@ -85,21 +99,27 @@ async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
     }
 
     let session_id = session.session_id.clone();
-    state.write().await.set_session(session);
+    state.write().await.add_session(session);
 
-    info!("Browser login successful, session established");
+    info!("Login successful, session established");
     Json(json!({
         "status": "authenticated",
         "session_id": session_id,
-        "message": "Successfully logged in to Strava"
     }))
     .into_response()
 }
 
-/// GET /auth/status — check authentication status
-async fn auth_status_handler(State(state): State<SharedState>) -> impl IntoResponse {
+/// GET /auth/status — check authentication status (supports `X-Session-Id` header)
+async fn auth_status_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let guard = state.read().await;
-    if let Some(session) = guard.session() {
+
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+
+    if let Some(session) = session {
         let authenticated = guard.scraper().is_authenticated(session).await;
         Json(json!({
             "authenticated": authenticated,
@@ -109,8 +129,31 @@ async fn auth_status_handler(State(state): State<SharedState>) -> impl IntoRespo
     } else {
         Json(json!({
             "authenticated": false,
-            "message": "No active session. POST /auth/login to authenticate."
+            "message": "No active session. POST /auth/login or connect to /browser/login."
         }))
+    }
+}
+
+/// GET /auth/sessions — list all active session IDs
+async fn list_sessions_handler(State(state): State<SharedState>) -> impl IntoResponse {
+    let guard = state.read().await;
+    let session_ids = guard.list_session_ids();
+    Json(json!({
+        "count": session_ids.len(),
+        "sessions": session_ids,
+    }))
+}
+
+/// DELETE /auth/sessions/:id — remove a specific session
+async fn delete_session_handler(
+    State(state): State<SharedState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let mut guard = state.write().await;
+    if guard.remove_session(&session_id).is_some() {
+        Json(json!({"status": "removed", "session_id": session_id}))
+    } else {
+        Json(json!({"error": "session_not_found", "session_id": session_id}))
     }
 }
 
@@ -122,19 +165,24 @@ async fn auth_status_handler(State(state): State<SharedState>) -> impl IntoRespo
 struct ActivityQuery {
     limit: Option<u32>,
     sport_type: Option<String>,
+    detail: Option<bool>,
 }
 
-/// GET /api/activities — list scraped activities
+/// GET /api/activities — list scraped activities (supports `X-Session-Id` header)
 async fn activities_handler(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Query(query): Query<ActivityQuery>,
 ) -> impl IntoResponse {
     let guard = state.read().await;
 
-    let Some(session) = guard.session() else {
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+
+    let Some(session) = session else {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Not authenticated. POST /auth/login to start."})),
+            Json(json!({"error": "session_not_found", "message": "Provide X-Session-Id header or login first."})),
         )
             .into_response();
     };
@@ -142,6 +190,7 @@ async fn activities_handler(
     let params = ActivityParams {
         limit: query.limit,
         sport_type: query.sport_type,
+        enrich_details: query.detail.unwrap_or(false),
         ..Default::default()
     };
 
@@ -159,17 +208,21 @@ async fn activities_handler(
     }
 }
 
-/// GET /api/activities/:id — get single activity detail
+/// GET /api/activities/:id — get single activity detail (supports `X-Session-Id` header)
 async fn activity_detail_handler(
     State(state): State<SharedState>,
-    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
     let guard = state.read().await;
 
-    let Some(session) = guard.session() else {
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |sid| guard.get_session(&sid));
+
+    let Some(session) = session else {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Not authenticated"})),
+            Json(json!({"error": "session_not_found"})),
         )
             .into_response();
     };

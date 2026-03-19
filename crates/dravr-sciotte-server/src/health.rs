@@ -1,5 +1,5 @@
 // ABOUTME: Health check endpoint handler
-// ABOUTME: Reports authentication status and cache statistics
+// ABOUTME: Reports session count, cache statistics, and server status
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -12,14 +12,18 @@ use dravr_sciotte_mcp::state::SharedState;
 
 /// GET /health — server health check
 pub async fn health_handler(State(state): State<SharedState>) -> Json<Value> {
-    let state = state.read().await;
-    let has_session = state.session().is_some();
-    let cache_stats = state.scraper().stats();
+    let guard = state.read().await;
+    let session_count = guard.session_count();
+    let session_ids = guard.list_session_ids();
+    let cache_stats = guard.scraper().stats();
 
     Json(json!({
         "status": "ok",
         "service": "dravr-sciotte",
-        "authenticated": has_session,
+        "sessions": {
+            "count": session_count,
+            "ids": session_ids,
+        },
         "cache": cache_stats,
     }))
 }
