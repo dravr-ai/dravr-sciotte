@@ -91,6 +91,13 @@ pub struct CredentialLoginRequest {
     pub password: String,
 }
 
+/// Request body for OTP/2FA code submission
+#[derive(Debug, Deserialize)]
+pub struct OtpSubmitRequest {
+    /// One-time password or 2FA code
+    pub code: String,
+}
+
 /// Query parameters for the WebSocket login endpoint
 #[derive(Debug, Deserialize)]
 pub struct BrowserLoginParams {
@@ -393,6 +400,68 @@ pub async fn credential_login(
         }
         Err(e) => {
             error!(error = %e, "Credential login error");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "reason": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /auth/submit-otp handler.
+///
+/// Submits a one-time password / 2FA code after `credential_login` returned `otp_required`.
+pub async fn submit_otp(
+    State(state): State<SharedState>,
+    Json(request): Json<OtpSubmitRequest>,
+) -> impl IntoResponse {
+    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
+        let guard = state.read().await;
+        guard.scraper().submit_otp(&request.code).await
+    };
+
+    match result {
+        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
+            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+                warn!(error = %e, "Failed to persist session to disk");
+            }
+            let session_id = session.session_id.clone();
+            let cookie_count = session.cookies.len();
+            state.write().await.add_session(session);
+
+            info!(session_id = %session_id, "OTP verification successful");
+            Json(json!({
+                "status": "authenticated",
+                "session_id": session_id,
+                "cookie_count": cookie_count,
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+            info!("OTP submitted but another verification step required");
+            Json(json!({
+                "status": "otp_required",
+                "reason": "Additional verification step required",
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+            warn!(reason = %reason, "OTP verification rejected");
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "status": "failed",
+                    "reason": reason,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!(error = %e, "OTP submission error");
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({

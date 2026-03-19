@@ -105,6 +105,10 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
         self.inner.credential_login(email, password).await
     }
 
+    async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
+        self.inner.submit_otp(code).await
+    }
+
     async fn is_authenticated(&self, session: &AuthSession) -> bool {
         self.inner.is_authenticated(session).await
     }

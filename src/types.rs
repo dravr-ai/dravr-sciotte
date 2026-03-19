@@ -27,7 +27,13 @@ pub trait ActivityScraper: Send + Sync {
     /// Log in programmatically with email and password.
     /// Launches headless Chrome, fills the login form, handles cookie consent,
     /// and detects success, failure, or OTP/2FA requirements.
+    /// If OTP is required, the browser is kept alive for a follow-up `submit_otp` call.
     async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult>;
+
+    /// Submit a one-time password / 2FA code after `credential_login` returned `OtpRequired`.
+    /// Reuses the browser page from the credential login attempt, fills the OTP field,
+    /// and polls for success or failure.
+    async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult>;
 
     /// Check if a session is still valid (cookies not expired)
     async fn is_authenticated(&self, session: &AuthSession) -> bool;

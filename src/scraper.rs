@@ -26,6 +26,8 @@ const LOGIN_POLL_INTERVAL_MS: u64 = 500;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
 const PAGE_LOAD_WAIT_SECS: u64 = 2;
 const FORM_INTERACTION_DELAY_MS: u64 = 300;
+const EMAIL_STEP_TIMEOUT_SECS: u64 = 5;
+const PASSWORD_STEP_TIMEOUT_SECS: u64 = 10;
 
 /// URL patterns that indicate an OTP/2FA page
 const OTP_URL_PATTERNS: &[&str] = &["verify", "2fa", "challenge", "mfa", "otp"];
@@ -39,6 +41,8 @@ pub struct ChromeScraper {
     provider: ProviderConfig,
     /// Shared browser instance for headless scraping (lazily created)
     browser: Mutex<Option<Arc<Browser>>>,
+    /// Browser page kept alive during OTP flow for `submit_otp` follow-up
+    pending_otp_page: Mutex<Option<chromiumoxide::Page>>,
 }
 
 impl ChromeScraper {
@@ -49,6 +53,7 @@ impl ChromeScraper {
             config,
             provider,
             browser: Mutex::new(None),
+            pending_otp_page: Mutex::new(None),
         }
     }
 
@@ -174,30 +179,7 @@ impl ActivityScraper for ChromeScraper {
     }
 
     async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult> {
-        let email_selector = self
-            .provider
-            .provider
-            .login_email_selector
-            .as_deref()
-            .ok_or_else(|| ScraperError::Config {
-                reason: "Provider has no login_email_selector configured".to_owned(),
-            })?;
-        let password_selector = self
-            .provider
-            .provider
-            .login_password_selector
-            .as_deref()
-            .ok_or_else(|| ScraperError::Config {
-                reason: "Provider has no login_password_selector configured".to_owned(),
-            })?;
-        let button_selector = self
-            .provider
-            .provider
-            .login_button_selector
-            .as_deref()
-            .ok_or_else(|| ScraperError::Config {
-                reason: "Provider has no login_button_selector configured".to_owned(),
-            })?;
+        let selectors = LoginSelectors::from_provider(&self.provider)?;
 
         info!(
             provider = %self.provider.provider.name,
@@ -215,83 +197,89 @@ impl ActivityScraper for ChromeScraper {
         tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
         dismiss_cookie_dialog(&page).await;
 
-        // Fill email field using React-compatible value setter
-        fill_input_field(&page, email_selector, email).await?;
+        // Step 1: Fill email
+        fill_input_field(&page, selectors.email, email).await?;
         tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
 
-        // Fill password field
-        fill_input_field(&page, password_selector, password).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        // Two-step login (e.g., Strava): password field not yet visible.
+        // Submit email first, wait for password field or an early result.
+        if !element_exists(&page, selectors.password).await {
+            click_element(&page, selectors.button).await?;
+            let step1 = poll_for_next_step(
+                &page,
+                &self.provider,
+                selectors.password,
+                EMAIL_STEP_TIMEOUT_SECS,
+            )
+            .await?;
+            match step1 {
+                StepOutcome::FieldAppeared => {}
+                StepOutcome::LoginResult(result) => {
+                    if matches!(result, LoginResult::OtpRequired) {
+                        *self.pending_otp_page.lock().await = Some(page);
+                    }
+                    return Ok(result);
+                }
+            }
+        }
 
-        // Click the submit button
+        // Password field is now visible — fill and submit
+        fill_input_field(&page, selectors.password, password).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        click_element(&page, selectors.button).await?;
+
+        // Step 3: Poll for final result (success, OTP, or error)
+        let result =
+            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
+
+        if matches!(result, LoginResult::OtpRequired) {
+            *self.pending_otp_page.lock().await = Some(page);
+        }
+
+        Ok(result)
+    }
+
+    async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
+        let page = self
+            .pending_otp_page
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| ScraperError::Auth {
+                reason: "No pending OTP session — call credential_login first".to_owned(),
+            })?;
+
+        let otp_selector = self
+            .provider
+            .provider
+            .login_otp_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_otp_selector configured".to_owned(),
+            })?;
+        let button_selector = self
+            .provider
+            .provider
+            .login_button_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_button_selector configured".to_owned(),
+            })?;
+
+        info!("Submitting OTP code");
+        fill_input_field(&page, otp_selector, code).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
         click_element(&page, button_selector).await?;
 
-        // Poll for login success, failure, or OTP requirement
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                return Err(ScraperError::Auth {
-                    reason: "Credential login timed out".to_owned(),
-                });
-            }
+        let result =
+            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
 
-            let url = page
-                .url()
-                .await
-                .map_err(|e| ScraperError::Browser {
-                    reason: format!("Failed to get page URL: {e}"),
-                })?
-                .unwrap_or_default();
-
-            // Check for OTP/2FA pages
-            if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
-                info!(url = %url, "OTP/2FA page detected");
-                return Ok(LoginResult::OtpRequired);
-            }
-
-            let on_success = self
-                .provider
-                .provider
-                .login_success_patterns
-                .iter()
-                .any(|p| url.contains(p));
-            let on_failure = self
-                .provider
-                .provider
-                .login_failure_patterns
-                .iter()
-                .any(|p| url.contains(p));
-
-            if !url.is_empty() && on_success && !on_failure {
-                info!(url = %url, "Credential login detected via URL");
-                let cookies = extract_cookies(&page, &self.provider.provider.name).await?;
-                if cookies.is_empty() {
-                    return Err(ScraperError::Auth {
-                        reason: "No cookies captured after login".to_owned(),
-                    });
-                }
-                let session = AuthSession {
-                    session_id: generate_session_id(),
-                    cookies,
-                    created_at: Utc::now(),
-                    expires_at: None,
-                };
-                info!(
-                    cookie_count = session.cookies.len(),
-                    "Credential login successful"
-                );
-                return Ok(LoginResult::Success(session));
-            }
-
-            // Check for error messages on the login page
-            if let Some(ref error_selector) = self.provider.provider.login_error_selector {
-                if let Some(error_text) = read_visible_text(&page, error_selector).await {
-                    return Ok(LoginResult::Failed(error_text));
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+        // If OTP leads to another OTP step, keep the page alive
+        if matches!(result, LoginResult::OtpRequired) {
+            *self.pending_otp_page.lock().await = Some(page);
         }
+
+        Ok(result)
     }
 
     async fn is_authenticated(&self, session: &AuthSession) -> bool {
@@ -466,6 +454,133 @@ async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult
 }
 
 // ============================================================================
+// Login flow types and helpers
+// ============================================================================
+
+/// Extracted login selectors from provider config, validated upfront
+struct LoginSelectors<'a> {
+    email: &'a str,
+    password: &'a str,
+    button: &'a str,
+}
+
+impl<'a> LoginSelectors<'a> {
+    fn from_provider(provider: &'a ProviderConfig) -> ScraperResult<Self> {
+        let email = provider
+            .provider
+            .login_email_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_email_selector configured".to_owned(),
+            })?;
+        let password = provider
+            .provider
+            .login_password_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_password_selector configured".to_owned(),
+            })?;
+        let button = provider
+            .provider
+            .login_button_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_button_selector configured".to_owned(),
+            })?;
+        Ok(Self {
+            email,
+            password,
+            button,
+        })
+    }
+}
+
+/// Outcome of waiting for the next login step
+enum StepOutcome {
+    /// The expected field appeared in the DOM
+    FieldAppeared,
+    /// Login resolved early (success, OTP, or failure)
+    LoginResult(LoginResult),
+}
+
+/// Poll until a target field appears OR a login result is detected (success/OTP/error)
+async fn poll_for_next_step(
+    page: &chromiumoxide::Page,
+    provider: &ProviderConfig,
+    field_selector: &str,
+    timeout_secs: u64,
+) -> ScraperResult<StepOutcome> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(ScraperError::Auth {
+                reason: format!(
+                    "Login step timed out after {timeout_secs}s waiting for next field"
+                ),
+            });
+        }
+
+        // Check if the target field appeared
+        if element_exists(page, field_selector).await {
+            return Ok(StepOutcome::FieldAppeared);
+        }
+
+        let url = page
+            .url()
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to get page URL: {e}"),
+            })?
+            .unwrap_or_default();
+
+        // Check for OTP/2FA pages
+        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+            info!(url = %url, "OTP/2FA page detected during step transition");
+            return Ok(StepOutcome::LoginResult(LoginResult::OtpRequired));
+        }
+
+        // Check for success
+        let on_success = provider
+            .provider
+            .login_success_patterns
+            .iter()
+            .any(|p| url.contains(p));
+        let on_failure = provider
+            .provider
+            .login_failure_patterns
+            .iter()
+            .any(|p| url.contains(p));
+
+        if !url.is_empty() && on_success && !on_failure {
+            info!(url = %url, "Login succeeded during step transition");
+            let cookies = extract_cookies(page, &provider.provider.name).await?;
+            if cookies.is_empty() {
+                return Err(ScraperError::Auth {
+                    reason: "No cookies captured after login".to_owned(),
+                });
+            }
+            let session = AuthSession {
+                session_id: generate_session_id(),
+                cookies,
+                created_at: Utc::now(),
+                expires_at: None,
+            };
+            return Ok(StepOutcome::LoginResult(LoginResult::Success(session)));
+        }
+
+        // Check for error messages
+        if let Some(ref error_selector) = provider.provider.login_error_selector {
+            if let Some(error_text) = read_visible_text(page, error_selector).await {
+                return Ok(StepOutcome::LoginResult(LoginResult::Failed(error_text)));
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+    }
+}
+
+// ============================================================================
 // Shared browser automation helpers
 // ============================================================================
 
@@ -600,6 +715,25 @@ async fn click_element(page: &chromiumoxide::Page, selector: &str) -> ScraperRes
     Ok(())
 }
 
+/// Check if an element matching the selector exists in the DOM
+async fn element_exists(page: &chromiumoxide::Page, selector: &str) -> bool {
+    let escaped = escape_js_selector(selector);
+    let js = format!(
+        r#"(function() {{
+            var selectors = "{escaped}".split(",").map(function(s) {{ return s.trim(); }});
+            for (var i = 0; i < selectors.length; i++) {{
+                if (document.querySelector(selectors[i])) return "found";
+            }}
+            return "not_found";
+        }})()"#
+    );
+    page.evaluate(js)
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(|s| s == "found")))
+        .unwrap_or(false)
+}
+
 /// Read visible text from an element, returning `None` if element is missing or hidden
 async fn read_visible_text(page: &chromiumoxide::Page, selector: &str) -> Option<String> {
     let escaped = escape_js_selector(selector);
@@ -625,6 +759,78 @@ async fn read_visible_text(page: &chromiumoxide::Page, selector: &str) -> Option
         None
     } else {
         Some(text)
+    }
+}
+
+/// Poll for credential login result: success, OTP required, or failure with error message
+async fn poll_credential_login_result(
+    page: &chromiumoxide::Page,
+    provider: &ProviderConfig,
+    timeout_secs: u64,
+) -> ScraperResult<LoginResult> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err(ScraperError::Auth {
+                reason: "Credential login timed out".to_owned(),
+            });
+        }
+
+        let url = page
+            .url()
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to get page URL: {e}"),
+            })?
+            .unwrap_or_default();
+
+        // Check for OTP/2FA pages
+        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+            info!(url = %url, "OTP/2FA page detected");
+            return Ok(LoginResult::OtpRequired);
+        }
+
+        let on_success = provider
+            .provider
+            .login_success_patterns
+            .iter()
+            .any(|p| url.contains(p));
+        let on_failure = provider
+            .provider
+            .login_failure_patterns
+            .iter()
+            .any(|p| url.contains(p));
+
+        if !url.is_empty() && on_success && !on_failure {
+            info!(url = %url, "Credential login detected via URL");
+            let cookies = extract_cookies(page, &provider.provider.name).await?;
+            if cookies.is_empty() {
+                return Err(ScraperError::Auth {
+                    reason: "No cookies captured after login".to_owned(),
+                });
+            }
+            let session = AuthSession {
+                session_id: generate_session_id(),
+                cookies,
+                created_at: Utc::now(),
+                expires_at: None,
+            };
+            info!(
+                cookie_count = session.cookies.len(),
+                "Credential login successful"
+            );
+            return Ok(LoginResult::Success(session));
+        }
+
+        // Check for error messages on the login page
+        if let Some(ref error_selector) = provider.provider.login_error_selector {
+            if let Some(error_text) = read_visible_text(page, error_selector).await {
+                return Ok(LoginResult::Failed(error_text));
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
     }
 }
 

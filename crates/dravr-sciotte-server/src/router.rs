@@ -42,6 +42,7 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
             "/auth/login-with-credentials",
             post(streaming::credential_login),
         )
+        .route("/auth/submit-otp", post(streaming::submit_otp))
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .layer(middleware::from_fn(auth_middleware))
