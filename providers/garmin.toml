@@ -1,0 +1,118 @@
+# Provider configuration for Garmin Connect (connect.garmin.com)
+# Supports MFA — browser stays open while user completes verification
+
+[provider]
+name = "garmin"
+login_url = "https://sso.garmin.com/portal/sso/en-US/sign-in?clientId=GarminConnect&service=https%3A%2F%2Fconnect.garmin.com%2Fmodern"
+login_success_patterns = ["/app/home", "/app/activities", "/modern", "/dashboard"]
+login_failure_patterns = ["/sso/", "/sign-in", "/verify"]
+
+[list_page]
+url = "https://connect.garmin.com/modern/activities"
+row_selector = '[class*="ActivityListItem_tabletListItem"]'
+link_selector = 'a[href*="/activity/"]'
+id_regex = '/\/activity\/(\d+)/'
+# Custom JS for list extraction — Garmin uses metric label/value pairs, not table columns
+js_extract = '''
+(function() {
+    var items = document.querySelectorAll('[class*="ActivityListItem_tabletListItem"]');
+    var activities = [];
+    var seen = {};
+    for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        var link = item.querySelector('a[href*="/activity/"]');
+        if (!link) continue;
+        var href = link.getAttribute("href") || "";
+        var idMatch = href.match(/\/activity\/(\d+)/);
+        if (!idMatch || seen[idMatch[1]]) continue;
+        seen[idMatch[1]] = true;
+
+        var a = { id: idMatch[1], name: link.textContent.trim() };
+
+        var typeEl = item.querySelector('[class*="activityTypeText"]');
+        a.type = typeEl ? typeEl.textContent.trim() : "";
+
+        var dateEl = item.querySelector('[class*="activityDate__"]');
+        var yearEl = item.querySelector('[class*="activityDateYear"]');
+        a.date = (dateEl ? dateEl.textContent.trim() : "") + " " + (yearEl ? yearEl.textContent.trim() : "");
+
+        var metrics = item.querySelectorAll('[class*="metricItem"]');
+        for (var m = 0; m < metrics.length; m++) {
+            var label = metrics[m].querySelector('[class*="Label"]');
+            var value = metrics[m].querySelector('[class*="Value"]');
+            if (!label || !value) continue;
+            var key = label.textContent.trim().toLowerCase();
+            var val = value.textContent.trim();
+
+            if (key.includes("distance")) a.distance = val;
+            else if (key.includes("dur") || key.includes("time") || key.includes("temps")) a.time = val;
+            else if (key.includes("allure") || key.includes("pace")) a.pace = val;
+            else if (key.includes("ascension") || key.includes("elevation")) a.elevation = val;
+            else if (key.includes("cardiaque") || key.includes("heart")) a.avg_hr = val;
+            else if (key.includes("calories")) a.calories = val;
+        }
+
+        activities.push(a);
+    }
+    return JSON.stringify(activities);
+})()
+'''
+
+# Fields are unused when js_extract is set, but required by the schema
+[list_page.fields]
+name = 'a[href*="/activity/"]'
+sport_type = '[class*="activityTypeText"]'
+date = '[class*="activityDate"]'
+time = '[class*="metricValue"]'
+distance = '[class*="metricValue"]'
+elevation = '[class*="metricValue"]'
+
+[detail_page]
+url_template = "https://connect.garmin.com/modern/activity/{id}"
+js_extract = '''
+(function() {
+    var data = {};
+
+    // Activity name
+    var nameEl = document.querySelector('h1, [class*="activityName"], [class*="activity-name"]');
+    if (nameEl) data.name = nameEl.textContent.trim();
+
+    // Activity type
+    var typeEl = document.querySelector('[class*="activityType"], [class*="activity-type"]');
+    if (typeEl) data.type = typeEl.textContent.trim();
+
+    // Extract all metric key-value pairs from the page
+    var metrics = document.querySelectorAll('[class*="metricItem"], [class*="metric-item"], [class*="stat"]');
+    metrics.forEach(function(m) {
+        var label = m.querySelector('[class*="Label"], [class*="label"]');
+        var value = m.querySelector('[class*="Value"], [class*="value"]');
+        if (!label || !value) return;
+        var key = label.textContent.trim().toLowerCase();
+        var val = value.textContent.trim();
+
+        if (key.includes('distance')) data.distance = val;
+        else if (key.includes('dur') || key.includes('time') || key.includes('temps')) data.moving_time = val;
+        else if (key.includes('allure') || key.includes('pace')) data.pace = val;
+        else if (key.includes('ascension') || key.includes('elevation') || key.includes('elev')) data.elevation = val;
+        else if (key.includes('fr') || key.includes('heart') || key.includes('cardiaque')) {
+            if (key.includes('max')) data.max_hr = val;
+            else data.avg_hr = val;
+        }
+        else if (key.includes('calories')) data.calories = val;
+        else if (key.includes('cadence')) data.cadence = val;
+        else if (key.includes('vitesse') || key.includes('speed')) {
+            if (key.includes('max')) data.max_speed = val;
+            else data.avg_speed = val;
+        }
+        else if (key.includes('puissance') || key.includes('power')) data.avg_power = val;
+        else if (key.includes('temp')) data.temperature = val;
+    });
+
+    // Device
+    var allText = document.body.textContent;
+    var devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS)[^\n,]*/i);
+    if (devMatch) data.device = devMatch[0].trim();
+
+    return JSON.stringify(data);
+})()
+'''

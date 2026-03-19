@@ -532,11 +532,15 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
         elevation_gain: item["elevation"]
             .as_str()
             .and_then(|e| e.replace([',', 'm'], "").trim().parse().ok()),
-        average_heart_rate: None,
+        average_heart_rate: item["avg_hr"]
+            .as_str()
+            .and_then(|h| h.replace("bpm", "").trim().parse().ok()),
         max_heart_rate: None,
         average_speed: None,
         max_speed: None,
-        calories: None,
+        calories: item["calories"]
+            .as_str()
+            .and_then(|c| c.replace(',', "").trim().parse().ok()),
         average_power: None,
         max_power: None,
         normalized_power: None,
@@ -557,7 +561,7 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
         wind_speed: None,
         wind_direction: None,
         weather: None,
-        pace: None,
+        pace: item["pace"].as_str().map(String::from),
         gap: None,
         elapsed_time_seconds: None,
         device_name: None,
