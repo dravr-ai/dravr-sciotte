@@ -13,7 +13,7 @@ use moka::future::Cache;
 use tracing::{debug, info};
 
 use crate::config::CacheConfig;
-use crate::error::ScraperResult;
+use crate::error::{LoginResult, ScraperResult};
 use crate::models::{Activity, ActivityParams, AuthSession};
 use crate::types::ActivityScraper;
 
@@ -99,6 +99,10 @@ impl<S: ActivityScraper> CachedScraper<S> {
 impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
     async fn browser_login(&self) -> ScraperResult<AuthSession> {
         self.inner.browser_login().await
+    }
+
+    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult> {
+        self.inner.credential_login(email, password).await
     }
 
     async fn is_authenticated(&self, session: &AuthSession) -> bool {

@@ -72,6 +72,17 @@ impl ScraperError {
     }
 }
 
+/// Result of a credential-based login attempt
+#[derive(Debug)]
+pub enum LoginResult {
+    /// Login succeeded — session cookies captured
+    Success(crate::models::AuthSession),
+    /// Provider requires a one-time password / 2FA code
+    OtpRequired,
+    /// Login was rejected (wrong password, account locked, etc.)
+    Failed(String),
+}
+
 /// HTTP error response body for REST API error responses
 #[derive(Debug, serde::Serialize)]
 pub struct ErrorResponse {

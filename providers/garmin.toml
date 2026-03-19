@@ -6,6 +6,10 @@ name = "garmin"
 login_url = "https://sso.garmin.com/portal/sso/en-US/sign-in?clientId=GarminConnect&service=https%3A%2F%2Fconnect.garmin.com%2Fmodern"
 login_success_patterns = ["/app/home", "/app/activities", "/modern", "/dashboard"]
 login_failure_patterns = ["/sso/", "/sign-in", "/verify"]
+login_email_selector = '#email, input[name="username"], input[name="email"]'
+login_password_selector = '#password, input[name="password"]'
+login_button_selector = '#login-btn-signin, button[type="submit"]'
+login_error_selector = '.alert-error, [class*="error-message"], [class*="status-error"]'
 
 [list_page]
 url = "https://connect.garmin.com/modern/activities"

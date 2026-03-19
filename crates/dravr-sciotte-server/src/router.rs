@@ -38,6 +38,10 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
         .route("/auth/status", get(auth_status_handler))
         .route("/auth/sessions", get(list_sessions_handler))
         .route("/auth/sessions/{id}", delete(delete_session_handler))
+        .route(
+            "/auth/login-with-credentials",
+            post(streaming::credential_login),
+        )
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .layer(middleware::from_fn(auth_middleware))

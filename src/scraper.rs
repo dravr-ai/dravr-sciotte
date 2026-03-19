@@ -16,13 +16,19 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::config::ScraperConfig;
-use crate::error::{ScraperError, ScraperResult};
+use crate::error::{LoginResult, ScraperError, ScraperResult};
+use crate::js_utils::{escape_js_selector, escape_js_string};
 use crate::models::{Activity, ActivityParams, AuthSession, CookieData, SportType};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
 const LOGIN_POLL_INTERVAL_MS: u64 = 500;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
+const PAGE_LOAD_WAIT_SECS: u64 = 2;
+const FORM_INTERACTION_DELAY_MS: u64 = 300;
+
+/// URL patterns that indicate an OTP/2FA page
+const OTP_URL_PATTERNS: &[&str] = &["verify", "2fa", "challenge", "mfa", "otp"];
 
 /// Chrome-based sport activity scraper driven by a TOML provider configuration.
 ///
@@ -165,6 +171,127 @@ impl ActivityScraper for ChromeScraper {
             "Login successful, session captured"
         );
         Ok(session)
+    }
+
+    async fn credential_login(&self, email: &str, password: &str) -> ScraperResult<LoginResult> {
+        let email_selector = self
+            .provider
+            .provider
+            .login_email_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_email_selector configured".to_owned(),
+            })?;
+        let password_selector = self
+            .provider
+            .provider
+            .login_password_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_password_selector configured".to_owned(),
+            })?;
+        let button_selector = self
+            .provider
+            .provider
+            .login_button_selector
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no login_button_selector configured".to_owned(),
+            })?;
+
+        info!(
+            provider = %self.provider.provider.name,
+            "Starting credential login"
+        );
+
+        let browser = launch_browser(&self.config, true).await?;
+        let page = browser
+            .new_page(&self.provider.provider.login_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to open login page: {e}"),
+            })?;
+
+        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        dismiss_cookie_dialog(&page).await;
+
+        // Fill email field using React-compatible value setter
+        fill_input_field(&page, email_selector, email).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+
+        // Fill password field
+        fill_input_field(&page, password_selector, password).await?;
+        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+
+        // Click the submit button
+        click_element(&page, button_selector).await?;
+
+        // Poll for login success, failure, or OTP requirement
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(ScraperError::Auth {
+                    reason: "Credential login timed out".to_owned(),
+                });
+            }
+
+            let url = page
+                .url()
+                .await
+                .map_err(|e| ScraperError::Browser {
+                    reason: format!("Failed to get page URL: {e}"),
+                })?
+                .unwrap_or_default();
+
+            // Check for OTP/2FA pages
+            if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+                info!(url = %url, "OTP/2FA page detected");
+                return Ok(LoginResult::OtpRequired);
+            }
+
+            let on_success = self
+                .provider
+                .provider
+                .login_success_patterns
+                .iter()
+                .any(|p| url.contains(p));
+            let on_failure = self
+                .provider
+                .provider
+                .login_failure_patterns
+                .iter()
+                .any(|p| url.contains(p));
+
+            if !url.is_empty() && on_success && !on_failure {
+                info!(url = %url, "Credential login detected via URL");
+                let cookies = extract_cookies(&page, &self.provider.provider.name).await?;
+                if cookies.is_empty() {
+                    return Err(ScraperError::Auth {
+                        reason: "No cookies captured after login".to_owned(),
+                    });
+                }
+                let session = AuthSession {
+                    session_id: generate_session_id(),
+                    cookies,
+                    created_at: Utc::now(),
+                    expires_at: None,
+                };
+                info!(
+                    cookie_count = session.cookies.len(),
+                    "Credential login successful"
+                );
+                return Ok(LoginResult::Success(session));
+            }
+
+            // Check for error messages on the login page
+            if let Some(ref error_selector) = self.provider.provider.login_error_selector {
+                if let Some(error_text) = read_visible_text(&page, error_selector).await {
+                    return Ok(LoginResult::Failed(error_text));
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+        }
     }
 
     async fn is_authenticated(&self, session: &AuthSession) -> bool {
@@ -336,6 +463,169 @@ async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult
     });
 
     Ok(browser)
+}
+
+// ============================================================================
+// Shared browser automation helpers
+// ============================================================================
+
+/// Auto-dismiss cookie consent dialogs (`Cookiebot`, `CookieFirst`, generic accept buttons)
+async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
+    let dismiss_js = r#"
+        (function() {
+            var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                || document.querySelector('[data-cookiefirst-action="accept"]')
+                || document.querySelector('button[id*="accept"], button[class*="accept"]');
+            if (btn) { btn.click(); return 'dismissed'; }
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                try {
+                    var doc = iframes[i].contentDocument;
+                    if (doc) {
+                        var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
+                            || doc.querySelector('button[id*="accept"]');
+                        if (b) { b.click(); return 'dismissed_iframe'; }
+                    }
+                } catch(e) {}
+            }
+            return 'not_found';
+        })()
+    "#;
+    if let Ok(result) = page.evaluate(dismiss_js).await {
+        let val = result
+            .value()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        info!(result = %val, "Cookie dialog auto-dismiss attempt");
+    }
+}
+
+/// Fill an input field using React-compatible value setting.
+///
+/// Uses `Object.getOwnPropertyDescriptor` to call the native `HTMLInputElement` value
+/// setter, bypassing React's synthetic event system. Dispatches `input`, `change`,
+/// and `blur` events to trigger framework change handlers.
+async fn fill_input_field(
+    page: &chromiumoxide::Page,
+    selector: &str,
+    value: &str,
+) -> ScraperResult<()> {
+    let escaped_value = escape_js_string(value);
+    let escaped_selector = escape_js_selector(selector);
+    let js = format!(
+        r#"(function() {{
+            var selectors = "{escaped_selector}".split(",").map(function(s) {{ return s.trim(); }});
+            var el = null;
+            for (var i = 0; i < selectors.length; i++) {{
+                el = document.querySelector(selectors[i]);
+                if (el) break;
+            }}
+            if (!el) return "not_found";
+            el.focus();
+            var nativeSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, "value"
+            ).set;
+            nativeSetter.call(el, "{escaped_value}");
+            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+            el.dispatchEvent(new Event("blur", {{ bubbles: true }}));
+            return "filled";
+        }})()"#
+    );
+
+    let result = page.evaluate(js).await.map_err(|e| ScraperError::Browser {
+        reason: format!("Failed to fill input '{selector}': {e}"),
+    })?;
+
+    let status = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+
+    if status == "not_found" {
+        return Err(ScraperError::Scraping {
+            reason: format!("Input element not found for selector: {selector}"),
+        });
+    }
+
+    debug!(selector, "Input field filled");
+    Ok(())
+}
+
+/// Click an element matching the given CSS selector.
+///
+/// Supports comma-separated fallback selectors and a `text:` prefix for
+/// matching by button text content (e.g., `text:Sign In With Google`).
+async fn click_element(page: &chromiumoxide::Page, selector: &str) -> ScraperResult<()> {
+    let escaped_selector = escape_js_selector(selector);
+    let js = format!(
+        r#"(function() {{
+            var parts = "{escaped_selector}".split(",").map(function(s) {{ return s.trim(); }});
+            for (var i = 0; i < parts.length; i++) {{
+                var sel = parts[i];
+                if (sel.indexOf("text:") === 0) {{
+                    var text = sel.substring(5);
+                    var buttons = document.querySelectorAll("button, a, [role=button]");
+                    for (var j = 0; j < buttons.length; j++) {{
+                        if (buttons[j].textContent.trim().indexOf(text) !== -1) {{
+                            buttons[j].click();
+                            return "clicked";
+                        }}
+                    }}
+                }} else {{
+                    var el = document.querySelector(sel);
+                    if (el) {{ el.click(); return "clicked"; }}
+                }}
+            }}
+            return "not_found";
+        }})()"#
+    );
+
+    let result = page.evaluate(js).await.map_err(|e| ScraperError::Browser {
+        reason: format!("Failed to click '{selector}': {e}"),
+    })?;
+
+    let status = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+
+    if status == "not_found" {
+        return Err(ScraperError::Scraping {
+            reason: format!("Button not found for selector: {selector}"),
+        });
+    }
+
+    debug!(selector, "Element clicked");
+    Ok(())
+}
+
+/// Read visible text from an element, returning `None` if element is missing or hidden
+async fn read_visible_text(page: &chromiumoxide::Page, selector: &str) -> Option<String> {
+    let escaped = escape_js_selector(selector);
+    let js = format!(
+        r#"(function() {{
+            var selectors = "{escaped}".split(",").map(function(s) {{ return s.trim(); }});
+            for (var i = 0; i < selectors.length; i++) {{
+                var el = document.querySelector(selectors[i]);
+                if (el && el.offsetParent !== null) {{
+                    var text = el.textContent.trim();
+                    if (text) return text;
+                }}
+            }}
+            return "";
+        }})()"#
+    );
+    let result = page.evaluate(js).await.ok()?;
+    let text = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Poll the browser page until the user has completed login.

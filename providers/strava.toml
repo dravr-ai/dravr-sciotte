@@ -6,6 +6,14 @@ name = "strava"
 login_url = "https://www.strava.com/login"
 login_success_patterns = ["/dashboard", "/athlete", "/onboarding", "strava.com/feed"]
 login_failure_patterns = ["/login", "/session", "/oauth"]
+login_email_selector = '#email, input[name="email"]'
+login_password_selector = '#password, input[name="password"]'
+login_button_selector = 'button[type="submit"], #login-button'
+login_error_selector = '.alert-error, .alert-danger, [class*="error-message"]'
+
+[provider.login_oauth_buttons]
+google = 'text:Sign In With Google'
+apple = 'text:Sign In With Apple'
 
 [list_page]
 url = "https://www.strava.com/athlete/training"
