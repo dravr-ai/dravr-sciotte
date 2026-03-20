@@ -12,6 +12,23 @@ login_button_selector = 'button[type="submit"], #login-button'
 login_error_selector = '.alert-error, .alert-danger, [class*="error-message"]'
 login_otp_selector = 'input[name="code"], input[type="tel"], input[autocomplete="one-time-code"]'
 vision_page_analysis_prompt = "providers/strava/page_analysis.md"
+profile_url = "https://www.strava.com/athlete"
+profile_js_extract = '''
+(function() {
+    var data = {};
+    var name = document.querySelector('.athlete-name, h1.text-title1');
+    if (name) data.display_name = name.textContent.trim();
+    var avatar = document.querySelector('.avatar-img, img.avatar');
+    if (avatar) data.profile_picture_url = avatar.src;
+    var loc = document.querySelector('.location');
+    if (loc) {
+        var parts = loc.textContent.trim().split(',');
+        if (parts[0]) data.city = parts[0].trim();
+        if (parts[1]) data.country = parts[1].trim();
+    }
+    return JSON.stringify(data);
+})()
+'''
 
 [provider.login_oauth_buttons]
 google = 'text:Sign In With Google'

@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 
 use crate::error::{LoginResult, ScraperResult};
-use crate::models::{Activity, ActivityParams, AuthSession};
+use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession};
 
 /// Core trait for Strava training page scraping
 ///
@@ -67,4 +67,7 @@ pub trait ActivityScraper: Send + Sync {
         session: &AuthSession,
         activity_id: &str,
     ) -> ScraperResult<Activity>;
+
+    /// Scrape the authenticated user's profile from the provider
+    async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile>;
 }

@@ -343,6 +343,33 @@ pub struct Activity {
 }
 
 // ============================================================================
+// Athlete Profile
+// ============================================================================
+
+/// Profile data for the authenticated athlete
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AthleteProfile {
+    /// Full display name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// First name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firstname: Option<String>,
+    /// Last name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lastname: Option<String>,
+    /// URL to the profile picture
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_picture_url: Option<String>,
+    /// City
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub city: Option<String>,
+    /// Country
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+// ============================================================================
 // Query Parameters
 // ============================================================================
 
