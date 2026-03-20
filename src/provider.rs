@@ -208,10 +208,19 @@ impl ProviderConfig {
     pub fn strava_default() -> Self {
         Self::from_toml(STRAVA_PROVIDER_TOML).expect("embedded strava config is valid")
     }
+
+    /// Create with the built-in Garmin Connect provider configuration
+    #[must_use]
+    pub fn garmin_default() -> Self {
+        Self::from_toml(GARMIN_PROVIDER_TOML).expect("embedded garmin config is valid")
+    }
 }
 
 /// Embedded default provider configuration for Strava
 const STRAVA_PROVIDER_TOML: &str = include_str!("../providers/strava.toml");
+
+/// Embedded default provider configuration for Garmin Connect
+const GARMIN_PROVIDER_TOML: &str = include_str!("../providers/garmin.toml");
 
 #[cfg(test)]
 mod tests {
