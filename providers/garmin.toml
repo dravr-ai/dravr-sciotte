@@ -10,7 +10,7 @@ login_email_selector = '#email, input[name="username"], input[name="email"]'
 login_password_selector = '#password, input[name="password"]'
 login_button_selector = '#login-btn-signin, button[type="submit"]'
 login_error_selector = '.alert-error, [class*="error-message"], [class*="status-error"]'
-login_otp_selector = 'input[name="code"], input[type="tel"], input[autocomplete="one-time-code"]'
+login_otp_selector = 'input[name="code"], input[name="verificationCode"], input[type="tel"], input[type="number"], input[autocomplete="one-time-code"], input.otp-input, input[id*="erification"], input[id*="code"]'
 profile_url = "https://connect.garmin.com/modern/profile"
 profile_js_extract = '''
 (function() {
