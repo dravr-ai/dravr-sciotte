@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.0] — 2026-03-20
+
+### Added
+
+- feat: TwoFactorChoice, select_two_factor, passkey bypass with CDP click Multi-step 2FA flow, visible Chrome for credential login, Google challenge navigation
+- feat: add method param to credential_login for Google/Apple OAuth CDP-based form filling, Google/Apple sign-in page navigation, multi-step flow
+- feat: multi-step login (email→password→OTP) with submit_otp follow-up Progressive form detection, OTP page storage, provider TOML otp selectors
+- feat: add credential_login to core ActivityScraper trait LoginResult enum (Success/OtpRequired/Failed), in-process headless Chrome login with form filling
+- feat: multi-session store, session management endpoints, WebSocket auth
+- feat: WebSocket browser streaming for remote login via CDP screencast
+- feat: add Garmin Connect provider with MFA support and --provider CLI flag
+
+### Fixed
+
+- fix: OTP polling, browser persistence, passkey bypass, submit button selectors Complete Google OAuth 2FA flow with credential_login + select_two_factor + submit_otp
+- fix: Google OAuth passkey bypass, CDP form filling, visible Chrome
+- fix: screenshot polling, biased select, cookie dismiss, coordinate scaling Replace CDP screencast with captureScreenshot polling, prioritize client input, auto-dismiss cookies
+
+
+
 ## [0.1.0] — 2026-03-18
 
 ### Added
