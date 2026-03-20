@@ -742,6 +742,7 @@ async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult
 // ============================================================================
 
 /// Extracted login selectors from provider config, validated upfront
+#[derive(Debug)]
 struct LoginSelectors<'a> {
     email: &'a str,
     password: &'a str,
@@ -2030,5 +2031,210 @@ mod tests {
     fn parse_date_with_weekday_prefix() {
         assert!(parse_strava_date("Wed, 3/18/2026").is_some());
         assert!(parse_strava_date("Mon, 1/5/2025").is_some());
+    }
+
+    // ========================================================================
+    // Credential login unit tests
+    // ========================================================================
+
+    #[test]
+    fn otp_url_patterns_match_specific_challenges() {
+        let patterns = OTP_URL_PATTERNS;
+
+        // Should match
+        assert!(patterns
+            .iter()
+            .any(|p| "https://accounts.google.com/v3/signin/challenge/totp?x=1".contains(p)));
+        assert!(patterns
+            .iter()
+            .any(|p| "https://accounts.google.com/challenge/sms/verify".contains(p)));
+        assert!(patterns
+            .iter()
+            .any(|p| "https://example.com/2fa".contains(p)));
+        assert!(patterns
+            .iter()
+            .any(|p| "https://example.com/verify".contains(p)));
+        assert!(patterns
+            .iter()
+            .any(|p| "https://example.com/mfa".contains(p)));
+
+        // Should NOT match (passkey, password, generic)
+        assert!(!patterns
+            .iter()
+            .any(|p| "https://accounts.google.com/challenge/pk".contains(p)));
+        assert!(!patterns
+            .iter()
+            .any(|p| "https://accounts.google.com/challenge/pwd".contains(p)));
+        assert!(!patterns
+            .iter()
+            .any(|p| "https://accounts.google.com/v3/signin/identifier".contains(p)));
+    }
+
+    #[test]
+    fn passkey_pattern_matches_challenge_pk() {
+        assert!("https://accounts.google.com/v3/signin/challenge/pk?x=1"
+            .contains(PASSKEY_CHALLENGE_PATTERN));
+        assert!(!"https://accounts.google.com/challenge/totp".contains(PASSKEY_CHALLENGE_PATTERN));
+        assert!(!"https://accounts.google.com/challenge/pwd".contains(PASSKEY_CHALLENGE_PATTERN));
+    }
+
+    #[test]
+    fn challenge_skip_patterns_exclude_password_and_passkey() {
+        let url_pwd = "https://accounts.google.com/v3/signin/challenge/pwd?x=1";
+        let url_pk = "https://accounts.google.com/v3/signin/challenge/pk?x=1";
+        let url_totp = "https://accounts.google.com/v3/signin/challenge/totp?x=1";
+        let url_selection = "https://accounts.google.com/v3/signin/challenge/selection";
+
+        // pwd and pk should be skipped
+        assert!(CHALLENGE_SKIP_PATTERNS.iter().any(|p| url_pwd.contains(p)));
+        assert!(CHALLENGE_SKIP_PATTERNS.iter().any(|p| url_pk.contains(p)));
+
+        // totp and selection should NOT be skipped
+        assert!(!CHALLENGE_SKIP_PATTERNS.iter().any(|p| url_totp.contains(p)));
+        assert!(!CHALLENGE_SKIP_PATTERNS
+            .iter()
+            .any(|p| url_selection.contains(p)));
+    }
+
+    #[test]
+    fn challenge_url_pattern_matches_all_challenges() {
+        assert!(
+            "https://accounts.google.com/v3/signin/challenge/totp".contains(CHALLENGE_URL_PATTERN)
+        );
+        assert!(
+            "https://accounts.google.com/v3/signin/challenge/pk".contains(CHALLENGE_URL_PATTERN)
+        );
+        assert!(
+            "https://accounts.google.com/v3/signin/challenge/pwd".contains(CHALLENGE_URL_PATTERN)
+        );
+        assert!(!"https://accounts.google.com/v3/signin/identifier".contains(CHALLENGE_URL_PATTERN));
+    }
+
+    #[test]
+    fn login_selectors_from_valid_provider() {
+        let provider = ProviderConfig::strava_default();
+        let selectors = LoginSelectors::from_provider(&provider).unwrap();
+        assert!(!selectors.email.is_empty());
+        assert!(!selectors.password.is_empty());
+        assert!(!selectors.button.is_empty());
+    }
+
+    #[test]
+    fn login_selectors_from_provider_missing_email() {
+        let mut provider = ProviderConfig::strava_default();
+        provider.provider.login_email_selector = None;
+        let result = LoginSelectors::from_provider(&provider);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("login_email_selector"));
+    }
+
+    #[test]
+    fn login_selectors_from_provider_missing_password() {
+        let mut provider = ProviderConfig::strava_default();
+        provider.provider.login_password_selector = None;
+        let result = LoginSelectors::from_provider(&provider);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("login_password_selector"));
+    }
+
+    #[test]
+    fn login_selectors_from_provider_missing_button() {
+        let mut provider = ProviderConfig::strava_default();
+        provider.provider.login_button_selector = None;
+        let result = LoginSelectors::from_provider(&provider);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("login_button_selector"));
+    }
+
+    #[test]
+    fn two_fa_options_to_choices_converts_correctly() {
+        let options = vec![
+            TwoFactorOptionWithCoords {
+                id: "otp".to_owned(),
+                label: "Google Authenticator".to_owned(),
+                x: 100.0,
+                y: 200.0,
+            },
+            TwoFactorOptionWithCoords {
+                id: "app".to_owned(),
+                label: "Tap Yes on your phone".to_owned(),
+                x: 100.0,
+                y: 300.0,
+            },
+        ];
+
+        let choices = two_fa_options_to_choices(options);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].id, "otp");
+        assert_eq!(choices[0].label, "Google Authenticator");
+        assert_eq!(choices[1].id, "app");
+        assert_eq!(choices[1].label, "Tap Yes on your phone");
+    }
+
+    #[test]
+    fn two_fa_option_with_coords_deserializes_from_json() {
+        let json = r#"[
+            {"id": "otp", "label": "Get a verification code", "x": 150.5, "y": 250.0},
+            {"id": "sms", "label": "Text message to (•••) ••••-53", "x": 150.5, "y": 350.0}
+        ]"#;
+        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str(json).unwrap();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].id, "otp");
+        assert!((options[0].x - 150.5).abs() < 0.01);
+        assert_eq!(options[1].id, "sms");
+    }
+
+    #[test]
+    fn two_fa_option_with_coords_empty_json() {
+        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str("[]").unwrap();
+        assert!(options.is_empty());
+    }
+
+    #[test]
+    fn two_fa_option_serializes_to_json() {
+        let option = crate::error::TwoFactorOption {
+            id: "otp".to_owned(),
+            label: "Google Authenticator".to_owned(),
+        };
+        let json = serde_json::to_string(&option).unwrap();
+        assert!(json.contains(r#""id":"otp""#));
+        assert!(json.contains(r#""label":"Google Authenticator""#));
+    }
+
+    #[test]
+    fn google_oauth_selectors_defined() {
+        assert!(!GOOGLE_OAUTH_SELECTORS.email.is_empty());
+        assert!(!GOOGLE_OAUTH_SELECTORS.email_next.is_empty());
+        assert!(!GOOGLE_OAUTH_SELECTORS.password.is_empty());
+        assert!(!GOOGLE_OAUTH_SELECTORS.password_next.is_empty());
+        assert!(GOOGLE_OAUTH_SELECTORS.password_next.contains("text:Next"));
+    }
+
+    #[test]
+    fn apple_oauth_selectors_defined() {
+        assert!(!APPLE_OAUTH_SELECTORS.email.is_empty());
+        assert!(!APPLE_OAUTH_SELECTORS.password.is_empty());
+    }
+
+    #[test]
+    fn google_otp_submit_selector_includes_totp_next() {
+        assert!(GOOGLE_OTP_SUBMIT_SELECTOR.contains("totpNext"));
+        assert!(GOOGLE_OTP_SUBMIT_SELECTOR.contains("text:Next"));
+    }
+
+    #[test]
+    fn strava_provider_has_oauth_buttons() {
+        let provider = ProviderConfig::strava_default();
+        assert!(provider.provider.login_oauth_buttons.contains_key("google"));
+        assert!(provider.provider.login_oauth_buttons.contains_key("apple"));
+    }
+
+    #[test]
+    fn strava_provider_has_otp_selector() {
+        let provider = ProviderConfig::strava_default();
+        assert!(provider.provider.login_otp_selector.is_some());
     }
 }

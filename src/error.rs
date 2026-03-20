@@ -122,3 +122,67 @@ impl ErrorResponse {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_result_success_holds_session() {
+        let session = crate::models::AuthSession {
+            session_id: "test-123".to_owned(),
+            cookies: vec![],
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+        let result = LoginResult::Success(session);
+        assert!(matches!(result, LoginResult::Success(s) if s.session_id == "test-123"));
+    }
+
+    #[test]
+    fn login_result_two_factor_choice_holds_options() {
+        let options = vec![
+            TwoFactorOption {
+                id: "otp".to_owned(),
+                label: "Google Authenticator".to_owned(),
+            },
+            TwoFactorOption {
+                id: "app".to_owned(),
+                label: "Tap Yes on phone".to_owned(),
+            },
+        ];
+        let result = LoginResult::TwoFactorChoice(options);
+        assert!(matches!(result, LoginResult::TwoFactorChoice(opts) if opts.len() == 2));
+    }
+
+    #[test]
+    fn two_factor_option_serializes() {
+        let opt = TwoFactorOption {
+            id: "sms".to_owned(),
+            label: "Text message".to_owned(),
+        };
+        let json = serde_json::to_string(&opt).unwrap();
+        assert!(json.contains("sms"));
+        assert!(json.contains("Text message"));
+    }
+
+    #[test]
+    fn scraper_error_is_transient() {
+        assert!(ScraperError::Network {
+            reason: "timeout".to_owned()
+        }
+        .is_transient());
+        assert!(ScraperError::Browser {
+            reason: "crash".to_owned()
+        }
+        .is_transient());
+        assert!(!ScraperError::Auth {
+            reason: "bad password".to_owned()
+        }
+        .is_transient());
+        assert!(!ScraperError::Config {
+            reason: "missing".to_owned()
+        }
+        .is_transient());
+    }
+}
