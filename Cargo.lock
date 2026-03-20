@@ -718,7 +718,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embacle"
-version = "0.13.6"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac5eba7b283d7e5f4afbe7fb2e79031e84a1efaa52fd954145b883d63c15d27"
 dependencies = [
  "async-trait",
  "base64",

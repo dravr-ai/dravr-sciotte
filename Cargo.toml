@@ -104,7 +104,7 @@ base64 = "0.22"
 dirs = "6"
 toml = "0.8"
 urlencoding = "2"
-embacle = { path = "../dravr-embacle", optional = true }
+embacle = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
