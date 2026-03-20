@@ -44,6 +44,7 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
         )
         .route("/auth/submit-otp", post(streaming::submit_otp))
         .route("/auth/select-2fa", post(streaming::select_two_factor))
+        .route("/api/athlete", get(athlete_handler))
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .layer(middleware::from_fn(auth_middleware))
@@ -166,6 +167,34 @@ async fn delete_session_handler(
 // ============================================================================
 // Activity Handlers
 // ============================================================================
+
+/// GET /api/athlete — get authenticated user's profile (supports `X-Session-Id` header)
+async fn athlete_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let guard = state.read().await;
+
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+
+    let Some(session) = session else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "session_not_found"})),
+        )
+            .into_response();
+    };
+
+    match guard.scraper().get_athlete(session).await {
+        Ok(profile) => Json(json!(profile)).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get athlete profile: {e}")})),
+        )
+            .into_response(),
+    }
+}
 
 #[derive(Deserialize, Default)]
 struct ActivityQuery {
