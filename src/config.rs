@@ -67,6 +67,20 @@ pub struct ScraperConfig {
     pub page_timeout_secs: u64,
     /// Delay between page interactions in milliseconds
     pub interaction_delay_ms: u64,
+    /// Interval between URL polls during login detection (ms)
+    pub login_poll_interval_ms: u64,
+    /// Overall login timeout before giving up (s)
+    pub login_timeout_secs: u64,
+    /// Wait time after page navigation for JS rendering (s)
+    pub page_load_wait_secs: u64,
+    /// Delay between form field interactions (ms)
+    pub form_interaction_delay_ms: u64,
+    /// Timeout waiting for the next login step (e.g., password field after email submit) (s)
+    pub email_step_timeout_secs: u64,
+    /// Timeout waiting for login result after password submit (s)
+    pub password_step_timeout_secs: u64,
+    /// Timeout waiting for phone tap / app approval during 2FA (s)
+    pub phone_tap_timeout_secs: u64,
 }
 
 impl Default for ScraperConfig {
@@ -74,10 +88,25 @@ impl Default for ScraperConfig {
         Self {
             chrome_path: env::var("CHROME_PATH").ok(),
             headless: true,
-            page_timeout_secs: 30,
-            interaction_delay_ms: 500,
+            page_timeout_secs: env_u64("DRAVR_SCIOTTE_PAGE_TIMEOUT", 30),
+            interaction_delay_ms: env_u64("DRAVR_SCIOTTE_INTERACTION_DELAY_MS", 500),
+            login_poll_interval_ms: env_u64("DRAVR_SCIOTTE_LOGIN_POLL_INTERVAL_MS", 500),
+            login_timeout_secs: env_u64("DRAVR_SCIOTTE_LOGIN_TIMEOUT", 120),
+            page_load_wait_secs: env_u64("DRAVR_SCIOTTE_PAGE_LOAD_WAIT", 3),
+            form_interaction_delay_ms: env_u64("DRAVR_SCIOTTE_FORM_DELAY_MS", 300),
+            email_step_timeout_secs: env_u64("DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT", 10),
+            password_step_timeout_secs: env_u64("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", 10),
+            phone_tap_timeout_secs: env_u64("DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT", 60),
         }
     }
+}
+
+/// Read a u64 from an environment variable with a default fallback
+fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Cache configuration
