@@ -1,0 +1,899 @@
+// ABOUTME: Vision-based activity scraper using LLM screenshot analysis via embacle
+// ABOUTME: Resilient alternative to CSS selectors — survives UI redesigns by using visual understanding
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 dravr.ai
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
+use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
+use chromiumoxide::page::ScreenshotParams;
+use chrono::Utc;
+use embacle::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
+use futures::StreamExt;
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
+
+use crate::config::ScraperConfig;
+use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
+use crate::models::{Activity, ActivityParams, AuthSession, CookieData};
+use crate::provider::ProviderConfig;
+use crate::types::ActivityScraper;
+
+/// Vision-based scraper that uses LLM screenshot analysis instead of CSS selectors.
+///
+/// Implements the same `ActivityScraper` trait as `ChromeScraper` but extracts data
+/// by sending page screenshots to a vision-capable LLM (via embacle) with structured
+/// extraction prompts defined in markdown files.
+///
+/// # Feature Flag
+///
+/// Requires the `vision` feature: `dravr-sciotte = { features = ["vision"] }`
+pub struct VisionScraper {
+    config: ScraperConfig,
+    provider: ProviderConfig,
+    llm: Arc<dyn LlmProvider>,
+    browser: Mutex<Option<Arc<Browser>>>,
+    pending_login: Mutex<Option<(Browser, chromiumoxide::Page)>>,
+}
+
+impl VisionScraper {
+    /// Create a vision scraper with a provider config and an embacle LLM provider
+    pub fn new(config: ScraperConfig, provider: ProviderConfig, llm: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            config,
+            provider,
+            llm,
+            browser: Mutex::new(None),
+            pending_login: Mutex::new(None),
+        }
+    }
+
+    /// Get or create a headless browser instance for scraping
+    async fn get_browser(&self) -> ScraperResult<Arc<Browser>> {
+        let mut guard = self.browser.lock().await;
+
+        if let Some(browser) = guard.as_ref() {
+            return Ok(Arc::clone(browser));
+        }
+
+        let browser = launch_vision_browser(&self.config, true).await?;
+        let browser = Arc::new(browser);
+        *guard = Some(Arc::clone(&browser));
+
+        info!("Vision scraper browser launched");
+        Ok(browser)
+    }
+
+    /// Take a full-page screenshot and encode as base64 PNG
+    async fn screenshot_base64(&self, page: &chromiumoxide::Page) -> ScraperResult<String> {
+        let params = ScreenshotParams::builder()
+            .format(CaptureScreenshotFormat::Png)
+            .full_page(true)
+            .build();
+
+        let data = page
+            .screenshot(params)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to take screenshot: {e}"),
+            })?;
+
+        Ok(base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &data,
+        ))
+    }
+
+    /// Send a screenshot + prompt to the LLM and get a text response
+    async fn ask_llm_with_screenshot(
+        &self,
+        screenshot_b64: &str,
+        prompt: &str,
+    ) -> ScraperResult<String> {
+        let image = ImagePart::new(screenshot_b64.to_owned(), "image/png").map_err(|e| {
+            ScraperError::Internal {
+                reason: format!("Failed to create image part: {e}"),
+            }
+        })?;
+
+        let message = ChatMessage::user_with_images(prompt.to_owned(), vec![image]);
+
+        let request = ChatRequest {
+            messages: vec![message],
+            model: None,
+            temperature: Some(0.0),
+            max_tokens: Some(4096),
+            stream: false,
+            tools: None,
+            tool_choice: None,
+            top_p: None,
+            stop: None,
+            response_format: None,
+        };
+
+        let response = self
+            .llm
+            .complete(&request)
+            .await
+            .map_err(|e| ScraperError::Internal {
+                reason: format!("LLM request failed: {e}"),
+            })?;
+
+        Ok(response.content)
+    }
+
+    /// Load a prompt from a markdown file path
+    fn load_prompt(path: &str) -> ScraperResult<String> {
+        std::fs::read_to_string(path).map_err(|e| ScraperError::Config {
+            reason: format!("Failed to read vision prompt '{path}': {e}"),
+        })
+    }
+
+    /// Fill a field and click a button based on page analysis
+    async fn vision_fill_and_submit(
+        &self,
+        page: &chromiumoxide::Page,
+        analysis: &PageAnalysis,
+        text: &str,
+    ) -> ScraperResult<()> {
+        if let Some(field) = analysis.find_fill_action() {
+            crate::browser_utils::cdp_click_at(page, field.x, field.y).await?;
+            let _ = page.execute(InsertTextParams::new(text)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(self.config.form_interaction_delay_ms)).await;
+        if let Some(button) = analysis.find_click_action() {
+            crate::browser_utils::cdp_click_at(page, button.x, button.y).await?;
+        }
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        Ok(())
+    }
+
+    /// Analyze a page screenshot to determine its type and available actions
+    async fn analyze_page(&self, page: &chromiumoxide::Page) -> ScraperResult<PageAnalysis> {
+        let screenshot = self.screenshot_base64(page).await?;
+
+        let prompt = self
+            .provider
+            .provider
+            .vision_page_analysis_prompt
+            .as_deref()
+            .map(Self::load_prompt)
+            .transpose()?
+            .unwrap_or_else(|| DEFAULT_PAGE_ANALYSIS_PROMPT.to_owned());
+
+        let response = self.ask_llm_with_screenshot(&screenshot, &prompt).await?;
+        let json = extract_json(&response);
+
+        serde_json::from_str(&json).map_err(|e| ScraperError::Scraping {
+            reason: format!("Failed to parse page analysis: {e}\nRaw response: {response}"),
+        })
+    }
+
+    /// Extract activity list data from a screenshot using the list page vision prompt
+    async fn extract_list_data(
+        &self,
+        page: &chromiumoxide::Page,
+    ) -> ScraperResult<Vec<serde_json::Value>> {
+        let screenshot = self.screenshot_base64(page).await?;
+
+        let prompt = self
+            .provider
+            .list_page
+            .vision_prompt
+            .as_deref()
+            .map(Self::load_prompt)
+            .transpose()?
+            .ok_or_else(|| ScraperError::Config {
+                reason: "No list_page.vision_prompt configured for this provider".to_owned(),
+            })?;
+
+        let response = self.ask_llm_with_screenshot(&screenshot, &prompt).await?;
+        let json = extract_json(&response);
+
+        serde_json::from_str(&json).map_err(|e| ScraperError::Scraping {
+            reason: format!("Failed to parse activity list: {e}\nRaw response: {response}"),
+        })
+    }
+
+    /// Extract activity detail data from a screenshot using the detail page vision prompt
+    async fn extract_detail_data(
+        &self,
+        page: &chromiumoxide::Page,
+    ) -> ScraperResult<serde_json::Value> {
+        let screenshot = self.screenshot_base64(page).await?;
+
+        let prompt = self
+            .provider
+            .detail_page
+            .vision_prompt
+            .as_deref()
+            .map(Self::load_prompt)
+            .transpose()?
+            .ok_or_else(|| ScraperError::Config {
+                reason: "No detail_page.vision_prompt configured for this provider".to_owned(),
+            })?;
+
+        let response = self.ask_llm_with_screenshot(&screenshot, &prompt).await?;
+        let json = extract_json(&response);
+
+        serde_json::from_str(&json).map_err(|e| ScraperError::Scraping {
+            reason: format!("Failed to parse activity detail: {e}\nRaw response: {response}"),
+        })
+    }
+
+    /// Inject session cookies into a browser page
+    async fn inject_cookies(
+        &self,
+        page: &chromiumoxide::Page,
+        session: &AuthSession,
+    ) -> ScraperResult<()> {
+        use chromiumoxide::cdp::browser_protocol::network::CookieParam;
+
+        for cookie in &session.cookies {
+            let mut param = CookieParam::new(&cookie.name, &cookie.value);
+            param.domain = Some(cookie.domain.clone());
+            param.path = Some(cookie.path.clone());
+            param.secure = Some(cookie.secure);
+            param.http_only = Some(cookie.http_only);
+
+            page.set_cookie(param)
+                .await
+                .map_err(|e| ScraperError::Browser {
+                    reason: format!("Failed to set cookie {}: {e}", cookie.name),
+                })?;
+        }
+
+        debug!(count = session.cookies.len(), "Injected session cookies");
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ActivityScraper for VisionScraper {
+    async fn browser_login(&self) -> ScraperResult<AuthSession> {
+        // Vision scraper delegates to credential_login for programmatic login
+        Err(ScraperError::Auth {
+            reason: "VisionScraper requires credential_login() — browser_login() opens a visible window which is not needed with vision-based navigation".to_owned(),
+        })
+    }
+
+    async fn credential_login(
+        &self,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult> {
+        let config = &self.config;
+        info!(
+            provider = %self.provider.provider.name,
+            method,
+            "Starting vision-based credential login"
+        );
+
+        let browser = launch_vision_browser(config, false).await?;
+        let page = browser
+            .new_page(&self.provider.provider.login_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to open login page: {e}"),
+            })?;
+
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+
+        // Vision-driven login loop: analyze page, take action, repeat
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(config.login_timeout_secs);
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(ScraperError::Auth {
+                    reason: "Vision login timed out".to_owned(),
+                });
+            }
+
+            let analysis = self.analyze_page(&page).await?;
+            debug!(page_type = ?analysis.page_type, "Vision page analysis");
+
+            match analysis.page_type.as_str() {
+                "cookie_consent" => {
+                    info!("Vision: dismissing cookie consent");
+                    if let Some(action) = analysis.find_click_action() {
+                        crate::browser_utils::cdp_click_at(&page, action.x, action.y).await?;
+                        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+                    }
+                }
+                "provider_login" | "oauth_email" => {
+                    info!("Vision: filling email field");
+                    self.vision_fill_and_submit(&page, &analysis, email).await?;
+                }
+                "oauth_password" => {
+                    info!("Vision: filling password field");
+                    self.vision_fill_and_submit(&page, &analysis, password)
+                        .await?;
+                }
+                "passkey_challenge" => {
+                    info!("Vision: bypassing passkey challenge");
+                    if let Some(action) = analysis.find_action_by_label("another way") {
+                        crate::browser_utils::cdp_click_at(&page, action.x, action.y).await?;
+                        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+                    }
+                }
+                "two_factor_selection" => {
+                    info!("Vision: 2FA selection page detected");
+                    let options: Vec<TwoFactorOption> = analysis
+                        .two_factor_options
+                        .into_iter()
+                        .map(|o| TwoFactorOption {
+                            id: o.id,
+                            label: o.label,
+                        })
+                        .collect();
+                    if !options.is_empty() {
+                        *self.pending_login.lock().await = Some((browser, page));
+                        return Ok(LoginResult::TwoFactorChoice(options));
+                    }
+                }
+                "otp_entry" => {
+                    info!("Vision: OTP entry page detected");
+                    *self.pending_login.lock().await = Some((browser, page));
+                    return Ok(LoginResult::OtpRequired);
+                }
+                "phone_approval" => {
+                    info!("Vision: phone approval page — waiting");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                }
+                "success" => {
+                    info!("Vision: login success detected");
+                    let session = capture_cookies_as_session(&page).await?;
+                    return Ok(LoginResult::Success(session));
+                }
+                "error" => {
+                    let msg = analysis
+                        .error_message
+                        .unwrap_or_else(|| "Login failed".to_owned());
+                    return Ok(LoginResult::Failed(msg));
+                }
+                _ => {
+                    warn!(
+                        page_type = analysis.page_type,
+                        "Vision: unknown page type, waiting"
+                    );
+                    tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+                }
+            }
+        }
+    }
+
+    async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
+        let (browser, page) =
+            self.pending_login
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ScraperError::Auth {
+                    reason: "No pending OTP session".to_owned(),
+                })?;
+
+        let analysis = self.analyze_page(&page).await?;
+        self.vision_fill_and_submit(&page, &analysis, code).await?;
+
+        // Check result
+        let result_analysis = self.analyze_page(&page).await?;
+        match result_analysis.page_type.as_str() {
+            "success" => {
+                let session = capture_cookies_as_session(&page).await?;
+                Ok(LoginResult::Success(session))
+            }
+            "error" => Ok(LoginResult::Failed(
+                result_analysis
+                    .error_message
+                    .unwrap_or_else(|| "OTP verification failed".to_owned()),
+            )),
+            _ => {
+                *self.pending_login.lock().await = Some((browser, page));
+                Ok(LoginResult::OtpRequired)
+            }
+        }
+    }
+
+    async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
+        let (browser, page) =
+            self.pending_login
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ScraperError::Auth {
+                    reason: "No pending 2FA session".to_owned(),
+                })?;
+
+        let analysis = self.analyze_page(&page).await?;
+        let option = analysis
+            .two_factor_options
+            .iter()
+            .find(|o| o.id == option_id);
+
+        if let Some(opt) = option {
+            crate::browser_utils::cdp_click_at(&page, opt.x, opt.y).await?;
+        } else {
+            *self.pending_login.lock().await = Some((browser, page));
+            return Err(ScraperError::Auth {
+                reason: format!("2FA option '{option_id}' not found"),
+            });
+        }
+
+        let timeout = if option_id == "app" {
+            self.config.phone_tap_timeout_secs
+        } else {
+            self.config.password_step_timeout_secs
+        };
+
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(ScraperError::Auth {
+                    reason: "2FA verification timed out".to_owned(),
+                });
+            }
+
+            let result_analysis = self.analyze_page(&page).await?;
+            match result_analysis.page_type.as_str() {
+                "otp_entry" => {
+                    *self.pending_login.lock().await = Some((browser, page));
+                    return Ok(LoginResult::OtpRequired);
+                }
+                "success" => {
+                    let session = capture_cookies_as_session(&page).await?;
+                    return Ok(LoginResult::Success(session));
+                }
+                "error" => {
+                    return Ok(LoginResult::Failed(
+                        result_analysis
+                            .error_message
+                            .unwrap_or_else(|| "2FA failed".to_owned()),
+                    ));
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(self.config.login_poll_interval_ms))
+                        .await;
+                }
+            }
+        }
+    }
+
+    async fn is_authenticated(&self, session: &AuthSession) -> bool {
+        if let Some(expires) = session.expires_at {
+            if Utc::now() > expires {
+                return false;
+            }
+        }
+        !session.cookies.is_empty()
+    }
+
+    async fn get_activities(
+        &self,
+        session: &AuthSession,
+        params: &ActivityParams,
+    ) -> ScraperResult<Vec<Activity>> {
+        let browser = self.get_browser().await?;
+
+        let page = browser
+            .new_page(&self.provider.provider.login_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to open page: {e}"),
+            })?;
+
+        self.inject_cookies(&page, session).await?;
+
+        page.goto(&self.provider.list_page.url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to navigate to list page: {e}"),
+            })?;
+
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+
+        let target = params.limit.unwrap_or(20) as usize;
+        let items = self.extract_list_data(&page).await?;
+
+        let activities: Vec<Activity> = items
+            .into_iter()
+            .take(target)
+            .filter_map(|v| parse_vision_activity(&v))
+            .collect();
+
+        info!(count = activities.len(), "Vision: activities extracted");
+        Ok(activities)
+    }
+
+    async fn get_activity(
+        &self,
+        session: &AuthSession,
+        activity_id: &str,
+    ) -> ScraperResult<Activity> {
+        let browser = self.get_browser().await?;
+        let url = self.provider.detail_url(activity_id);
+
+        let page = browser
+            .new_page(&self.provider.provider.login_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to open page: {e}"),
+            })?;
+
+        self.inject_cookies(&page, session).await?;
+
+        page.goto(&url).await.map_err(|e| ScraperError::Browser {
+            reason: format!("Failed to navigate to activity page: {e}"),
+        })?;
+
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+
+        let data = self.extract_detail_data(&page).await?;
+
+        Ok(parse_vision_activity_detail(activity_id, &data))
+    }
+}
+
+// ============================================================================
+// Page analysis types
+// ============================================================================
+
+/// Result of LLM page analysis
+#[derive(Debug, serde::Deserialize)]
+struct PageAnalysis {
+    page_type: String,
+    #[serde(default)]
+    actions: Vec<PageAction>,
+    #[serde(default)]
+    error_message: Option<String>,
+    #[serde(default)]
+    two_factor_options: Vec<TwoFactorOptionCoords>,
+}
+
+/// An action the LLM identified on the page
+#[derive(Debug, serde::Deserialize)]
+struct PageAction {
+    #[serde(rename = "type")]
+    action_type: String,
+    label: String,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+}
+
+/// A 2FA option with click coordinates
+#[derive(Debug, serde::Deserialize)]
+struct TwoFactorOptionCoords {
+    id: String,
+    label: String,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+}
+
+impl PageAnalysis {
+    fn find_click_action(&self) -> Option<&PageAction> {
+        self.actions.iter().find(|a| a.action_type == "click")
+    }
+
+    fn find_fill_action(&self) -> Option<&PageAction> {
+        self.actions.iter().find(|a| a.action_type == "fill")
+    }
+
+    fn find_action_by_label(&self, partial: &str) -> Option<&PageAction> {
+        let lower = partial.to_lowercase();
+        self.actions
+            .iter()
+            .find(|a| a.label.to_lowercase().contains(&lower))
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Extract JSON from an LLM response that may include markdown fences
+fn extract_json(response: &str) -> String {
+    let trimmed = response.trim();
+
+    // Try extracting from ```json ... ``` fences
+    if let Some(start) = trimmed.find("```json") {
+        let after = &trimmed[start + 7..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_owned();
+        }
+    }
+
+    // Try extracting from ``` ... ``` fences
+    if let Some(start) = trimmed.find("```") {
+        let after = &trimmed[start + 3..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim().to_owned();
+        }
+    }
+
+    // Already JSON
+    trimmed.to_owned()
+}
+
+/// Parse a vision-extracted activity from a JSON value into an Activity
+fn parse_vision_activity(v: &serde_json::Value) -> Option<Activity> {
+    let id = v["id"].as_str()?.to_owned();
+    let name = v["name"].as_str().unwrap_or("").to_owned();
+
+    Some(Activity {
+        id,
+        name,
+        sport_type: crate::models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
+        start_date: Utc::now(),
+        duration_seconds: 0,
+        distance_meters: None,
+        elevation_gain: None,
+        average_heart_rate: None,
+        max_heart_rate: None,
+        average_power: None,
+        max_power: None,
+        normalized_power: None,
+        average_cadence: None,
+        average_speed: None,
+        max_speed: None,
+        suffer_score: None,
+        calories: None,
+        elapsed_time_seconds: None,
+        pace: v.get("pace").and_then(|p| p.as_str()).map(String::from),
+        gap: None,
+        device_name: None,
+        gear_name: None,
+        temperature: None,
+        feels_like: None,
+        humidity: None,
+        wind_speed: None,
+        wind_direction: None,
+        weather: None,
+        city: None,
+        region: None,
+        country: None,
+        perceived_exertion: None,
+        sport_type_detail: v.get("type").and_then(|t| t.as_str()).map(String::from),
+        workout_type: None,
+        training_stress_score: None,
+        intensity_factor: None,
+        start_latitude: None,
+        start_longitude: None,
+        segment_efforts: None,
+        provider: "vision-scraper".to_owned(),
+    })
+}
+
+/// Parse a vision-extracted activity detail into an Activity
+fn parse_vision_activity_detail(id: &str, v: &serde_json::Value) -> Activity {
+    Activity {
+        id: id.to_owned(),
+        name: v["name"].as_str().unwrap_or("").to_owned(),
+        sport_type: crate::models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
+        start_date: Utc::now(),
+        duration_seconds: 0,
+        distance_meters: None,
+        elevation_gain: None,
+        average_heart_rate: None,
+        max_heart_rate: None,
+        average_power: v
+            .get("avg_power")
+            .and_then(|p| p.as_str())
+            .and_then(|s| s.replace('W', "").replace("watts", "").trim().parse().ok()),
+        max_power: None,
+        normalized_power: None,
+        average_cadence: None,
+        average_speed: None,
+        max_speed: None,
+        suffer_score: None,
+        calories: None,
+        elapsed_time_seconds: None,
+        pace: v.get("pace").and_then(|p| p.as_str()).map(String::from),
+        gap: v.get("gap").and_then(|p| p.as_str()).map(String::from),
+        device_name: v.get("device").and_then(|d| d.as_str()).map(String::from),
+        gear_name: v.get("gear").and_then(|g| g.as_str()).map(String::from),
+        temperature: None,
+        feels_like: None,
+        humidity: None,
+        wind_speed: None,
+        wind_direction: None,
+        weather: v.get("weather").and_then(|w| w.as_str()).map(String::from),
+        city: None,
+        region: None,
+        country: None,
+        perceived_exertion: v
+            .get("perceived_exertion")
+            .and_then(|p| p.as_str())
+            .map(String::from),
+        sport_type_detail: v.get("type").and_then(|t| t.as_str()).map(String::from),
+        workout_type: None,
+        training_stress_score: None,
+        intensity_factor: None,
+        start_latitude: None,
+        start_longitude: None,
+        segment_efforts: None,
+        provider: "vision-scraper".to_owned(),
+    }
+}
+
+/// Capture cookies from the page and build an `AuthSession`
+async fn capture_cookies_as_session(page: &chromiumoxide::Page) -> ScraperResult<AuthSession> {
+    let cookies = page
+        .get_cookies()
+        .await
+        .map_err(|e| ScraperError::Browser {
+            reason: format!("Failed to get cookies: {e}"),
+        })?;
+    let cookie_data: Vec<CookieData> = cookies
+        .iter()
+        .map(|c| CookieData {
+            name: c.name.clone(),
+            value: c.value.clone(),
+            domain: c.domain.clone(),
+            path: c.path.clone(),
+            secure: c.secure,
+            http_only: c.http_only,
+        })
+        .collect();
+    Ok(AuthSession {
+        session_id: generate_session_id(),
+        cookies: cookie_data,
+        created_at: Utc::now(),
+        expires_at: None,
+    })
+}
+
+/// Generate a unique session identifier
+fn generate_session_id() -> String {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:x}-{:x}", d.as_secs(), d.subsec_nanos())
+}
+
+/// Launch a browser for vision scraping
+async fn launch_vision_browser(config: &ScraperConfig, headless: bool) -> ScraperResult<Browser> {
+    let mut builder = BrowserConfig::builder();
+
+    if headless {
+        builder = builder.arg("--headless=new");
+    } else {
+        builder = builder
+            .with_head()
+            .arg("--disable-features=WebAuthentication");
+    }
+
+    builder = builder
+        .arg("--disable-gpu")
+        .arg("--no-sandbox")
+        .arg("--disable-dev-shm-usage")
+        .arg("--disable-blink-features=AutomationControlled")
+        .window_size(1920, 1080);
+
+    if let Some(ref path) = config.chrome_path {
+        builder = builder.chrome_executable(path);
+    }
+
+    let browser_config = builder.build().map_err(|e| ScraperError::Browser {
+        reason: format!("Failed to configure browser: {e}"),
+    })?;
+
+    let (browser, mut handler) =
+        Browser::launch(browser_config)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to launch browser: {e}"),
+            })?;
+
+    tokio::spawn(async move {
+        while let Some(event) = handler.next().await {
+            debug!(?event, "Vision browser event");
+        }
+    });
+
+    Ok(browser)
+}
+
+/// Default page analysis prompt when no provider-specific one is configured
+const DEFAULT_PAGE_ANALYSIS_PROMPT: &str = r#"Analyze this web page screenshot. Return a JSON object with:
+- "page_type": one of "provider_login", "oauth_email", "oauth_password", "cookie_consent", "passkey_challenge", "two_factor_selection", "otp_entry", "phone_approval", "success", "error", "unknown"
+- "actions": array of {"type": "click"|"fill", "label": "description", "x": number, "y": number}
+- "error_message": string or null
+- "two_factor_options": array of {"id": "otp"|"app"|"sms", "label": "description", "x": number, "y": number}
+Return valid JSON only."#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_json_plain() {
+        let input = r#"[{"id": "1", "name": "Run"}]"#;
+        assert_eq!(extract_json(input), input);
+    }
+
+    #[test]
+    fn extract_json_from_fenced_block() {
+        let input = "Here is the data:\n```json\n[{\"id\": \"1\"}]\n```\nDone.";
+        assert_eq!(extract_json(input), r#"[{"id": "1"}]"#);
+    }
+
+    #[test]
+    fn extract_json_from_plain_fence() {
+        let input = "```\n{\"x\": 1}\n```";
+        assert_eq!(extract_json(input), r#"{"x": 1}"#);
+    }
+
+    #[test]
+    fn parse_vision_activity_minimal() {
+        let v = serde_json::json!({"id": "123", "name": "Run", "type": "Run"});
+        let activity = parse_vision_activity(&v).unwrap();
+        assert_eq!(activity.id, "123");
+        assert_eq!(activity.name, "Run");
+    }
+
+    #[test]
+    fn parse_vision_activity_missing_id() {
+        let v = serde_json::json!({"name": "Run"});
+        assert!(parse_vision_activity(&v).is_none());
+    }
+
+    #[test]
+    fn page_analysis_deserializes() {
+        let json = r#"{
+            "page_type": "oauth_email",
+            "actions": [
+                {"type": "fill", "label": "email field", "x": 400, "y": 300},
+                {"type": "click", "label": "Next button", "x": 400, "y": 450}
+            ],
+            "error_message": null,
+            "two_factor_options": []
+        }"#;
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        assert_eq!(analysis.page_type, "oauth_email");
+        assert_eq!(analysis.actions.len(), 2);
+        assert!(analysis.find_fill_action().is_some());
+        assert!(analysis.find_click_action().is_some());
+    }
+
+    #[test]
+    fn page_analysis_find_action_by_label() {
+        let json = r#"{
+            "page_type": "passkey_challenge",
+            "actions": [
+                {"type": "click", "label": "Try another way", "x": 300, "y": 500},
+                {"type": "click", "label": "Use passkey", "x": 300, "y": 400}
+            ]
+        }"#;
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        let action = analysis.find_action_by_label("another way");
+        assert!(action.is_some());
+        assert!((action.unwrap().y - 500.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn two_factor_options_deserialize() {
+        let json = r#"{
+            "page_type": "two_factor_selection",
+            "actions": [],
+            "two_factor_options": [
+                {"id": "otp", "label": "Google Authenticator", "x": 100, "y": 200},
+                {"id": "app", "label": "Tap Yes on phone", "x": 100, "y": 300}
+            ]
+        }"#;
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        assert_eq!(analysis.two_factor_options.len(), 2);
+        assert_eq!(analysis.two_factor_options[0].id, "otp");
+    }
+}

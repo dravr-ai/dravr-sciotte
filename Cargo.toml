@@ -85,6 +85,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
+vision = ["dep:embacle"]
 
 [dependencies]
 async-trait = "0.1"
@@ -103,6 +104,7 @@ base64 = "0.22"
 dirs = "6"
 toml = "0.8"
 urlencoding = "2"
+embacle = { path = "../dravr-embacle", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
