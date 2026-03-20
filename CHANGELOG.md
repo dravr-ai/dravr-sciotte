@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.2.1] — 2026-03-20
+
+### Added
+
+- feat: add garmin_default() to ProviderConfig with embedded garmin.toml
+- feat: add GET /api/athlete endpoint for profile scraping
+- feat: add get_athlete() to ActivityScraper trait for profile scraping
+- feat: add VisionScraper with LLM-powered screenshot analysis (vision feature)
+
+### Fixed
+
+- fix: use crates.io embacle dependency instead of local path
+- fix: match URL patterns against path only, not query string
+- fix: match URL path only for success patterns, add /mfa to OTP detection Prevents Garmin MFA page query param from matching success pattern
+- fix: prioritize success patterns over failure patterns in login polling
+- fix: handle Google sign-in method chooser page in OAuth flow
+- fix: Garmin MFA login, OTP retry, unique Chrome profiles
+
+
+
 ## [0.2.0] — 2026-03-20
 
 ### Added
