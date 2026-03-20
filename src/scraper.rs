@@ -36,7 +36,43 @@ const EMAIL_STEP_TIMEOUT_SECS: u64 = 10;
 const PASSWORD_STEP_TIMEOUT_SECS: u64 = 10;
 
 /// URL patterns that indicate an OTP/2FA page
-const OTP_URL_PATTERNS: &[&str] = &["verify", "2fa", "challenge", "mfa", "otp"];
+/// URL patterns that indicate an OTP/2FA code entry page.
+/// Excludes /challenge/pk (passkey — user approves via Touch ID, no code needed).
+const OTP_URL_PATTERNS: &[&str] = &[
+    "challenge/totp",
+    "challenge/sms",
+    "challenge/ipp",
+    "verify",
+    "2fa",
+    "mfa",
+    "otp",
+];
+
+/// URL pattern for Google passkey challenge — not an OTP, handled by clicking "Try another way"
+const PASSKEY_CHALLENGE_PATTERN: &str = "challenge/pk";
+
+/// Selectors for the "Try another way" link on Google's passkey challenge page
+const TRY_ANOTHER_WAY_SELECTOR: &str = "text:Try another way, text:Essayer autrement";
+
+/// JS to find the "Enter your password" element on Google's alternative sign-in page.
+/// Returns coordinates for CDP click, or debug info if not found.
+const ENTER_PASSWORD_COORDS_JS: &str = r"(function() {
+    var all = document.querySelectorAll('[data-challengetype], [jsname] li, div[role=link], li, div, span');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.height < 100) {
+            var text = el.textContent.trim();
+            if (text === 'Enter your password' || text === 'Saisir votre mot de passe') {
+                return JSON.stringify({x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
+            }
+        }
+    }
+    var debug = Array.from(document.querySelectorAll('[data-challengetype], li, div[role=link]')).map(function(e) {
+        return {tag: e.tagName, text: e.textContent.trim().substring(0, 50), ct: e.getAttribute('data-challengetype')};
+    });
+    return 'not_found:' + JSON.stringify(debug);
+})()";
 
 /// OAuth form selectors for third-party login pages (Google, Apple).
 /// These are universal — the same regardless of which provider uses them.
@@ -51,7 +87,7 @@ const GOOGLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
     email: r#"input[type="email"]"#,
     email_next: r"#identifierNext button, #identifierNext",
     password: r#"input[type="password"], input[name="Passwd"]"#,
-    password_next: r"#passwordNext button, #passwordNext",
+    password_next: r"#passwordNext button, #passwordNext, text:Next",
 };
 
 const APPLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
@@ -247,8 +283,13 @@ impl ChromeScraper {
         debug!("Clicking Next after OAuth email");
         click_element(page, oauth_form.email_next).await?;
 
-        // Wait for the password step
-        debug!("Waiting for OAuth password field");
+        // Wait for the page transition — the password field may exist as a hidden element
+        // on the email step, so we must wait for Google to actually transition pages
+        debug!("Waiting {PAGE_LOAD_WAIT_SECS}s for OAuth page transition");
+        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+
+        // Now wait for a visible password field
+        debug!("Waiting for OAuth password field to become visible");
         let step = poll_for_next_step(
             page,
             &self.provider,
@@ -267,7 +308,7 @@ impl ChromeScraper {
             "Filling OAuth password field"
         );
         fill_input_field(page, oauth_form.password, password).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         debug!("Clicking Next after OAuth password");
         click_element(page, oauth_form.password_next).await?;
 
@@ -328,7 +369,7 @@ impl ActivityScraper for ChromeScraper {
             "Starting credential login"
         );
 
-        let browser = launch_browser(&self.config, true).await?;
+        let browser = launch_browser(&self.config, false).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
@@ -538,7 +579,9 @@ async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult
     if headless {
         builder = builder.arg("--headless=new");
     } else {
-        builder = builder.with_head();
+        builder = builder
+            .with_head()
+            .arg("--disable-features=WebAuthentication");
     }
 
     builder = builder
@@ -653,6 +696,20 @@ async fn poll_for_next_step(
                 reason: format!("Failed to get page URL: {e}"),
             })?
             .unwrap_or_default();
+
+        // Passkey challenge — click "Try another way" then "Enter your password"
+        if url.contains(PASSKEY_CHALLENGE_PATTERN) {
+            info!("Passkey challenge detected, clicking 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            info!("Clicking 'Enter your password' via CDP");
+            cdp_click_enter_password(page).await;
+            // Double-click — Google sometimes needs a second click on the challenge option
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            cdp_click_enter_password(page).await;
+            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            continue;
+        }
 
         // Check for OTP/2FA pages
         if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
@@ -785,6 +842,24 @@ async fn cdp_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> ScraperResu
             reason: format!("CDP mouse release failed: {e}"),
         })?;
     Ok(())
+}
+
+/// Find and CDP-click the "Enter your password" option on Google's challenge page
+async fn cdp_click_enter_password(page: &chromiumoxide::Page) {
+    if let Ok(result) = page.evaluate(ENTER_PASSWORD_COORDS_JS).await {
+        let val = result
+            .value()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        if val.starts_with("not_found") {
+            warn!(debug = %val, "Could not find 'Enter your password' option");
+        } else if let Ok(coords) = serde_json::from_str::<serde_json::Value>(&val) {
+            let x = coords["x"].as_f64().unwrap_or(0.0);
+            let y = coords["y"].as_f64().unwrap_or(0.0);
+            debug!(x, y, "CDP clicking 'Enter your password'");
+            let _ = cdp_click_at(page, x, y).await;
+        }
+    }
 }
 
 /// Select all text in the focused element and delete it via CDP key events
@@ -960,14 +1035,19 @@ async fn save_timeout_screenshot(page: &chromiumoxide::Page, label: &str) {
     }
 }
 
-/// Check if an element matching the selector exists in the DOM
+/// Check if a visible element matching the selector exists in the DOM.
+/// An element is considered visible if it has a non-zero bounding rect.
 async fn element_exists(page: &chromiumoxide::Page, selector: &str) -> bool {
     let escaped = escape_js_selector(selector);
     let js = format!(
         r#"(function() {{
             var selectors = "{escaped}".split(",").map(function(s) {{ return s.trim(); }});
             for (var i = 0; i < selectors.length; i++) {{
-                if (document.querySelector(selectors[i])) return "found";
+                var el = document.querySelector(selectors[i]);
+                if (el) {{
+                    var r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) return "found";
+                }}
             }}
             return "not_found";
         }})()"#
@@ -1030,6 +1110,20 @@ async fn poll_credential_login_result(
                 reason: format!("Failed to get page URL: {e}"),
             })?
             .unwrap_or_default();
+
+        // Passkey challenge — click "Try another way" then "Enter your password"
+        if url.contains(PASSKEY_CHALLENGE_PATTERN) {
+            info!("Passkey challenge detected, clicking 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            info!("Clicking 'Enter your password' via CDP");
+            cdp_click_enter_password(page).await;
+            // Double-click — Google sometimes needs a second click on the challenge option
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            cdp_click_enter_password(page).await;
+            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            continue;
+        }
 
         // Check for OTP/2FA pages
         if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
