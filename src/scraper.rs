@@ -54,6 +54,36 @@ const PASSKEY_CHALLENGE_PATTERN: &str = "challenge/pk";
 /// Selectors for the "Try another way" link on Google's passkey challenge page
 const TRY_ANOTHER_WAY_SELECTOR: &str = "text:Try another way, text:Essayer autrement";
 
+/// URL pattern for Google 2FA challenge selection page (not passkey, not specific OTP type yet)
+const TWO_FA_CHALLENGE_PATTERN: &str = "/challenge/";
+
+/// JS to parse 2FA options from Google's challenge selection page.
+/// Returns JSON array of {id, label, x, y} for each visible option, excluding passkey.
+const PARSE_TWO_FA_OPTIONS_JS: &str = r"(function() {
+    var options = [];
+    var seen = {};
+    var all = document.querySelectorAll('[data-challengetype], [jsname] li, div[role=link], li');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0 || rect.height > 120) continue;
+        var text = el.textContent.trim();
+        if (!text || text.length > 200) continue;
+        var lower = text.toLowerCase();
+        if (lower.includes('passkey') || lower.includes('security key')) continue;
+        var id = 'unknown';
+        if (lower.includes('authenticator') || lower.includes('verification code') || lower.includes('code de validation')) id = 'otp';
+        else if (lower.includes('tap') || lower.includes('phone') || lower.includes('appuyez')) id = 'app';
+        else if (lower.includes('sms') || lower.includes('text message') || lower.includes('texto')) id = 'sms';
+        else if (lower.includes('backup') || lower.includes('secours')) id = 'backup';
+        else if (lower.includes('another way') || lower.includes('autrement')) continue;
+        if (seen[id]) continue;
+        seen[id] = true;
+        options.push({id: id, label: text.substring(0, 100), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
+    }
+    return JSON.stringify(options);
+})()";
+
 /// JS to find the "Enter your password" element on Google's alternative sign-in page.
 /// Returns coordinates for CDP click, or debug info if not found.
 const ENTER_PASSWORD_COORDS_JS: &str = r"(function() {
@@ -392,7 +422,10 @@ impl ActivityScraper for ChromeScraper {
             }
         };
 
-        if matches!(result, LoginResult::OtpRequired) {
+        if matches!(
+            result,
+            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+        ) {
             *self.pending_otp_page.lock().await = Some(page);
         }
 
@@ -434,8 +467,46 @@ impl ActivityScraper for ChromeScraper {
         let result =
             poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
 
-        // If OTP leads to another OTP step, keep the page alive
-        if matches!(result, LoginResult::OtpRequired) {
+        // Keep the page alive if more interaction is needed
+        if matches!(
+            result,
+            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+        ) {
+            *self.pending_otp_page.lock().await = Some(page);
+        }
+
+        Ok(result)
+    }
+
+    async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
+        let page = self
+            .pending_otp_page
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| ScraperError::Auth {
+                reason: "No pending 2FA session — call credential_login first".to_owned(),
+            })?;
+
+        info!(option_id, "Selecting 2FA method");
+        if !cdp_click_two_fa_option(&page, option_id).await {
+            // Put the page back so the user can retry
+            *self.pending_otp_page.lock().await = Some(page);
+            return Err(ScraperError::Auth {
+                reason: format!("2FA option '{option_id}' not found on page"),
+            });
+        }
+
+        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+
+        let result =
+            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
+
+        // Keep the page alive if more interaction is needed
+        if matches!(
+            result,
+            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+        ) {
             *self.pending_otp_page.lock().await = Some(page);
         }
 
@@ -711,10 +782,25 @@ async fn poll_for_next_step(
             continue;
         }
 
-        // Check for OTP/2FA pages
+        // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
         if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
             info!(url = %url, "OTP/2FA page detected during step transition");
             return Ok(StepOutcome::LoginResult(LoginResult::OtpRequired));
+        }
+
+        // Generic 2FA challenge selection page — return options to the caller
+        if url.contains(TWO_FA_CHALLENGE_PATTERN) {
+            info!(url = %url, "2FA challenge selection page detected");
+            let options = parse_two_fa_options(page).await;
+            if !options.is_empty() {
+                let choices = two_fa_options_to_choices(options);
+                return Ok(StepOutcome::LoginResult(LoginResult::TwoFactorChoice(
+                    choices,
+                )));
+            }
+            // No options parsed — keep polling, page may still be loading
+            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+            continue;
         }
 
         // Check for success
@@ -842,6 +928,54 @@ async fn cdp_click_at(page: &chromiumoxide::Page, x: f64, y: f64) -> ScraperResu
             reason: format!("CDP mouse release failed: {e}"),
         })?;
     Ok(())
+}
+
+/// Parsed 2FA option with coordinates for CDP click
+#[derive(Debug, serde::Deserialize)]
+struct TwoFactorOptionWithCoords {
+    id: String,
+    label: String,
+    x: f64,
+    y: f64,
+}
+
+/// Parse 2FA options from the current page
+async fn parse_two_fa_options(page: &chromiumoxide::Page) -> Vec<TwoFactorOptionWithCoords> {
+    let Ok(result) = page.evaluate(PARSE_TWO_FA_OPTIONS_JS).await else {
+        return Vec::new();
+    };
+    let json_str = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+    serde_json::from_str(&json_str).unwrap_or_default()
+}
+
+/// Convert parsed 2FA options to the public `TwoFactorOption` type
+fn two_fa_options_to_choices(
+    options: Vec<TwoFactorOptionWithCoords>,
+) -> Vec<crate::error::TwoFactorOption> {
+    options
+        .into_iter()
+        .map(|o| crate::error::TwoFactorOption {
+            id: o.id,
+            label: o.label,
+        })
+        .collect()
+}
+
+/// CDP-click a 2FA option by its id, using stored coordinates
+async fn cdp_click_two_fa_option(page: &chromiumoxide::Page, option_id: &str) -> bool {
+    let options = parse_two_fa_options(page).await;
+    for opt in &options {
+        if opt.id == option_id {
+            debug!(id = opt.id, x = opt.x, y = opt.y, "CDP clicking 2FA option");
+            let _ = cdp_click_at(page, opt.x, opt.y).await;
+            return true;
+        }
+    }
+    warn!(option_id, "2FA option not found on page");
+    false
 }
 
 /// Find and CDP-click the "Enter your password" option on Google's challenge page
@@ -1125,10 +1259,23 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Check for OTP/2FA pages
+        // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
         if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
             info!(url = %url, "OTP/2FA page detected");
             return Ok(LoginResult::OtpRequired);
+        }
+
+        // Generic 2FA challenge selection page — return options to the caller
+        if url.contains(TWO_FA_CHALLENGE_PATTERN) {
+            info!(url = %url, "2FA challenge selection page detected");
+            let options = parse_two_fa_options(page).await;
+            if !options.is_empty() {
+                let choices = two_fa_options_to_choices(options);
+                return Ok(LoginResult::TwoFactorChoice(choices));
+            }
+            // No options parsed — keep polling, page may still be loading
+            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+            continue;
         }
 
         let on_success = provider
