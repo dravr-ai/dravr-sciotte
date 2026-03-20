@@ -50,6 +50,9 @@ pub struct ProviderIdentity {
     /// CSS selectors for OAuth login buttons, keyed by method name (e.g., "google", "apple")
     #[serde(default)]
     pub login_oauth_buttons: HashMap<String, String>,
+    /// Path to a markdown prompt for vision-based page analysis during login
+    #[serde(default)]
+    pub vision_page_analysis_prompt: Option<String>,
 }
 
 /// Configuration for the list/training page
@@ -68,6 +71,9 @@ pub struct ListPageConfig {
     /// Optional custom JS for list extraction (overrides auto-generated JS from fields)
     #[serde(default)]
     pub js_extract: Option<String>,
+    /// Path to a markdown file with vision extraction prompt (used by `VisionScraper`)
+    #[serde(default)]
+    pub vision_prompt: Option<String>,
 }
 
 /// CSS selectors for extracting fields from list page rows
@@ -97,6 +103,9 @@ pub struct DetailPageConfig {
     pub url_template: String,
     /// JavaScript snippet that extracts all activity data and returns JSON
     pub js_extract: String,
+    /// Path to a markdown file with vision extraction prompt (used by `VisionScraper`)
+    #[serde(default)]
+    pub vision_prompt: Option<String>,
 }
 
 impl ProviderConfig {

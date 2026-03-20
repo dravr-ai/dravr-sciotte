@@ -50,6 +50,9 @@ pub mod types;
 /// OAuth flow helpers and encrypted session persistence
 pub mod auth;
 
+/// Shared browser automation utilities (launch, cookies, CDP input)
+pub mod browser_utils;
+
 /// JavaScript string escaping utilities for CDP evaluate calls
 pub mod js_utils;
 
@@ -62,7 +65,14 @@ pub mod scraper;
 /// In-memory TTL cache layer
 pub mod cache;
 
+/// Vision-based scraper using LLM screenshot analysis (requires `vision` feature)
+#[cfg(feature = "vision")]
+pub mod vision;
+
 // Re-export primary types for consumers
 pub use cache::CachedScraper;
 pub use scraper::ChromeScraper;
 pub use types::ActivityScraper;
+
+#[cfg(feature = "vision")]
+pub use vision::VisionScraper;

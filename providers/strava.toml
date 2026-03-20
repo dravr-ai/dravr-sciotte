@@ -11,6 +11,7 @@ login_password_selector = '#password, input[name="password"]'
 login_button_selector = 'button[type="submit"], #login-button'
 login_error_selector = '.alert-error, .alert-danger, [class*="error-message"]'
 login_otp_selector = 'input[name="code"], input[type="tel"], input[autocomplete="one-time-code"]'
+vision_page_analysis_prompt = "providers/strava/page_analysis.md"
 
 [provider.login_oauth_buttons]
 google = 'text:Sign In With Google'
@@ -21,6 +22,7 @@ url = "https://www.strava.com/athlete/training"
 row_selector = "tr.training-activity-row"
 link_selector = 'a[data-field-name="name"]'
 id_regex = '/\/activities\/(\d+)/'
+vision_prompt = "providers/strava/list_page.md"
 
 [list_page.fields]
 name = 'a[data-field-name="name"]'
@@ -174,3 +176,4 @@ js_extract = '''
     return JSON.stringify(data);
 })()
 '''
+vision_prompt = "providers/strava/detail_page.md"
