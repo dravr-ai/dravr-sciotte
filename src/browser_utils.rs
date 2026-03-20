@@ -31,11 +31,23 @@ pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperRe
             .arg("--disable-features=WebAuthentication");
     }
 
+    // Use a unique temp profile directory to avoid SingletonLock conflicts
+    // when multiple browser instances run concurrently
+    let profile_dir = std::env::temp_dir().join(format!(
+        "sciotte-chrome-{}",
+        std::process::id()
+            + std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+    ));
+
     builder = builder
         .arg("--disable-gpu")
         .arg("--no-sandbox")
         .arg("--disable-dev-shm-usage")
         .arg("--disable-blink-features=AutomationControlled")
+        .user_data_dir(profile_dir)
         .window_size(1920, 1080);
 
     if let Some(ref path) = config.chrome_path {

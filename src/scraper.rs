@@ -458,7 +458,29 @@ impl ActivityScraper for ChromeScraper {
         // Combine provider's button selector with Google's OTP button as fallback
         let combined_button = format!("{button_selector}, {GOOGLE_OTP_SUBMIT_SELECTOR}");
         info!("Submitting OTP code");
-        fill_input_field(&page, otp_selector, code).await?;
+        // Try provider OTP selector first, fall back to any visible text input
+        let fill_result = fill_input_field(&page, otp_selector, code).await;
+        if fill_result.is_err() {
+            warn!("OTP selector failed, trying fallback input detection");
+            // Dump visible inputs for debugging
+            let debug_js = r"(function() {
+                var inputs = document.querySelectorAll('input');
+                return JSON.stringify(Array.from(inputs).map(function(i) {
+                    var r = i.getBoundingClientRect();
+                    return {type: i.type, name: i.name, id: i.id, visible: r.width > 0 && r.height > 0, w: r.width, h: r.height};
+                }));
+            })()";
+            if let Ok(result) = page.evaluate(debug_js).await {
+                let val = result
+                    .value()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default();
+                warn!(inputs = %val, "Available input fields on OTP page");
+            }
+            // Try any visible text/number/tel input as fallback
+            let fallback = r#"input[type="text"], input[type="number"], input[type="tel"], input:not([type="hidden"]):not([type="password"])"#;
+            fill_input_field(&page, fallback, code).await?;
+        }
         tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
         click_element(&page, &combined_button).await?;
 
@@ -473,10 +495,10 @@ impl ActivityScraper for ChromeScraper {
         )
         .await?;
 
-        // Keep the browser + page alive if more interaction is needed
+        // Keep the browser + page alive for retry on failure or further interaction
         if matches!(
             result,
-            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_) | LoginResult::Failed(_)
         ) {
             *self.pending_login.lock().await = Some((browser, page));
         }
@@ -983,14 +1005,11 @@ async fn poll_credential_login_result(
             return Ok(LoginResult::Success(session));
         }
 
-        // Check OTP patterns early — if we're already on a TOTP page, return immediately
-        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
-            // Only return OtpRequired if the URL has changed (we navigated TO this page)
-            // or if the initial URL was already an OTP page (e.g., after select_two_factor)
-            if url != initial_url || OTP_URL_PATTERNS.iter().any(|p| initial_url.contains(p)) {
-                info!(url = %url, "OTP/2FA page detected");
-                return Ok(LoginResult::OtpRequired);
-            }
+        // Check OTP patterns — only if the URL has changed to a DIFFERENT OTP page.
+        // If we're still on the same OTP page we started on, keep waiting for redirect.
+        if url != initial_url && OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+            info!(url = %url, "OTP/2FA page detected");
+            return Ok(LoginResult::OtpRequired);
         }
 
         // Wait for the URL to change from the initial page before checking challenge types
