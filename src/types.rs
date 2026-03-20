@@ -44,6 +44,13 @@ pub trait ActivityScraper: Send + Sync {
     /// and polls for success or failure.
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult>;
 
+    /// Select a 2FA method after `credential_login` returned `TwoFactorChoice`.
+    /// Clicks the chosen option and returns:
+    /// - `OtpRequired` if a code entry field appears
+    /// - `Success` if the method completes without user input (e.g., phone tap)
+    /// - `Failed` if the method is rejected
+    async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult>;
+
     /// Check if a session is still valid (cookies not expired)
     async fn is_authenticated(&self, session: &AuthSession) -> bool;
 

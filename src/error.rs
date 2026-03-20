@@ -77,10 +77,21 @@ impl ScraperError {
 pub enum LoginResult {
     /// Login succeeded — session cookies captured
     Success(crate::models::AuthSession),
-    /// Provider requires a one-time password / 2FA code
+    /// Provider requires a one-time password / 2FA code entry
     OtpRequired,
+    /// Provider shows multiple 2FA options — let the user choose
+    TwoFactorChoice(Vec<TwoFactorOption>),
     /// Login was rejected (wrong password, account locked, etc.)
     Failed(String),
+}
+
+/// A 2FA method option presented by the provider
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TwoFactorOption {
+    /// Machine-readable identifier (e.g., "otp", "app", "sms")
+    pub id: String,
+    /// Human-readable label (e.g., "Google Authenticator", "Tap Yes on your phone")
+    pub label: String,
 }
 
 /// HTTP error response body for REST API error responses

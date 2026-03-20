@@ -98,6 +98,13 @@ fn default_login_method() -> String {
     "email".to_owned()
 }
 
+/// Request body for selecting a 2FA method
+#[derive(Debug, Deserialize)]
+pub struct TwoFactorSelectRequest {
+    /// The 2FA option id (e.g., "otp", "app", "sms")
+    pub option_id: String,
+}
+
 /// Request body for OTP/2FA code submission
 #[derive(Debug, Deserialize)]
 pub struct OtpSubmitRequest {
@@ -387,10 +394,18 @@ pub async fn credential_login(
             .into_response()
         }
         Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
-            info!("Credential login requires OTP/2FA");
+            info!("Credential login requires OTP/2FA code");
             Json(json!({
                 "status": "otp_required",
                 "reason": "Provider requires a one-time password or 2FA verification",
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+            info!(count = options.len(), "2FA method selection required");
+            Json(json!({
+                "status": "two_factor_choice",
+                "options": options,
             }))
             .into_response()
         }
@@ -456,6 +471,14 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
+        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+            info!(count = options.len(), "OTP led to 2FA method selection");
+            Json(json!({
+                "status": "two_factor_choice",
+                "options": options,
+            }))
+            .into_response()
+        }
         Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "OTP verification rejected");
             (
@@ -469,6 +492,75 @@ pub async fn submit_otp(
         }
         Err(e) => {
             error!(error = %e, "OTP submission error");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "reason": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /auth/select-2fa handler.
+///
+/// Selects a 2FA method after `credential_login` returned `two_factor_choice`.
+pub async fn select_two_factor(
+    State(state): State<SharedState>,
+    Json(request): Json<TwoFactorSelectRequest>,
+) -> impl IntoResponse {
+    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
+        let guard = state.read().await;
+        guard.scraper().select_two_factor(&request.option_id).await
+    };
+
+    match result {
+        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
+            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+                warn!(error = %e, "Failed to persist session to disk");
+            }
+            let session_id = session.session_id.clone();
+            let cookie_count = session.cookies.len();
+            state.write().await.add_session(session);
+
+            info!(session_id = %session_id, "2FA method completed successfully");
+            Json(json!({
+                "status": "authenticated",
+                "session_id": session_id,
+                "cookie_count": cookie_count,
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+            info!("2FA method requires code entry");
+            Json(json!({
+                "status": "otp_required",
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+            info!(count = options.len(), "2FA method led to another choice");
+            Json(json!({
+                "status": "two_factor_choice",
+                "options": options,
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+            warn!(reason = %reason, "2FA method failed");
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "status": "failed",
+                    "reason": reason,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!(error = %e, "2FA selection error");
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
