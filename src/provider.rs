@@ -210,6 +210,10 @@ impl ProviderConfig {
     }
 
     /// Create with the built-in Garmin Connect provider configuration
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embedded TOML is malformed (compile-time constant, tested).
     #[must_use]
     pub fn garmin_default() -> Self {
         Self::from_toml(GARMIN_PROVIDER_TOML).expect("embedded garmin config is valid")

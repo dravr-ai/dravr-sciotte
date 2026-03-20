@@ -736,6 +736,12 @@ impl ActivityScraper for ChromeScraper {
 // Login flow types and helpers
 // ============================================================================
 
+/// Check URL patterns against the path only (strip query params)
+fn url_path_matches(url: &str, patterns: &[String]) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    patterns.iter().any(|p| path.contains(p.as_str()))
+}
+
 /// Extracted login selectors from provider config, validated upfront
 #[derive(Debug)]
 struct LoginSelectors<'a> {
@@ -852,13 +858,7 @@ async fn poll_for_next_step(
         }
 
         // Check for success
-        let on_success = provider
-            .provider
-            .login_success_patterns
-            .iter()
-            .any(|p| url.contains(p));
-
-        if !url.is_empty() && on_success {
+        if !url.is_empty() && url_path_matches(&url, &provider.provider.login_success_patterns) {
             info!(url = %url, "Login succeeded during step transition");
             let session = capture_session(page).await?;
             return Ok(StepOutcome::LoginResult(LoginResult::Success(session)));
@@ -993,12 +993,7 @@ async fn poll_credential_login_result(
             .unwrap_or_default();
 
         // Check success patterns early — works even if URL hasn't changed
-        let on_success = provider
-            .provider
-            .login_success_patterns
-            .iter()
-            .any(|p| url.contains(p));
-        if !url.is_empty() && on_success {
+        if !url.is_empty() && url_path_matches(&url, &provider.provider.login_success_patterns) {
             info!(url = %url, "Credential login detected via URL");
             let session = capture_session(page).await?;
             info!(
@@ -1099,17 +1094,8 @@ async fn wait_for_login(
             })?
             .unwrap_or_default();
 
-        let on_failure_page = provider
-            .provider
-            .login_failure_patterns
-            .iter()
-            .any(|p| url.contains(p));
-
-        let on_success_page = provider
-            .provider
-            .login_success_patterns
-            .iter()
-            .any(|p| url.contains(p));
+        let on_failure_page = url_path_matches(&url, &provider.provider.login_failure_patterns);
+        let on_success_page = url_path_matches(&url, &provider.provider.login_success_patterns);
 
         if !url.is_empty() && !on_failure_page && on_success_page {
             info!(url = %url, "Login detected");
@@ -1133,11 +1119,7 @@ async fn check_session_redirect(
         })?
         .unwrap_or_default();
 
-    let on_failure = provider
-        .provider
-        .login_failure_patterns
-        .iter()
-        .any(|p| url.contains(p));
+    let on_failure = url_path_matches(&url, &provider.provider.login_failure_patterns);
 
     if on_failure {
         return Err(ScraperError::SessionExpired {
