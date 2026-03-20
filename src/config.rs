@@ -144,3 +144,31 @@ pub fn session_dir() -> PathBuf {
         PathBuf::from,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_u64_returns_default_when_unset() {
+        assert_eq!(env_u64("DRAVR_SCIOTTE_TEST_NONEXISTENT_VAR_12345", 42), 42);
+    }
+
+    #[test]
+    fn scraper_config_default_values() {
+        let config = ScraperConfig::default();
+        assert_eq!(config.login_poll_interval_ms, 500);
+        assert_eq!(config.login_timeout_secs, 120);
+        assert_eq!(config.page_load_wait_secs, 3);
+        assert_eq!(config.form_interaction_delay_ms, 300);
+        assert_eq!(config.email_step_timeout_secs, 10);
+        assert_eq!(config.password_step_timeout_secs, 10);
+        assert_eq!(config.phone_tap_timeout_secs, 60);
+    }
+
+    #[test]
+    fn scraper_config_headless_default() {
+        let config = ScraperConfig::default();
+        assert!(config.headless);
+    }
+}
