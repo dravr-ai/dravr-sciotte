@@ -68,6 +68,7 @@ const PARSE_TWO_FA_OPTIONS_JS: &str = r"(function() {
         if (!text || text.length < 5) continue;
         var lower = text.toLowerCase();
         if (lower.includes('passkey') || lower.includes('security key')) continue;
+        if (lower.includes('enter your password') || lower.includes('mot de passe')) continue;
         if (lower === 'help' || lower === 'aide') continue;
         if (lower.includes('another way') || lower.includes('autrement')) continue;
         var id = ct || 'unknown';
@@ -262,6 +263,7 @@ impl ChromeScraper {
             &self.provider,
             config,
             config.password_step_timeout_secs,
+            Some(password),
         )
         .await
     }
@@ -330,6 +332,7 @@ impl ChromeScraper {
         }
 
         // Fill password on the OAuth provider's page
+        save_timeout_screenshot(page, "before-password-fill").await;
         debug!(
             selector = oauth_form.password,
             "Filling OAuth password field"
@@ -338,6 +341,7 @@ impl ChromeScraper {
         tokio::time::sleep(Duration::from_secs(1)).await;
         debug!("Clicking Next after OAuth password");
         click_element(page, oauth_form.password_next).await?;
+        save_timeout_screenshot(page, "after-password-submit").await;
 
         // Poll for final result — Google/Apple will redirect back to the provider
         poll_credential_login_result(
@@ -345,6 +349,7 @@ impl ChromeScraper {
             &self.provider,
             config,
             config.password_step_timeout_secs,
+            Some(password),
         )
         .await
     }
@@ -492,6 +497,7 @@ impl ActivityScraper for ChromeScraper {
             &self.provider,
             config,
             config.password_step_timeout_secs,
+            None,
         )
         .await?;
 
@@ -528,13 +534,22 @@ impl ActivityScraper for ChromeScraper {
 
         tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
+        // Check if we're already on an OTP code entry page
+        let current_url = page.url().await.ok().flatten().unwrap_or_default();
+        if OTP_URL_PATTERNS.iter().any(|p| current_url.contains(p)) {
+            info!(url = %current_url, "Already on OTP page after selecting 2FA method");
+            *self.pending_login.lock().await = Some((browser, page));
+            return Ok(LoginResult::OtpRequired);
+        }
+
         // Phone tap needs longer — user must pick up their phone
         let timeout = if option_id == "app" {
             config.phone_tap_timeout_secs
         } else {
             config.password_step_timeout_secs
         };
-        let result = poll_credential_login_result(&page, &self.provider, config, timeout).await?;
+        let result =
+            poll_credential_login_result(&page, &self.provider, config, timeout, None).await?;
 
         // Keep the browser + page alive if more interaction is needed
         if matches!(
@@ -821,21 +836,18 @@ async fn poll_for_next_step(
             return Ok(StepOutcome::LoginResult(LoginResult::OtpRequired));
         }
 
-        // Generic 2FA challenge selection page — return options to the caller.
-        // Skip /challenge/pwd (password page) and /challenge/pk (passkey, handled above).
+        // Challenge selection page — could be sign-in method chooser (pre-password)
+        // or 2FA options (post-password). If "Enter your password" is an option,
+        // auto-click it instead of returning it as a 2FA choice.
         if url.contains(CHALLENGE_URL_PATTERN)
             && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
         {
-            info!(url = %url, "2FA challenge selection page detected");
-            let options = parse_two_fa_options(page).await;
-            if !options.is_empty() {
-                let choices = two_fa_options_to_choices(options);
-                return Ok(StepOutcome::LoginResult(LoginResult::TwoFactorChoice(
-                    choices,
-                )));
-            }
-            // No options parsed — keep polling, page may still be loading
-            tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            save_timeout_screenshot(page, "challenge-step").await;
+            info!(url = %url, "Challenge selection page detected during step transition");
+
+            // Check if "Enter your password" is available — if so, click it automatically
+            cdp_click_enter_password(page).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             continue;
         }
 
@@ -961,6 +973,7 @@ async fn poll_credential_login_result(
     provider: &ProviderConfig,
     config: &ScraperConfig,
     timeout_secs: u64,
+    password: Option<&str>,
 ) -> ScraperResult<LoginResult> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
 
@@ -1018,33 +1031,43 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Passkey challenge — click "Try another way" then "Enter your password"
+        // Passkey challenge (after password) — click "Try another way" to reach 2FA selection.
+        // Don't try "Enter your password" here — password was already submitted.
         if url.contains(PASSKEY_CHALLENGE_PATTERN) {
-            info!("Passkey challenge detected, clicking 'Try another way'");
+            info!("Passkey challenge detected post-password, clicking 'Try another way'");
             let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            info!("Clicking 'Enter your password' via CDP");
-            cdp_click_enter_password(page).await;
-            // Double-click — Google sometimes needs a second click on the challenge option
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            cdp_click_enter_password(page).await;
             tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             continue;
         }
 
-        // Generic 2FA challenge selection page — return options to the caller.
-        // Skip /challenge/pwd (password page) and /challenge/pk (passkey, handled above).
+        // Challenge selection page — could be 2FA options or sign-in method chooser.
         if url.contains(CHALLENGE_URL_PATTERN)
             && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
         {
-            info!(url = %url, "2FA challenge selection page detected");
+            info!(url = %url, "Challenge selection page detected");
             let options = parse_two_fa_options(page).await;
             if !options.is_empty() {
+                // Real 2FA options found (Authenticator, phone tap, SMS)
                 let choices = two_fa_options_to_choices(options);
                 return Ok(LoginResult::TwoFactorChoice(choices));
             }
-            // No options parsed — keep polling, page may still be loading
-            tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            // No 2FA options — this is the sign-in method chooser page.
+            // Click "Enter your password", re-fill password, and submit.
+            info!("No 2FA options found, clicking 'Enter your password'");
+            cdp_click_enter_password(page).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            if let Some(pwd) = password {
+                let pwd_selector = r#"input[type="password"], input[name="Passwd"]"#;
+                if element_exists(page, pwd_selector).await {
+                    info!("Re-filling password after sign-in method selection");
+                    let _ = fill_input_field(page, pwd_selector, pwd).await;
+                    tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms))
+                        .await;
+                    let _ =
+                        click_element(page, "#passwordNext button, #passwordNext, text:Next").await;
+                    tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+                }
+            }
             continue;
         }
 
