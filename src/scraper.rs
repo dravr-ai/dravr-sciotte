@@ -28,12 +28,7 @@ use crate::models::{Activity, ActivityParams, AuthSession, CookieData, SportType
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
-const LOGIN_POLL_INTERVAL_MS: u64 = 500;
-const LOGIN_TIMEOUT_SECS: u64 = 120;
-const PAGE_LOAD_WAIT_SECS: u64 = 3;
-const FORM_INTERACTION_DELAY_MS: u64 = 300;
-const EMAIL_STEP_TIMEOUT_SECS: u64 = 10;
-const PASSWORD_STEP_TIMEOUT_SECS: u64 = 10;
+// Login timing constants are now in ScraperConfig (env-configurable).
 
 /// URL patterns that indicate an OTP/2FA page
 /// URL patterns that indicate an OTP/2FA code entry page.
@@ -54,32 +49,44 @@ const PASSKEY_CHALLENGE_PATTERN: &str = "challenge/pk";
 /// Selectors for the "Try another way" link on Google's passkey challenge page
 const TRY_ANOTHER_WAY_SELECTOR: &str = "text:Try another way, text:Essayer autrement";
 
-/// URL pattern for Google 2FA challenge selection page (not passkey, not specific OTP type yet)
-const TWO_FA_CHALLENGE_PATTERN: &str = "/challenge/";
+/// URL pattern for Google challenge pages
+const CHALLENGE_URL_PATTERN: &str = "/challenge/";
+
+/// Challenge URL suffixes that are NOT 2FA selection pages (skip these for option parsing)
+const CHALLENGE_SKIP_PATTERNS: &[&str] = &["challenge/pk", "challenge/pwd"];
 
 /// JS to parse 2FA options from Google's challenge selection page.
-/// Returns JSON array of {id, label, x, y} for each visible option, excluding passkey.
+/// Uses `[data-challengetype]` elements which Google uses to identify each method.
+/// Returns JSON array of `{id, label, x, y}` for each visible option.
 const PARSE_TWO_FA_OPTIONS_JS: &str = r"(function() {
     var options = [];
     var seen = {};
-    var all = document.querySelectorAll('[data-challengetype], [jsname] li, div[role=link], li');
-    for (var i = 0; i < all.length; i++) {
-        var el = all[i];
+    var els = document.querySelectorAll('[data-challengetype]');
+    for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        var ct = el.getAttribute('data-challengetype');
         var rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0 || rect.height > 120) continue;
+        if (rect.width <= 0 || rect.height <= 0) continue;
         var text = el.textContent.trim();
-        if (!text || text.length > 200) continue;
+        if (!text || text.length < 5) continue;
         var lower = text.toLowerCase();
         if (lower.includes('passkey') || lower.includes('security key')) continue;
-        var id = 'unknown';
+        if (lower === 'help' || lower === 'aide') continue;
+        if (lower.includes('another way') || lower.includes('autrement')) continue;
+        var id = ct || 'unknown';
         if (lower.includes('authenticator') || lower.includes('verification code') || lower.includes('code de validation')) id = 'otp';
-        else if (lower.includes('tap') || lower.includes('phone') || lower.includes('appuyez')) id = 'app';
-        else if (lower.includes('sms') || lower.includes('text message') || lower.includes('texto')) id = 'sms';
+        else if (lower.includes('tap') || lower.includes('yes on your') || lower.includes('appuyez')) id = 'app';
+        else if (lower.includes('text message') || lower.includes('sms') || lower.includes('texto')) id = 'sms';
         else if (lower.includes('backup') || lower.includes('secours')) id = 'backup';
-        else if (lower.includes('another way') || lower.includes('autrement')) continue;
         if (seen[id]) continue;
         seen[id] = true;
-        options.push({id: id, label: text.substring(0, 100), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
+        options.push({id: id, label: text.substring(0, 120), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
+    }
+    if (options.length === 0) {
+        var debug = Array.from(els).map(function(e) {
+            return {ct: e.getAttribute('data-challengetype'), text: e.textContent.trim().substring(0, 80)};
+        });
+        return 'debug:' + JSON.stringify(debug);
     }
     return JSON.stringify(options);
 })()";
@@ -103,6 +110,9 @@ const ENTER_PASSWORD_COORDS_JS: &str = r"(function() {
     });
     return 'not_found:' + JSON.stringify(debug);
 })()";
+
+/// Google's OTP submit button selectors (used as fallback in `submit_otp`)
+const GOOGLE_OTP_SUBMIT_SELECTOR: &str = "#totpNext button, #totpNext, text:Next";
 
 /// OAuth form selectors for third-party login pages (Google, Apple).
 /// These are universal — the same regardless of which provider uses them.
@@ -136,8 +146,9 @@ pub struct ChromeScraper {
     provider: ProviderConfig,
     /// Shared browser instance for headless scraping (lazily created)
     browser: Mutex<Option<Arc<Browser>>>,
-    /// Browser page kept alive during OTP flow for `submit_otp` follow-up
-    pending_otp_page: Mutex<Option<chromiumoxide::Page>>,
+    /// Browser + page kept alive during OTP/2FA flow for follow-up calls.
+    /// Stores both so Chrome isn't killed when `credential_login` returns.
+    pending_login: Mutex<Option<(Browser, chromiumoxide::Page)>>,
 }
 
 impl ChromeScraper {
@@ -148,7 +159,7 @@ impl ChromeScraper {
             config,
             provider,
             browser: Mutex::new(None),
-            pending_otp_page: Mutex::new(None),
+            pending_login: Mutex::new(None),
         }
     }
 
@@ -239,11 +250,12 @@ impl ChromeScraper {
         email: &str,
         password: &str,
     ) -> ScraperResult<LoginResult> {
+        let config = &self.config;
         let selectors = LoginSelectors::from_provider(&self.provider)?;
 
         debug!(selector = selectors.email, "Filling email field");
         fill_input_field(page, selectors.email, email).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
 
         let password_visible = element_exists(page, selectors.password).await;
         debug!(password_visible, "Password field check after page load");
@@ -254,8 +266,9 @@ impl ChromeScraper {
             let step = poll_for_next_step(
                 page,
                 &self.provider,
+                config,
                 selectors.password,
-                EMAIL_STEP_TIMEOUT_SECS,
+                config.email_step_timeout_secs,
             )
             .await?;
             if let StepOutcome::LoginResult(result) = step {
@@ -267,11 +280,17 @@ impl ChromeScraper {
 
         debug!(selector = selectors.password, "Filling password field");
         fill_input_field(page, selectors.password, password).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
         debug!("Clicking submit after password");
         click_element(page, selectors.button).await?;
 
-        poll_credential_login_result(page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await
+        poll_credential_login_result(
+            page,
+            &self.provider,
+            config,
+            config.password_step_timeout_secs,
+        )
+        .await
     }
 
     /// OAuth credential login — click provider OAuth button, then fill Google/Apple form
@@ -282,6 +301,7 @@ impl ChromeScraper {
         password: &str,
         method: &str,
     ) -> ScraperResult<LoginResult> {
+        let config = &self.config;
         let oauth_button_selector = self
             .provider
             .provider
@@ -304,27 +324,31 @@ impl ChromeScraper {
         // Click the OAuth button on the provider's login page
         debug!(method, "Clicking OAuth button on provider page");
         click_element(page, oauth_button_selector).await?;
-        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
         // Fill email on the OAuth provider's page
         debug!(selector = oauth_form.email, "Filling OAuth email field");
         fill_input_field(page, oauth_form.email, email).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
         debug!("Clicking Next after OAuth email");
         click_element(page, oauth_form.email_next).await?;
 
         // Wait for the page transition — the password field may exist as a hidden element
         // on the email step, so we must wait for Google to actually transition pages
-        debug!("Waiting {PAGE_LOAD_WAIT_SECS}s for OAuth page transition");
-        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        debug!(
+            wait_secs = config.page_load_wait_secs,
+            "Waiting for OAuth page transition"
+        );
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
         // Now wait for a visible password field
         debug!("Waiting for OAuth password field to become visible");
         let step = poll_for_next_step(
             page,
             &self.provider,
+            config,
             oauth_form.password,
-            EMAIL_STEP_TIMEOUT_SECS,
+            config.email_step_timeout_secs,
         )
         .await?;
         if let StepOutcome::LoginResult(result) = step {
@@ -343,7 +367,13 @@ impl ChromeScraper {
         click_element(page, oauth_form.password_next).await?;
 
         // Poll for final result — Google/Apple will redirect back to the provider
-        poll_credential_login_result(page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await
+        poll_credential_login_result(
+            page,
+            &self.provider,
+            config,
+            config.password_step_timeout_secs,
+        )
+        .await
     }
 }
 
@@ -364,7 +394,7 @@ impl ActivityScraper for ChromeScraper {
             })?;
 
         info!("Waiting for user to log in...");
-        wait_for_login(&page, &self.provider).await?;
+        wait_for_login(&page, &self.provider, &self.config).await?;
 
         let cookies = extract_cookies(&page, &self.provider.provider.name).await?;
         if cookies.is_empty() {
@@ -393,13 +423,14 @@ impl ActivityScraper for ChromeScraper {
         password: &str,
         method: &str,
     ) -> ScraperResult<LoginResult> {
+        let config = &self.config;
         info!(
             provider = %self.provider.provider.name,
             method,
             "Starting credential login"
         );
 
-        let browser = launch_browser(&self.config, false).await?;
+        let browser = launch_browser(config, false).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
@@ -407,8 +438,11 @@ impl ActivityScraper for ChromeScraper {
                 reason: format!("Failed to open login page: {e}"),
             })?;
 
-        debug!("Waiting {PAGE_LOAD_WAIT_SECS}s for page JS to render");
-        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        debug!(
+            wait_secs = config.page_load_wait_secs,
+            "Waiting for page JS to render"
+        );
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
         dismiss_cookie_dialog(&page).await;
 
         let result = match method {
@@ -426,21 +460,21 @@ impl ActivityScraper for ChromeScraper {
             result,
             LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
         ) {
-            *self.pending_otp_page.lock().await = Some(page);
+            *self.pending_login.lock().await = Some((browser, page));
         }
 
         Ok(result)
     }
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
-        let page = self
-            .pending_otp_page
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| ScraperError::Auth {
-                reason: "No pending OTP session — call credential_login first".to_owned(),
-            })?;
+        let (browser, page) =
+            self.pending_login
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ScraperError::Auth {
+                    reason: "No pending OTP session — call credential_login first".to_owned(),
+                })?;
 
         let otp_selector = self
             .provider
@@ -459,55 +493,72 @@ impl ActivityScraper for ChromeScraper {
                 reason: "Provider has no login_button_selector configured".to_owned(),
             })?;
 
+        let config = &self.config;
+        // Combine provider's button selector with Google's OTP button as fallback
+        let combined_button = format!("{button_selector}, {GOOGLE_OTP_SUBMIT_SELECTOR}");
         info!("Submitting OTP code");
         fill_input_field(&page, otp_selector, code).await?;
-        tokio::time::sleep(Duration::from_millis(FORM_INTERACTION_DELAY_MS)).await;
-        click_element(&page, button_selector).await?;
+        tokio::time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
+        click_element(&page, &combined_button).await?;
 
-        let result =
-            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
+        // Wait for Google to process the code and redirect away from the TOTP page
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
-        // Keep the page alive if more interaction is needed
+        let result = poll_credential_login_result(
+            &page,
+            &self.provider,
+            config,
+            config.password_step_timeout_secs,
+        )
+        .await?;
+
+        // Keep the browser + page alive if more interaction is needed
         if matches!(
             result,
             LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
         ) {
-            *self.pending_otp_page.lock().await = Some(page);
+            *self.pending_login.lock().await = Some((browser, page));
         }
 
         Ok(result)
     }
 
     async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
-        let page = self
-            .pending_otp_page
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| ScraperError::Auth {
-                reason: "No pending 2FA session — call credential_login first".to_owned(),
-            })?;
+        let (browser, page) =
+            self.pending_login
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ScraperError::Auth {
+                    reason: "No pending 2FA session — call credential_login first".to_owned(),
+                })?;
 
+        let config = &self.config;
         info!(option_id, "Selecting 2FA method");
         if !cdp_click_two_fa_option(&page, option_id).await {
-            // Put the page back so the user can retry
-            *self.pending_otp_page.lock().await = Some(page);
+            // Put browser + page back so the user can retry
+            *self.pending_login.lock().await = Some((browser, page));
             return Err(ScraperError::Auth {
                 reason: format!("2FA option '{option_id}' not found on page"),
             });
         }
 
-        tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
-        let result =
-            poll_credential_login_result(&page, &self.provider, PASSWORD_STEP_TIMEOUT_SECS).await?;
+        // Phone tap needs longer — user must pick up their phone
+        let timeout = if option_id == "app" {
+            config.phone_tap_timeout_secs
+        } else {
+            config.password_step_timeout_secs
+        };
+        let result = poll_credential_login_result(&page, &self.provider, config, timeout).await?;
 
-        // Keep the page alive if more interaction is needed
+        // Keep the browser + page alive if more interaction is needed
         if matches!(
             result,
             LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
         ) {
-            *self.pending_otp_page.lock().await = Some(page);
+            *self.pending_login.lock().await = Some((browser, page));
         }
 
         Ok(result)
@@ -740,6 +791,7 @@ enum StepOutcome {
 async fn poll_for_next_step(
     page: &chromiumoxide::Page,
     provider: &ProviderConfig,
+    config: &ScraperConfig,
     field_selector: &str,
     timeout_secs: u64,
 ) -> ScraperResult<StepOutcome> {
@@ -772,13 +824,13 @@ async fn poll_for_next_step(
         if url.contains(PASSKEY_CHALLENGE_PATTERN) {
             info!("Passkey challenge detected, clicking 'Try another way'");
             let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             info!("Clicking 'Enter your password' via CDP");
             cdp_click_enter_password(page).await;
             // Double-click — Google sometimes needs a second click on the challenge option
             tokio::time::sleep(Duration::from_secs(1)).await;
             cdp_click_enter_password(page).await;
-            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             continue;
         }
 
@@ -788,8 +840,11 @@ async fn poll_for_next_step(
             return Ok(StepOutcome::LoginResult(LoginResult::OtpRequired));
         }
 
-        // Generic 2FA challenge selection page — return options to the caller
-        if url.contains(TWO_FA_CHALLENGE_PATTERN) {
+        // Generic 2FA challenge selection page — return options to the caller.
+        // Skip /challenge/pwd (password page) and /challenge/pk (passkey, handled above).
+        if url.contains(CHALLENGE_URL_PATTERN)
+            && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
+        {
             info!(url = %url, "2FA challenge selection page detected");
             let options = parse_two_fa_options(page).await;
             if !options.is_empty() {
@@ -799,7 +854,7 @@ async fn poll_for_next_step(
                 )));
             }
             // No options parsed — keep polling, page may still be loading
-            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+            tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
             continue;
         }
 
@@ -839,7 +894,7 @@ async fn poll_for_next_step(
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
     }
 }
 
@@ -948,6 +1003,10 @@ async fn parse_two_fa_options(page: &chromiumoxide::Page) -> Vec<TwoFactorOption
         .value()
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default();
+    if json_str.starts_with("debug:") {
+        warn!(raw = %json_str, "2FA options parser returned debug info — no options matched");
+        return Vec::new();
+    }
     serde_json::from_str(&json_str).unwrap_or_default()
 }
 
@@ -1225,9 +1284,14 @@ async fn read_visible_text(page: &chromiumoxide::Page, selector: &str) -> Option
 async fn poll_credential_login_result(
     page: &chromiumoxide::Page,
     provider: &ProviderConfig,
+    config: &ScraperConfig,
     timeout_secs: u64,
 ) -> ScraperResult<LoginResult> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+
+    // Capture the initial URL so we can detect when the page actually changes
+    let initial_url = page.url().await.ok().flatten().unwrap_or_default();
+    debug!(initial_url = %initial_url, "Polling for login result");
 
     loop {
         if tokio::time::Instant::now() > deadline {
@@ -1245,39 +1309,7 @@ async fn poll_credential_login_result(
             })?
             .unwrap_or_default();
 
-        // Passkey challenge — click "Try another way" then "Enter your password"
-        if url.contains(PASSKEY_CHALLENGE_PATTERN) {
-            info!("Passkey challenge detected, clicking 'Try another way'");
-            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
-            info!("Clicking 'Enter your password' via CDP");
-            cdp_click_enter_password(page).await;
-            // Double-click — Google sometimes needs a second click on the challenge option
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            cdp_click_enter_password(page).await;
-            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
-            continue;
-        }
-
-        // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
-        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
-            info!(url = %url, "OTP/2FA page detected");
-            return Ok(LoginResult::OtpRequired);
-        }
-
-        // Generic 2FA challenge selection page — return options to the caller
-        if url.contains(TWO_FA_CHALLENGE_PATTERN) {
-            info!(url = %url, "2FA challenge selection page detected");
-            let options = parse_two_fa_options(page).await;
-            if !options.is_empty() {
-                let choices = two_fa_options_to_choices(options);
-                return Ok(LoginResult::TwoFactorChoice(choices));
-            }
-            // No options parsed — keep polling, page may still be loading
-            tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
-            continue;
-        }
-
+        // Check success patterns early — works even if URL hasn't changed
         let on_success = provider
             .provider
             .login_success_patterns
@@ -1288,7 +1320,6 @@ async fn poll_credential_login_result(
             .login_failure_patterns
             .iter()
             .any(|p| url.contains(p));
-
         if !url.is_empty() && on_success && !on_failure {
             info!(url = %url, "Credential login detected via URL");
             let cookies = extract_cookies(page, &provider.provider.name).await?;
@@ -1310,6 +1341,52 @@ async fn poll_credential_login_result(
             return Ok(LoginResult::Success(session));
         }
 
+        // Check OTP patterns early — if we're already on a TOTP page, return immediately
+        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+            // Only return OtpRequired if the URL has changed (we navigated TO this page)
+            // or if the initial URL was already an OTP page (e.g., after select_two_factor)
+            if url != initial_url || OTP_URL_PATTERNS.iter().any(|p| initial_url.contains(p)) {
+                info!(url = %url, "OTP/2FA page detected");
+                return Ok(LoginResult::OtpRequired);
+            }
+        }
+
+        // Wait for the URL to change from the initial page before checking challenge types
+        if url == initial_url {
+            tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            continue;
+        }
+
+        // Passkey challenge — click "Try another way" then "Enter your password"
+        if url.contains(PASSKEY_CHALLENGE_PATTERN) {
+            info!("Passkey challenge detected, clicking 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            info!("Clicking 'Enter your password' via CDP");
+            cdp_click_enter_password(page).await;
+            // Double-click — Google sometimes needs a second click on the challenge option
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            cdp_click_enter_password(page).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            continue;
+        }
+
+        // Generic 2FA challenge selection page — return options to the caller.
+        // Skip /challenge/pwd (password page) and /challenge/pk (passkey, handled above).
+        if url.contains(CHALLENGE_URL_PATTERN)
+            && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
+        {
+            info!(url = %url, "2FA challenge selection page detected");
+            let options = parse_two_fa_options(page).await;
+            if !options.is_empty() {
+                let choices = two_fa_options_to_choices(options);
+                return Ok(LoginResult::TwoFactorChoice(choices));
+            }
+            // No options parsed — keep polling, page may still be loading
+            tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            continue;
+        }
+
         // Check for error messages on the login page
         if let Some(ref error_selector) = provider.provider.login_error_selector {
             if let Some(error_text) = read_visible_text(page, error_selector).await {
@@ -1317,7 +1394,7 @@ async fn poll_credential_login_result(
             }
         }
 
-        tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
     }
 }
 
@@ -1326,14 +1403,16 @@ async fn poll_credential_login_result(
 async fn wait_for_login(
     page: &chromiumoxide::Page,
     provider: &ProviderConfig,
+    config: &ScraperConfig,
 ) -> ScraperResult<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
+    let timeout = config.login_timeout_secs;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
 
     loop {
         if tokio::time::Instant::now() > deadline {
             return Err(ScraperError::Auth {
                 reason: format!(
-                    "Login timed out after {LOGIN_TIMEOUT_SECS} seconds — close the browser and retry"
+                    "Login timed out after {timeout} seconds — close the browser and retry"
                 ),
             });
         }
@@ -1363,7 +1442,7 @@ async fn wait_for_login(
             return Ok(());
         }
 
-        tokio::time::sleep(Duration::from_millis(LOGIN_POLL_INTERVAL_MS)).await;
+        tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
     }
 }
 
