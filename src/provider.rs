@@ -53,6 +53,12 @@ pub struct ProviderIdentity {
     /// Path to a markdown prompt for vision-based page analysis during login
     #[serde(default)]
     pub vision_page_analysis_prompt: Option<String>,
+    /// URL of the athlete profile page
+    #[serde(default)]
+    pub profile_url: Option<String>,
+    /// JavaScript snippet that extracts athlete profile data and returns JSON
+    #[serde(default)]
+    pub profile_js_extract: Option<String>,
 }
 
 /// Configuration for the list/training page

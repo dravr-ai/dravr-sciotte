@@ -21,7 +21,7 @@ use crate::browser_utils::{
 };
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult};
-use crate::models::{Activity, ActivityParams, AuthSession, SportType};
+use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, SportType};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
@@ -648,6 +648,50 @@ impl ActivityScraper for ChromeScraper {
 
         info!(id = activity_id, name = %activity.name, "Activity detail scraped");
         Ok(activity)
+    }
+
+    async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
+        let profile_url = self
+            .provider
+            .provider
+            .profile_url
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no profile_url configured".to_owned(),
+            })?;
+        let js = self
+            .provider
+            .provider
+            .profile_js_extract
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no profile_js_extract configured".to_owned(),
+            })?;
+
+        let page = self.open_authenticated_page(session, profile_url).await?;
+
+        let result = page
+            .evaluate(js)
+            .await
+            .map_err(|e| ScraperError::Scraping {
+                reason: format!("Profile JS extraction failed: {e}"),
+            })?;
+
+        let json_str = result
+            .value()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+
+        let profile: AthleteProfile =
+            serde_json::from_str(&json_str).map_err(|e| ScraperError::Scraping {
+                reason: format!("Failed to parse profile data: {e}"),
+            })?;
+
+        info!(
+            name = profile.display_name.as_deref().unwrap_or("unknown"),
+            "Athlete profile scraped"
+        );
+        Ok(profile)
     }
 }
 

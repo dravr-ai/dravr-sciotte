@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
-use crate::models::{Activity, ActivityParams, AuthSession, CookieData};
+use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, CookieData};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
@@ -538,6 +538,44 @@ impl ActivityScraper for VisionScraper {
         let data = self.extract_detail_data(&page).await?;
 
         Ok(parse_vision_activity_detail(activity_id, &data))
+    }
+
+    async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
+        let profile_url = self
+            .provider
+            .provider
+            .profile_url
+            .as_deref()
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Provider has no profile_url configured".to_owned(),
+            })?;
+
+        let browser = self.get_browser().await?;
+        let page = browser
+            .new_page(&self.provider.provider.login_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to open page: {e}"),
+            })?;
+
+        self.inject_cookies(&page, session).await?;
+
+        page.goto(profile_url)
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to navigate to profile: {e}"),
+            })?;
+
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+
+        let screenshot = self.screenshot_base64(&page).await?;
+        let prompt = "Extract the athlete's profile from this page. Return JSON with fields: display_name, firstname, lastname, profile_picture_url, city, country. Only include fields that are visible.";
+        let response = self.ask_llm_with_screenshot(&screenshot, prompt).await?;
+        let json = extract_json(&response);
+
+        serde_json::from_str(&json).map_err(|e| ScraperError::Scraping {
+            reason: format!("Failed to parse athlete profile: {e}"),
+        })
     }
 }
 

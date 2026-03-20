@@ -14,7 +14,7 @@ use tracing::{debug, info};
 
 use crate::config::CacheConfig;
 use crate::error::{LoginResult, ScraperResult};
-use crate::models::{Activity, ActivityParams, AuthSession};
+use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession};
 use crate::types::ActivityScraper;
 
 /// Cache key combining session identity and query parameters
@@ -164,6 +164,10 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
         self.detail_cache.insert(key, activity.clone()).await;
 
         Ok(activity)
+    }
+
+    async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
+        self.inner.get_athlete(session).await
     }
 }
 

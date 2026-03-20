@@ -11,6 +11,17 @@ login_password_selector = '#password, input[name="password"]'
 login_button_selector = '#login-btn-signin, button[type="submit"]'
 login_error_selector = '.alert-error, [class*="error-message"], [class*="status-error"]'
 login_otp_selector = 'input[name="code"], input[type="tel"], input[autocomplete="one-time-code"]'
+profile_url = "https://connect.garmin.com/modern/profile"
+profile_js_extract = '''
+(function() {
+    var data = {};
+    var name = document.querySelector('[class*="display-name"], [class*="userName"]');
+    if (name) data.display_name = name.textContent.trim();
+    var avatar = document.querySelector('[class*="profile-image"] img, img[class*="avatar"]');
+    if (avatar) data.profile_picture_url = avatar.src;
+    return JSON.stringify(data);
+})()
+'''
 
 [list_page]
 url = "https://connect.garmin.com/modern/activities"
