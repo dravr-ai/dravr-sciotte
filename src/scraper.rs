@@ -1854,4 +1854,79 @@ mod tests {
         let provider = ProviderConfig::strava_default();
         assert!(provider.provider.login_otp_selector.is_some());
     }
+
+    #[test]
+    fn url_path_matches_ignores_query_params() {
+        let patterns = vec!["/modern".to_owned(), "/dashboard".to_owned()];
+
+        // Should NOT match — /modern is in query string, not path
+        assert!(!url_path_matches(
+            "https://sso.garmin.com/portal/sso/en-US/mfa?service=https://connect.garmin.com/modern",
+            &patterns
+        ));
+
+        // Should match — /dashboard is in the path
+        assert!(url_path_matches(
+            "https://connect.garmin.com/modern/dashboard?foo=bar",
+            &patterns
+        ));
+
+        // Should match — /modern is in the path
+        assert!(url_path_matches(
+            "https://connect.garmin.com/modern/activities",
+            &patterns
+        ));
+    }
+
+    #[test]
+    fn url_path_matches_no_query_string() {
+        let patterns = vec!["/dashboard".to_owned()];
+        assert!(url_path_matches(
+            "https://www.strava.com/dashboard",
+            &patterns
+        ));
+        assert!(!url_path_matches("https://www.strava.com/login", &patterns));
+    }
+
+    #[test]
+    fn url_path_matches_garmin_mfa_not_success() {
+        let success = vec![
+            "/app/home".to_owned(),
+            "/app/activities".to_owned(),
+            "/modern".to_owned(),
+            "/dashboard".to_owned(),
+        ];
+        let mfa_url = "https://sso.garmin.com/portal/sso/en-US/mfa?clientId=GarminConnect&service=https://connect.garmin.com/modern";
+        assert!(
+            !url_path_matches(mfa_url, &success),
+            "Garmin MFA URL should NOT match success patterns"
+        );
+    }
+
+    #[test]
+    fn url_path_matches_strava_login_redirect() {
+        let success = vec![
+            "/dashboard".to_owned(),
+            "/athlete".to_owned(),
+            "/onboarding".to_owned(),
+        ];
+        // Transient redirect through /login should not match success
+        assert!(!url_path_matches("https://www.strava.com/login", &success));
+        // Final destination should match
+        assert!(url_path_matches(
+            "https://www.strava.com/dashboard",
+            &success
+        ));
+        assert!(url_path_matches(
+            "https://www.strava.com/athlete/training",
+            &success
+        ));
+    }
+
+    #[test]
+    fn garmin_provider_has_profile_url() {
+        let provider = ProviderConfig::garmin_default();
+        assert!(provider.provider.profile_url.is_some());
+        assert!(provider.provider.profile_js_extract.is_some());
+    }
 }
