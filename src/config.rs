@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(config.page_load_wait_secs, 3);
         assert_eq!(config.form_interaction_delay_ms, 300);
         assert_eq!(config.email_step_timeout_secs, 10);
-        assert_eq!(config.password_step_timeout_secs, 10);
+        assert_eq!(config.password_step_timeout_secs, 30);
         assert_eq!(config.phone_tap_timeout_secs, 60);
     }
 

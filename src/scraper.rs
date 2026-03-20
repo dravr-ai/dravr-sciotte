@@ -857,13 +857,8 @@ async fn poll_for_next_step(
             .login_success_patterns
             .iter()
             .any(|p| url.contains(p));
-        let on_failure = provider
-            .provider
-            .login_failure_patterns
-            .iter()
-            .any(|p| url.contains(p));
 
-        if !url.is_empty() && on_success && !on_failure {
+        if !url.is_empty() && on_success {
             info!(url = %url, "Login succeeded during step transition");
             let session = capture_session(page).await?;
             return Ok(StepOutcome::LoginResult(LoginResult::Success(session)));
@@ -1003,12 +998,7 @@ async fn poll_credential_login_result(
             .login_success_patterns
             .iter()
             .any(|p| url.contains(p));
-        let on_failure = provider
-            .provider
-            .login_failure_patterns
-            .iter()
-            .any(|p| url.contains(p));
-        if !url.is_empty() && on_success && !on_failure {
+        if !url.is_empty() && on_success {
             info!(url = %url, "Credential login detected via URL");
             let session = capture_session(page).await?;
             info!(
