@@ -95,7 +95,7 @@ impl Default for ScraperConfig {
             page_load_wait_secs: env_u64("DRAVR_SCIOTTE_PAGE_LOAD_WAIT", 3),
             form_interaction_delay_ms: env_u64("DRAVR_SCIOTTE_FORM_DELAY_MS", 300),
             email_step_timeout_secs: env_u64("DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT", 10),
-            password_step_timeout_secs: env_u64("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", 10),
+            password_step_timeout_secs: env_u64("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", 30),
             phone_tap_timeout_secs: env_u64("DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT", 60),
         }
     }
