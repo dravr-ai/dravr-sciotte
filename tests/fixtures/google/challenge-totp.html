@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head><title>2-Step Verification</title></head>
+<body>
+  <h1>2-Step Verification</h1>
+  <p>Enter the code from Google Authenticator</p>
+  <form id="totp-form">
+    <input type="tel" name="code" autocomplete="one-time-code" placeholder="Enter code">
+    <div id="totpNext">
+      <button type="submit">Next</button>
+    </div>
+  </form>
+  <script>
+    document.getElementById('totp-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var code = document.querySelector('input[name="code"]').value;
+      if (code === '123456') {
+        window.location = '/strava/dashboard.html';
+      } else {
+        var err = document.createElement('div');
+        err.className = 'error-message';
+        err.textContent = 'Wrong code. Try again.';
+        document.body.insertBefore(err, document.body.firstChild);
+      }
+    });
+  </script>
+</body>
+</html>

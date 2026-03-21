@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>Strava Login</title></head>
+<body>
+  <h1>Log In</h1>
+  <form id="login-form">
+    <label>Email</label>
+    <input id="email" name="email" type="email" placeholder="Your Email">
+    <label>Password</label>
+    <input id="password" name="password" type="password" placeholder="Password">
+    <button type="submit" id="login-button">Log In</button>
+  </form>
+  <button class="btn-google" onclick="window.location='/google/identifier.html'">Sign In With Google</button>
+  <button class="btn-apple">Sign In With Apple</button>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var email = document.getElementById('email').value;
+      var password = document.getElementById('password').value;
+      if (email && password === 'correct-password') {
+        window.location = '/strava/dashboard.html';
+      } else if (email && password) {
+        var err = document.createElement('div');
+        err.className = 'alert-error';
+        err.textContent = 'Invalid email or password';
+        document.body.insertBefore(err, document.body.firstChild);
+      }
+    });
+  </script>
+</body>
+</html>

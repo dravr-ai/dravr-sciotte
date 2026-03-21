@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head><title>Garmin Sign In</title></head>
+<body>
+  <h1>Sign In</h1>
+  <form id="login-form">
+    <label>Email</label>
+    <input id="email" name="email" type="email">
+    <label>Password</label>
+    <input id="password" name="password" type="password">
+    <button type="submit" id="login-btn-signin">Sign In</button>
+  </form>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var email = document.getElementById('email').value;
+      var password = document.getElementById('password').value;
+      if (email && password === 'correct-password') {
+        window.location = '/garmin/mfa.html';
+      } else if (email && password === 'no-mfa-password') {
+        window.location = '/garmin/dashboard.html';
+      } else if (email && password) {
+        var err = document.createElement('div');
+        err.className = 'alert-error';
+        err.textContent = 'Invalid credentials';
+        document.body.insertBefore(err, document.body.firstChild);
+      }
+    });
+  </script>
+</body>
+</html>

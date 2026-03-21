@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head><title>Garmin MFA</title></head>
+<body>
+  <h1>Sign In</h1>
+  <h2>Enter Security Code</h2>
+  <p>Email was sent to te**@gmail.com</p>
+  <form id="mfa-form">
+    <label>Security Code *</label>
+    <input name="verificationCode" type="text" autocomplete="one-time-code">
+    <button type="submit" id="login-btn-signin">Next</button>
+  </form>
+  <script>
+    document.getElementById('mfa-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var code = document.querySelector('input[name="verificationCode"]').value;
+      if (code === '123456') {
+        window.location = '/garmin/dashboard.html';
+      } else {
+        var err = document.createElement('div');
+        err.className = 'alert-error';
+        err.textContent = 'Invalid verification code';
+        document.body.insertBefore(err, document.body.firstChild);
+      }
+    });
+  </script>
+</body>
+</html>

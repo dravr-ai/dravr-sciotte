@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><title>Welcome</title></head>
+<body>
+  <h1>Welcome</h1>
+  <p>Enter your password</p>
+  <form id="pwd-form">
+    <input type="password" name="Passwd">
+    <div id="passwordNext">
+      <button type="submit">Next</button>
+    </div>
+  </form>
+  <script>
+    document.getElementById('pwd-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var pwd = document.querySelector('input[type="password"]').value;
+      if (pwd === 'correct-password') {
+        // Simulate direct success (no 2FA)
+        window.location = '/strava/dashboard.html';
+      } else if (pwd === '2fa-password') {
+        // Simulate 2FA required
+        window.location = '/google/challenge-totp.html';
+      } else if (pwd === 'passkey-password') {
+        // Simulate passkey challenge first
+        window.location = '/google/challenge-pk.html';
+      } else if (pwd) {
+        var err = document.createElement('div');
+        err.className = 'error-message';
+        err.textContent = 'Wrong password. Try again.';
+        document.body.insertBefore(err, document.body.firstChild);
+      }
+    });
+  </script>
+</body>
+</html>
