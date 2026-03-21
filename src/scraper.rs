@@ -452,7 +452,8 @@ impl ActivityScraper for ChromeScraper {
                 .await;
         }
 
-        let browser = launch_browser(config, false).await?;
+        // Use visible Chrome by default (Google blocks headless), but respect config for tests
+        let browser = launch_browser(config, config.headless).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
