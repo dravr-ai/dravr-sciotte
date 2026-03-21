@@ -19,6 +19,8 @@ use crate::browser_utils::{
     capture_session, cdp_click_at, click_element, dismiss_cookie_dialog, element_exists,
     fill_input_field, inject_cookies, launch_browser, read_visible_text,
 };
+#[cfg(feature = "vision")]
+use crate::config::LoginMode;
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult};
 use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, SportType};
@@ -139,6 +141,9 @@ const APPLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
 ///
 /// The provider config defines login URLs, CSS selectors, and JS extraction scripts
 /// so the same engine can scrape different sport platforms.
+///
+/// Set `DRAVR_SCIOTTE_LOGIN_MODE=vision` to use LLM-powered page analysis for login
+/// (requires the `vision` feature and an embacle `LlmProvider`).
 pub struct ChromeScraper {
     config: ScraperConfig,
     provider: ProviderConfig,
@@ -147,6 +152,9 @@ pub struct ChromeScraper {
     /// Browser + page kept alive during OTP/2FA flow for follow-up calls.
     /// Stores both so Chrome isn't killed when `credential_login` returns.
     pending_login: Mutex<Option<(Browser, chromiumoxide::Page)>>,
+    /// Optional LLM provider for vision-based login (requires `vision` feature)
+    #[cfg(feature = "vision")]
+    llm: Option<Arc<dyn embacle::types::LlmProvider>>,
 }
 
 impl ChromeScraper {
@@ -158,7 +166,17 @@ impl ChromeScraper {
             provider,
             browser: Mutex::new(None),
             pending_login: Mutex::new(None),
+            #[cfg(feature = "vision")]
+            llm: None,
         }
+    }
+
+    /// Set the LLM provider for vision-based login (requires `vision` feature)
+    #[cfg(feature = "vision")]
+    #[must_use]
+    pub fn with_llm(mut self, llm: Arc<dyn embacle::types::LlmProvider>) -> Self {
+        self.llm = Some(llm);
+        self
     }
 
     /// Create with default browser config and the built-in Strava provider
@@ -215,6 +233,35 @@ impl ChromeScraper {
 
         tokio::time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 2)).await;
         Ok(page)
+    }
+
+    /// Vision-based credential login using LLM screenshot analysis.
+    /// Delegates to the vision login loop which handles any page layout.
+    #[cfg(feature = "vision")]
+    async fn run_vision_credential_login(
+        &self,
+        email: &str,
+        password: &str,
+        method: &str,
+    ) -> ScraperResult<LoginResult> {
+        let llm = self.llm.as_ref().ok_or_else(|| ScraperError::Config {
+            reason: "Vision login mode requires an LLM provider — call ChromeScraper::with_llm()"
+                .to_owned(),
+        })?;
+
+        let vision = crate::vision::VisionScraper::new(
+            self.config.clone(),
+            self.provider.clone(),
+            Arc::clone(llm),
+        );
+
+        let result = vision.credential_login(email, password, method).await?;
+
+        // If vision login needs follow-up (OTP/2FA), store the pending state
+        // Note: the vision scraper has its own pending_login, so submit_otp/select_two_factor
+        // should be called on the vision scraper. For simplicity, we return the result
+        // and let the caller handle it.
+        Ok(result)
     }
 
     /// Direct credential login — fill the provider's native email/password form
@@ -393,8 +440,17 @@ impl ActivityScraper for ChromeScraper {
         info!(
             provider = %self.provider.provider.name,
             method,
+            login_mode = ?config.login_mode,
             "Starting credential login"
         );
+
+        // Vision mode: delegate to the vision login loop
+        #[cfg(feature = "vision")]
+        if matches!(config.login_mode, LoginMode::Vision) {
+            return self
+                .run_vision_credential_login(email, password, method)
+                .await;
+        }
 
         let browser = launch_browser(config, false).await?;
         let page = browser
@@ -414,13 +470,26 @@ impl ActivityScraper for ChromeScraper {
         let result = match method {
             "google" | "apple" => {
                 self.run_oauth_credential_login(&page, email, password, method)
-                    .await?
+                    .await
             }
             _ => {
                 self.run_direct_credential_login(&page, email, password)
-                    .await?
+                    .await
             }
         };
+
+        // Hybrid mode: on failure, retry with vision
+        #[cfg(feature = "vision")]
+        if matches!(config.login_mode, LoginMode::Hybrid) {
+            if let Err(ref e) = result {
+                warn!(error = %e, "Selector login failed, retrying with vision mode");
+                return self
+                    .run_vision_credential_login(email, password, method)
+                    .await;
+            }
+        }
+
+        let result = result?;
 
         if matches!(
             result,

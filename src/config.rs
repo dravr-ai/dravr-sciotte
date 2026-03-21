@@ -56,6 +56,30 @@ impl OAuthConfig {
     }
 }
 
+/// Login automation strategy
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LoginMode {
+    /// CSS selectors + URL patterns (fast, free, fragile)
+    #[default]
+    Selector,
+    /// LLM screenshot analysis via embacle (resilient, costs per login)
+    Vision,
+    /// Try selectors first, fall back to vision on failure
+    Hybrid,
+}
+
+impl LoginMode {
+    /// Parse from a string value (env var or config)
+    #[must_use]
+    pub fn from_str_value(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "vision" => Self::Vision,
+            "hybrid" => Self::Hybrid,
+            _ => Self::Selector,
+        }
+    }
+}
+
 /// Scraper configuration
 #[derive(Debug, Clone)]
 pub struct ScraperConfig {
@@ -81,6 +105,8 @@ pub struct ScraperConfig {
     pub password_step_timeout_secs: u64,
     /// Timeout waiting for phone tap / app approval during 2FA (s)
     pub phone_tap_timeout_secs: u64,
+    /// Login automation strategy: selector, vision, or hybrid
+    pub login_mode: LoginMode,
 }
 
 impl Default for ScraperConfig {
@@ -97,6 +123,9 @@ impl Default for ScraperConfig {
             email_step_timeout_secs: env_u64("DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT", 10),
             password_step_timeout_secs: env_u64("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", 30),
             phone_tap_timeout_secs: env_u64("DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT", 60),
+            login_mode: env::var("DRAVR_SCIOTTE_LOGIN_MODE")
+                .map(|v| LoginMode::from_str_value(&v))
+                .unwrap_or_default(),
         }
     }
 }
@@ -170,5 +199,27 @@ mod tests {
     fn scraper_config_headless_default() {
         let config = ScraperConfig::default();
         assert!(config.headless);
+    }
+
+    #[test]
+    fn login_mode_default_is_selector() {
+        assert_eq!(LoginMode::default(), LoginMode::Selector);
+    }
+
+    #[test]
+    fn login_mode_from_str() {
+        assert_eq!(LoginMode::from_str_value("vision"), LoginMode::Vision);
+        assert_eq!(LoginMode::from_str_value("Vision"), LoginMode::Vision);
+        assert_eq!(LoginMode::from_str_value("VISION"), LoginMode::Vision);
+        assert_eq!(LoginMode::from_str_value("hybrid"), LoginMode::Hybrid);
+        assert_eq!(LoginMode::from_str_value("selector"), LoginMode::Selector);
+        assert_eq!(LoginMode::from_str_value("anything"), LoginMode::Selector);
+        assert_eq!(LoginMode::from_str_value(""), LoginMode::Selector);
+    }
+
+    #[test]
+    fn scraper_config_default_login_mode() {
+        let config = ScraperConfig::default();
+        assert_eq!(config.login_mode, LoginMode::Selector);
     }
 }
