@@ -163,6 +163,7 @@ fn test_config() -> ScraperConfig {
         login_timeout_secs: 15,
         login_poll_interval_ms: 200,
         phone_tap_timeout_secs: 5,
+        credential_login_headless: true,
         ..ScraperConfig::default()
     }
 }

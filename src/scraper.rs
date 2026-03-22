@@ -452,8 +452,9 @@ impl ActivityScraper for ChromeScraper {
                 .await;
         }
 
-        // Use visible Chrome by default (Google blocks headless), but respect config for tests
-        let browser = launch_browser(config, config.headless).await?;
+        // Visible Chrome by default for credential login — Google blocks headless with
+        // "This browser or app may not be secure". Set credential_login_headless=true for CI tests.
+        let browser = launch_browser(config, config.credential_login_headless).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await

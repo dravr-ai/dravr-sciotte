@@ -138,8 +138,26 @@ fn load_provider_config(
 }
 
 fn create_scraper(provider: ProviderConfig) -> CachedScraper<ChromeScraper> {
-    let scraper = ChromeScraper::new(ScraperConfig::default(), provider);
+    let config = ScraperConfig::default();
+    let scraper = ChromeScraper::new(config, provider);
     CachedScraper::new(scraper, &CacheConfig::default())
+}
+
+/// Create a scraper with vision-based login via Copilot Headless LLM
+#[cfg(feature = "vision")]
+async fn create_vision_scraper(
+    provider: ProviderConfig,
+) -> Result<CachedScraper<ChromeScraper>, Box<dyn std::error::Error + Send + Sync>> {
+    use std::sync::Arc;
+
+    let headless_config = embacle::CopilotHeadlessConfig::from_env();
+    info!("Initializing Copilot Headless LLM for vision login...");
+    let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config).await);
+
+    let config = ScraperConfig::default();
+    info!(login_mode = ?config.login_mode, "Vision scraper ready");
+    let scraper = ChromeScraper::new(config, provider).with_llm(llm);
+    Ok(CachedScraper::new(scraper, &CacheConfig::default()))
 }
 
 async fn run_server(
@@ -147,6 +165,19 @@ async fn run_server(
     port: u16,
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(feature = "vision")]
+    let cached = {
+        let config = ScraperConfig::default();
+        if matches!(
+            config.login_mode,
+            dravr_sciotte::config::LoginMode::Vision | dravr_sciotte::config::LoginMode::Hybrid
+        ) {
+            create_vision_scraper(provider).await?
+        } else {
+            create_scraper(provider)
+        }
+    };
+    #[cfg(not(feature = "vision"))]
     let cached = create_scraper(provider);
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 

@@ -107,6 +107,8 @@ pub struct ScraperConfig {
     pub phone_tap_timeout_secs: u64,
     /// Login automation strategy: selector, vision, or hybrid
     pub login_mode: LoginMode,
+    /// Whether credential login uses headless Chrome (default: false — Google blocks headless)
+    pub credential_login_headless: bool,
 }
 
 impl Default for ScraperConfig {
@@ -126,6 +128,9 @@ impl Default for ScraperConfig {
             login_mode: env::var("DRAVR_SCIOTTE_LOGIN_MODE")
                 .map(|v| LoginMode::from_str_value(&v))
                 .unwrap_or_default(),
+            credential_login_headless: env::var("DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
         }
     }
 }
