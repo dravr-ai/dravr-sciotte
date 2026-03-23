@@ -55,7 +55,7 @@ docker run -p 3000:3000 ghcr.io/dravr-ai/dravr-sciotte
 
 ```toml
 [dependencies]
-dravr-sciotte = "0.2"
+dravr-sciotte = "0.3"
 ```
 
 ## Quick Start
@@ -286,7 +286,7 @@ For Claude Code, add the same configuration to your MCP settings.
 
 ```toml
 [dependencies]
-dravr-sciotte = "0.2"
+dravr-sciotte = "0.3"
 ```
 
 ### Browser login
