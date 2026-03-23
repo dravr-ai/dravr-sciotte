@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0] — 2026-03-23
+
+### Added
+
+- feat: vision login works end-to-end with Strava Google OAuth
+- feat: wire vision mode into server with Copilot Headless LLM
+
+### Fixed
+
+- fix: use config.headless for credential_login browser launch
+
+
+
 ## [0.2.1] — 2026-03-20
 
 ### Added
