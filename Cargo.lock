@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte-mcp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -729,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "dravr-sciotte-server"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "axum",
  "chromiumoxide",
@@ -752,9 +752,9 @@ dependencies = [
 
 [[package]]
 name = "dravr-tronc"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b290bc964dd60fc453de9d97b7581b225fb42f16f30f8d5d00c36dafb2fbc0ba"
+checksum = "cc7b756ea0d3e90bae59fad752d30ff7adb2a40f2cb8870d23e69f23a9b1fdc0"
 dependencies = [
  "async-trait",
  "axum",

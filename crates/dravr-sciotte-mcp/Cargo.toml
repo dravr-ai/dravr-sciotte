@@ -6,7 +6,7 @@
 
 [package]
 name = "dravr-sciotte-mcp"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "MCP server for dravr-sciotte — expose sport activity scraping via Model Context Protocol"
@@ -24,7 +24,7 @@ name = "dravr-sciotte-mcp"
 path = "src/main.rs"
 
 [dependencies]
-dravr-sciotte = { path = "../..", version = "0.3.1" }
+dravr-sciotte = { path = "../..", version = "0.3.2" }
 dravr-tronc = "0.1.0"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }

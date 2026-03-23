@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2] — 2026-03-23
+
+### Added
+
+- feat: add NumberMatch LoginResult for Google number matching challenge
+
+
+
 ## [0.3.1] — 2026-03-23
 
 
