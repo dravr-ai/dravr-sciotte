@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0] — 2026-03-23
+
+### Added
+
+- feat: embedded fake login server for testing (DRAVR_SCIOTTE_FAKE_LOGIN)
+- feat: add DRAVR_SCIOTTE_FAKE_MODE for testing login flows without Chrome
+
+### Fixed
+
+- fix: address code review findings (P1, P2, P3)
+
+### Other
+
+- Revert "feat: add DRAVR_SCIOTTE_FAKE_MODE for testing login flows without Chrome"
+
+
+
 ## [0.3.2] — 2026-03-23
 
 ### Added
