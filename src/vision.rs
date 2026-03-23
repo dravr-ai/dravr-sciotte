@@ -241,6 +241,12 @@ impl VisionScraper {
         tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
     }
 
+    /// Extract a number matching challenge number from the current page via LLM
+    pub async fn extract_match_number(&self, page: &chromiumoxide::Page) -> Option<String> {
+        let analysis = self.analyze_page(page).await.ok()?;
+        analysis.match_number
+    }
+
     /// Fill a field and click a button based on page analysis.
     /// Uses common CSS selectors first (reliable), LLM coordinates as fallback.
     async fn vision_fill_and_submit(

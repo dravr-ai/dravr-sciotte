@@ -623,9 +623,26 @@ impl ActivityScraper for ChromeScraper {
                 })?;
 
         let config = &self.config;
+
+        // "poll" = just wait for success (used after NumberMatch — user taps on phone)
+        if option_id == "poll" {
+            info!("Polling for 2FA approval (phone tap)");
+            let result = poll_credential_login_result(
+                &page,
+                &self.provider,
+                config,
+                config.phone_tap_timeout_secs,
+                None,
+            )
+            .await?;
+            if !matches!(result, LoginResult::Success(_)) {
+                *self.pending_login.lock().await = Some((browser, page));
+            }
+            return Ok(result);
+        }
+
         info!(option_id, "Selecting 2FA method");
         if !cdp_click_two_fa_option(&page, option_id).await {
-            // Put browser + page back so the user can retry
             *self.pending_login.lock().await = Some((browser, page));
             return Err(ScraperError::Auth {
                 reason: format!("2FA option '{option_id}' not found on page"),
@@ -642,6 +659,26 @@ impl ActivityScraper for ChromeScraper {
             return Ok(LoginResult::OtpRequired);
         }
 
+        // For "app" (phone tap): check if a number matching challenge appeared
+        if option_id == "app" {
+            if let Some(number) = extract_number_from_page(&page).await {
+                info!(number = %number, "Number matching challenge detected");
+                *self.pending_login.lock().await = Some((browser, page));
+                return Ok(LoginResult::NumberMatch(number));
+            }
+
+            // Number not found via JS — try vision fallback if available
+            #[cfg(feature = "vision")]
+            if let Some(ref vision) = *self.vision_scraper.lock().await {
+                info!("Number not found via JS, trying vision fallback");
+                if let Some(number) = vision.extract_match_number(&page).await {
+                    info!(number = %number, "Number found via vision");
+                    *self.pending_login.lock().await = Some((browser, page));
+                    return Ok(LoginResult::NumberMatch(number));
+                }
+            }
+        }
+
         // Phone tap needs longer — user must pick up their phone
         let timeout = if option_id == "app" {
             config.phone_tap_timeout_secs
@@ -651,13 +688,7 @@ impl ActivityScraper for ChromeScraper {
         let result =
             poll_credential_login_result(&page, &self.provider, config, timeout, None).await?;
 
-        // Keep the browser + page alive if more interaction is needed
-        if matches!(
-            result,
-            LoginResult::OtpRequired
-                | LoginResult::TwoFactorChoice(_)
-                | LoginResult::NumberMatch(_)
-        ) {
+        if !matches!(result, LoginResult::Success(_)) {
             *self.pending_login.lock().await = Some((browser, page));
         }
 
@@ -839,6 +870,27 @@ impl ActivityScraper for ChromeScraper {
 // ============================================================================
 
 /// Check URL patterns against the path only (strip query params)
+/// Try to extract a 2-3 digit number from the page (Google number matching challenge).
+/// Looks for a prominent number displayed on screen.
+async fn extract_number_from_page(page: &chromiumoxide::Page) -> Option<String> {
+    let js = r"(function() {
+        var all = document.querySelectorAll('div, span, p');
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var text = el.textContent.trim();
+            if (/^\d{2,3}$/.test(text)) {
+                var rect = el.getBoundingClientRect();
+                if (rect.width > 30 && rect.height > 20) {
+                    return text;
+                }
+            }
+        }
+        return null;
+    })()";
+    let result = page.evaluate(js).await.ok()?;
+    result.value().and_then(|v| v.as_str().map(String::from))
+}
+
 fn url_path_matches(url: &str, patterns: &[String]) -> bool {
     let path = url.split('?').next().unwrap_or(url);
     patterns.iter().any(|p| path.contains(p.as_str()))
