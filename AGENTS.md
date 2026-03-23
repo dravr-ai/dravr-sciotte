@@ -1,3 +1,23 @@
+## Git Hooks - MANDATORY for ALL AI Agents
+
+```bash
+git config core.hooksPath .githooks
+```
+
+This enables commit-msg hooks. Sessions get archived/revived, so this must run EVERY time you start working.
+
+**NEVER use `--no-verify` when committing or pushing.** The hooks enforce:
+- Commit message format (max 2 lines, conventional commits)
+- No AI-generated commit signatures (🤖, "Generated with", "Co-Authored-By: Claude", etc.)
+
+## Commit Messages
+
+- **Maximum 2 lines** — line 1: summary, line 2: optional detail
+- **Conventional commit format**: `type(scope): description`
+- **NEVER add AI attribution** — no `Co-Authored-By:`, no `Generated with`, no 🤖
+- **NEVER add AI-generated commit text** in commit messages
+- Keep line 1 under 72 characters (max 100)
+
 ## Git Workflow: NO Pull Requests
 
 **CRITICAL: NEVER create Pull Requests. All merges happen locally via squash merge.**
