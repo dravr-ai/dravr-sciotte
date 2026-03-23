@@ -19,13 +19,13 @@
         window.location = '/strava/dashboard.html';
       } else if (pwd === '2fa-password') {
         // Simulate 2FA selection page (includes number match option)
-        window.location = '/google/challenge-selection.html';
+        window.location = '/google/challenge/selection.html';
       } else if (pwd === 'totp-password') {
         // Simulate direct TOTP
-        window.location = '/google/challenge-totp.html';
+        window.location = '/google/challenge/totp.html';
       } else if (pwd === 'passkey-password') {
         // Simulate passkey challenge first
-        window.location = '/google/challenge-pk.html';
+        window.location = '/google/challenge/pk.html';
       } else if (pwd) {
         var err = document.createElement('div');
         err.className = 'error-message';

@@ -260,6 +260,110 @@ async fn garmin_login_no_mfa() {
 }
 
 // ============================================================================
+// Google OAuth with 2FA + number match tests
+// ============================================================================
+
+/// Create a fake Strava provider with Google OAuth pointing to local test server
+fn fake_strava_google_provider(base_url: &str) -> ProviderConfig {
+    let toml = format!(
+        r#"
+[provider]
+name = "fake-strava-google"
+login_url = "{base_url}/strava/login.html"
+login_success_patterns = ["/dashboard"]
+login_failure_patterns = ["/login.html"]
+login_email_selector = '#email, input[name="email"]'
+login_password_selector = '#password, input[name="password"]'
+login_button_selector = 'button[type="submit"]'
+login_error_selector = '.alert-error'
+login_otp_selector = 'input[name="code"], input[type="tel"]'
+
+[provider.login_oauth_buttons]
+google = "text:Sign In With Google"
+
+[list_page]
+url = "{base_url}/strava/dashboard.html"
+row_selector = "tr"
+link_selector = "a"
+id_regex = '/\/activities\/(\d+)/'
+
+[list_page.fields]
+name = "td"
+sport_type = "td"
+date = "td"
+time = "td"
+distance = "td"
+elevation = "td"
+
+[detail_page]
+url_template = "{base_url}/strava/activity/{{id}}"
+js_extract = '(function() {{ return "{{}}"; }})()'
+"#
+    );
+    ProviderConfig::from_toml(&toml).unwrap()
+}
+
+#[tokio::test]
+async fn google_oauth_2fa_number_match() {
+    let (addr, _server) = start_fixture_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_strava_google_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    // Step 1: Google OAuth login with 2FA password
+    let result = scraper
+        .credential_login("test@example.com", "2fa-password", "google")
+        .await
+        .unwrap();
+
+    // Should get TwoFactorChoice (the challenge-selection page has options)
+    assert!(
+        matches!(result, LoginResult::TwoFactorChoice(ref opts) if !opts.is_empty()),
+        "Expected TwoFactorChoice, got {result:?}"
+    );
+
+    // Step 2: Select "app" (phone tap) — should show number match
+    let result = scraper.select_two_factor("app").await.unwrap();
+
+    // Should get NumberMatch("78") or Success (if number detection works)
+    match &result {
+        LoginResult::NumberMatch(number) => {
+            assert_eq!(number, "78", "Expected number 78, got {number}");
+
+            // Step 3: Poll — fake page auto-redirects after 3s
+            let result = scraper.select_two_factor("poll").await.unwrap();
+            assert!(
+                matches!(result, LoginResult::Success(_)),
+                "Expected Success after poll, got {result:?}"
+            );
+        }
+        LoginResult::Success(_) => {
+            // Also acceptable — page auto-redirected before we checked
+        }
+        other => panic!("Expected NumberMatch or Success, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn google_oauth_direct_success() {
+    let (addr, _server) = start_fixture_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_strava_google_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    // Google OAuth with password that leads directly to success
+    let result = scraper
+        .credential_login("test@example.com", "correct-password", "google")
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, LoginResult::Success(_)),
+        "Expected Success, got {result:?}"
+    );
+}
+
+// ============================================================================
 // Provider config tests
 // ============================================================================
 
