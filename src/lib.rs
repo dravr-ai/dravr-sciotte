@@ -53,6 +53,9 @@ pub mod auth;
 /// Shared browser automation utilities (launch, cookies, CDP input)
 pub mod browser_utils;
 
+/// Embedded fake login server for testing
+pub mod fake_login;
+
 /// JavaScript string escaping utilities for CDP evaluate calls
 pub mod js_utils;
 

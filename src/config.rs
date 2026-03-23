@@ -109,6 +109,8 @@ pub struct ScraperConfig {
     pub login_mode: LoginMode,
     /// Whether credential login uses headless Chrome (default: false — Google blocks headless)
     pub credential_login_headless: bool,
+    /// Use fake HTML login pages for testing (no real provider interaction)
+    pub fake_login: bool,
 }
 
 impl Default for ScraperConfig {
@@ -129,6 +131,9 @@ impl Default for ScraperConfig {
                 .map(|v| LoginMode::from_str_value(&v))
                 .unwrap_or_default(),
             credential_login_headless: env::var("DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false),
+            fake_login: env::var("DRAVR_SCIOTTE_FAKE_LOGIN")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
         }

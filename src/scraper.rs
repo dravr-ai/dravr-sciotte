@@ -464,11 +464,26 @@ impl ActivityScraper for ChromeScraper {
                 .await;
         }
 
-        // Visible Chrome by default for credential login — Google blocks headless with
-        // "This browser or app may not be secure". Set credential_login_headless=true for CI tests.
-        let browser = launch_browser(config, config.credential_login_headless).await?;
+        // Fake login mode: serve embedded HTML fixtures instead of real provider
+        let login_url = if config.fake_login {
+            let base = crate::fake_login::start_fake_server().await.map_err(|e| {
+                ScraperError::Browser {
+                    reason: format!("Failed to start fake login server: {e}"),
+                }
+            })?;
+            info!(base_url = %base, "Using fake login server");
+            format!("{base}/strava/login.html")
+        } else {
+            self.provider.provider.login_url.clone()
+        };
+
+        let browser = launch_browser(
+            config,
+            config.fake_login || config.credential_login_headless,
+        )
+        .await?;
         let page = browser
-            .new_page(&self.provider.provider.login_url)
+            .new_page(&login_url)
             .await
             .map_err(|e| ScraperError::Browser {
                 reason: format!("Failed to open login page: {e}"),
