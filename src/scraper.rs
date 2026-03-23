@@ -155,6 +155,9 @@ pub struct ChromeScraper {
     /// Optional LLM provider for vision-based login (requires `vision` feature)
     #[cfg(feature = "vision")]
     llm: Option<Arc<dyn embacle::types::LlmProvider>>,
+    /// Persistent vision scraper instance for multi-step login flows (OTP/2FA follow-up)
+    #[cfg(feature = "vision")]
+    vision_scraper: Mutex<Option<crate::vision::VisionScraper>>,
 }
 
 impl ChromeScraper {
@@ -168,6 +171,8 @@ impl ChromeScraper {
             pending_login: Mutex::new(None),
             #[cfg(feature = "vision")]
             llm: None,
+            #[cfg(feature = "vision")]
+            vision_scraper: Mutex::new(None),
         }
     }
 
@@ -257,10 +262,14 @@ impl ChromeScraper {
 
         let result = vision.credential_login(email, password, method).await?;
 
-        // If vision login needs follow-up (OTP/2FA), store the pending state
-        // Note: the vision scraper has its own pending_login, so submit_otp/select_two_factor
-        // should be called on the vision scraper. For simplicity, we return the result
-        // and let the caller handle it.
+        // Keep the vision scraper alive for OTP/2FA follow-up calls
+        if matches!(
+            result,
+            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_) | LoginResult::Failed(_)
+        ) {
+            *self.vision_scraper.lock().await = Some(vision);
+        }
+
         Ok(result)
     }
 
@@ -504,6 +513,12 @@ impl ActivityScraper for ChromeScraper {
     }
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
+        // Delegate to vision scraper if it's active
+        #[cfg(feature = "vision")]
+        if let Some(ref vision) = *self.vision_scraper.lock().await {
+            return vision.submit_otp(code).await;
+        }
+
         let (browser, page) =
             self.pending_login
                 .lock()
@@ -584,6 +599,12 @@ impl ActivityScraper for ChromeScraper {
     }
 
     async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
+        // Delegate to vision scraper if it's active
+        #[cfg(feature = "vision")]
+        if let Some(ref vision) = *self.vision_scraper.lock().await {
+            return vision.select_two_factor(option_id).await;
+        }
+
         let (browser, page) =
             self.pending_login
                 .lock()

@@ -8,13 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chrono::Utc;
 use embacle::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
-use futures::StreamExt;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -61,7 +60,7 @@ impl VisionScraper {
             return Ok(Arc::clone(browser));
         }
 
-        let browser = launch_vision_browser(&self.config, true).await?;
+        let browser = crate::browser_utils::launch_browser(&self.config, true).await?;
         let browser = Arc::new(browser);
         *guard = Some(Arc::clone(&browser));
 
@@ -134,21 +133,124 @@ impl VisionScraper {
         })
     }
 
-    /// Fill a field and click a button based on page analysis
+    /// Handle the provider login page — click OAuth button or fill email
+    async fn handle_provider_login(
+        &self,
+        page: &chromiumoxide::Page,
+        analysis: &PageAnalysis,
+        config: &ScraperConfig,
+        method: &str,
+        email: &str,
+    ) -> ScraperResult<()> {
+        if method == "google" || method == "apple" {
+            info!(method, "Vision: clicking OAuth button");
+            // Try provider config selector first (reliable text matching)
+            let clicked =
+                if let Some(selector) = self.provider.provider.login_oauth_buttons.get(method) {
+                    crate::browser_utils::click_element(page, selector)
+                        .await
+                        .is_ok()
+                } else {
+                    false
+                };
+            // Fall back to LLM-detected coordinates
+            if !clicked {
+                let label = if method == "google" {
+                    "Google"
+                } else {
+                    "Apple"
+                };
+                if let Some(action) = analysis.find_action_by_label(label) {
+                    let _ = crate::browser_utils::cdp_click_at(page, action.x, action.y).await;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        } else {
+            info!("Vision: filling email field");
+            self.vision_fill_and_submit(page, analysis, email).await?;
+        }
+        Ok(())
+    }
+
+    /// Handle passkey challenge — click "Try another way", then "Enter your password"
+    async fn handle_passkey_challenge(&self, page: &chromiumoxide::Page, config: &ScraperConfig) {
+        let _ = crate::browser_utils::click_element(
+            page,
+            "text:Try another way, text:Essayer autrement",
+        )
+        .await;
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        let pwd_selector = r#"input[type="password"], input[name="Passwd"]"#;
+        if !crate::browser_utils::element_exists(page, pwd_selector).await {
+            let _ = crate::browser_utils::click_element(
+                page,
+                "text:Enter your password, text:Saisir votre mot de passe",
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        }
+    }
+
+    /// Dismiss a cookie consent dialog using JS fallback and LLM coordinates
+    async fn dismiss_cookie(
+        &self,
+        page: &chromiumoxide::Page,
+        analysis: &PageAnalysis,
+        config: &ScraperConfig,
+    ) {
+        crate::browser_utils::dismiss_cookie_dialog(page).await;
+        if let Some(action) = analysis.find_click_action() {
+            let _ = crate::browser_utils::cdp_click_at(page, action.x, action.y).await;
+        }
+        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+    }
+
+    /// Fill a field and click a button based on page analysis.
+    /// Uses common CSS selectors first (reliable), LLM coordinates as fallback.
     async fn vision_fill_and_submit(
         &self,
         page: &chromiumoxide::Page,
         analysis: &PageAnalysis,
         text: &str,
     ) -> ScraperResult<()> {
-        if let Some(field) = analysis.find_fill_action() {
+        // Try common selectors first, fall back to LLM coordinates
+        let email_selectors = r#"input[type="email"], input[name="email"], #email"#;
+        let password_selectors =
+            r#"input[type="password"], input[name="password"], input[name="Passwd"]"#;
+        let submit_selectors = r#"#identifierNext button, #identifierNext, #passwordNext button, #passwordNext, button[type="submit"], text:Next, text:Log In, text:Sign In"#;
+
+        // Determine if this is a password or email field
+        let filled = if crate::browser_utils::element_exists(page, password_selectors).await {
+            crate::browser_utils::fill_input_field(page, password_selectors, text)
+                .await
+                .is_ok()
+        } else if crate::browser_utils::element_exists(page, email_selectors).await {
+            crate::browser_utils::fill_input_field(page, email_selectors, text)
+                .await
+                .is_ok()
+        } else if let Some(field) = analysis.find_fill_action() {
             crate::browser_utils::cdp_click_at(page, field.x, field.y).await?;
-            let _ = page.execute(InsertTextParams::new(text)).await;
+            page.execute(InsertTextParams::new(text)).await.is_ok()
+        } else {
+            false
+        };
+
+        if !filled {
+            warn!("Vision: could not fill input field");
         }
+
         tokio::time::sleep(Duration::from_millis(self.config.form_interaction_delay_ms)).await;
-        if let Some(button) = analysis.find_click_action() {
-            crate::browser_utils::cdp_click_at(page, button.x, button.y).await?;
+
+        // Click submit — try selectors first, then LLM coordinates
+        let clicked = crate::browser_utils::click_element(page, submit_selectors)
+            .await
+            .is_ok();
+        if !clicked {
+            if let Some(button) = analysis.find_click_action() {
+                let _ = crate::browser_utils::cdp_click_at(page, button.x, button.y).await;
+            }
         }
+
         tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
         Ok(())
     }
@@ -275,7 +377,7 @@ impl ActivityScraper for VisionScraper {
             "Starting vision-based credential login"
         );
 
-        let browser = launch_vision_browser(config, false).await?;
+        let browser = crate::browser_utils::launch_browser(config, false).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
@@ -287,6 +389,7 @@ impl ActivityScraper for VisionScraper {
 
         // Vision-driven login loop: analyze page, take action, repeat
         let deadline = tokio::time::Instant::now() + Duration::from_secs(config.login_timeout_secs);
+        let mut cookie_dismiss_attempts = 0u32;
 
         loop {
             if tokio::time::Instant::now() > deadline {
@@ -300,14 +403,22 @@ impl ActivityScraper for VisionScraper {
 
             match analysis.page_type.as_str() {
                 "cookie_consent" => {
-                    info!("Vision: dismissing cookie consent");
-                    if let Some(action) = analysis.find_click_action() {
-                        crate::browser_utils::cdp_click_at(&page, action.x, action.y).await?;
-                        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+                    cookie_dismiss_attempts += 1;
+                    info!(
+                        attempt = cookie_dismiss_attempts,
+                        "Vision: dismissing cookie consent"
+                    );
+                    self.dismiss_cookie(&page, &analysis, config).await;
+                    if cookie_dismiss_attempts > 3 {
+                        warn!("Cookie dismiss stuck, skipping");
                     }
                 }
-                "provider_login" | "oauth_email" => {
-                    info!("Vision: filling email field");
+                "provider_login" => {
+                    self.handle_provider_login(&page, &analysis, config, method, email)
+                        .await?;
+                }
+                "oauth_email" => {
+                    info!("Vision: filling OAuth email field");
                     self.vision_fill_and_submit(&page, &analysis, email).await?;
                 }
                 "oauth_password" => {
@@ -317,10 +428,7 @@ impl ActivityScraper for VisionScraper {
                 }
                 "passkey_challenge" => {
                     info!("Vision: bypassing passkey challenge");
-                    if let Some(action) = analysis.find_action_by_label("another way") {
-                        crate::browser_utils::cdp_click_at(&page, action.x, action.y).await?;
-                        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-                    }
+                    self.handle_passkey_challenge(&page, config).await;
                 }
                 "two_factor_selection" => {
                     info!("Vision: 2FA selection page detected");
@@ -801,48 +909,6 @@ fn generate_session_id() -> String {
 }
 
 /// Launch a browser for vision scraping
-async fn launch_vision_browser(config: &ScraperConfig, headless: bool) -> ScraperResult<Browser> {
-    let mut builder = BrowserConfig::builder();
-
-    if headless {
-        builder = builder.arg("--headless=new");
-    } else {
-        builder = builder
-            .with_head()
-            .arg("--disable-features=WebAuthentication");
-    }
-
-    builder = builder
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--disable-dev-shm-usage")
-        .arg("--disable-blink-features=AutomationControlled")
-        .window_size(1920, 1080);
-
-    if let Some(ref path) = config.chrome_path {
-        builder = builder.chrome_executable(path);
-    }
-
-    let browser_config = builder.build().map_err(|e| ScraperError::Browser {
-        reason: format!("Failed to configure browser: {e}"),
-    })?;
-
-    let (browser, mut handler) =
-        Browser::launch(browser_config)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to launch browser: {e}"),
-            })?;
-
-    tokio::spawn(async move {
-        while let Some(event) = handler.next().await {
-            debug!(?event, "Vision browser event");
-        }
-    });
-
-    Ok(browser)
-}
-
 /// Default page analysis prompt when no provider-specific one is configured
 const DEFAULT_PAGE_ANALYSIS_PROMPT: &str = r#"Analyze this web page screenshot. Return a JSON object with:
 - "page_type": one of "provider_login", "oauth_email", "oauth_password", "cookie_consent", "passkey_challenge", "two_factor_selection", "otp_entry", "phone_approval", "success", "error", "unknown"

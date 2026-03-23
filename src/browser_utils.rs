@@ -379,14 +379,26 @@ pub async fn click_element(page: &chromiumoxide::Page, selector: &str) -> Scrape
 pub async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
     let dismiss_js = r#"
         (function() {
+            // Cookiebot
             var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
                 || document.querySelector('[data-cookiefirst-action="accept"]')
                 || document.querySelector('button[id*="accept"], button[class*="accept"]');
             if (btn) { btn.click(); return 'dismissed'; }
+            // Text-based fallback: find any button with Accept All / Tout accepter
+            var allButtons = document.querySelectorAll('button, a, [role=button]');
+            for (var i = 0; i < allButtons.length; i++) {
+                var text = allButtons[i].textContent.trim();
+                if (text === 'Accept All' || text === 'Tout accepter' || text === 'Accept all'
+                    || text === 'Accepter tout' || text === 'Accept All Cookies') {
+                    allButtons[i].click();
+                    return 'dismissed_text';
+                }
+            }
+            // Iframe fallback
             var iframes = document.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
+            for (var j = 0; j < iframes.length; j++) {
                 try {
-                    var doc = iframes[i].contentDocument;
+                    var doc = iframes[j].contentDocument;
                     if (doc) {
                         var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
                             || doc.querySelector('button[id*="accept"]');
