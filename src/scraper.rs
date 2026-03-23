@@ -21,7 +21,7 @@ use crate::browser_utils::{
 };
 #[cfg(feature = "vision")]
 use crate::config::LoginMode;
-use crate::config::ScraperConfig;
+use crate::config::{FakeMode, ScraperConfig};
 use crate::error::{LoginResult, ScraperError, ScraperResult};
 use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, SportType};
 use crate::provider::ProviderConfig;
@@ -136,6 +136,65 @@ const APPLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
     password: r#"#password_text_field, input[type="password"]"#,
     password_next: r#"#sign-in, button[type="submit"]"#,
 };
+
+// ============================================================================
+// Fake mode — return predetermined results for testing
+// ============================================================================
+
+fn run_fake_credential_login(mode: &FakeMode) -> ScraperResult<LoginResult> {
+    info!(mode = ?mode, "Fake mode: returning predetermined result");
+    match mode {
+        FakeMode::Success => Ok(LoginResult::Success(fake_session())),
+        FakeMode::Otp => Ok(LoginResult::OtpRequired),
+        FakeMode::TwoFactor | FakeMode::NumberMatch => Ok(LoginResult::TwoFactorChoice(vec![
+            crate::error::TwoFactorOption {
+                id: "app".to_owned(),
+                label: "Tap Yes on your phone or tablet".to_owned(),
+            },
+            crate::error::TwoFactorOption {
+                id: "otp".to_owned(),
+                label: "Get a verification code from Google Authenticator".to_owned(),
+            },
+        ])),
+        FakeMode::Failed => Ok(LoginResult::Failed("Fake login failed".to_owned())),
+        FakeMode::Off => unreachable!(),
+    }
+}
+
+fn run_fake_select_two_factor(mode: &FakeMode, option_id: &str) -> LoginResult {
+    info!(mode = ?mode, option_id, "Fake mode: select_two_factor");
+    match (mode, option_id) {
+        (FakeMode::NumberMatch, "app") => LoginResult::NumberMatch("78".to_owned()),
+        (FakeMode::NumberMatch, "poll") | (_, "app") => LoginResult::Success(fake_session()),
+        _ => LoginResult::OtpRequired,
+    }
+}
+
+fn run_fake_submit_otp(code: &str) -> LoginResult {
+    info!(code, "Fake mode: submit_otp");
+    if code == "000000" {
+        LoginResult::Failed("Invalid code".to_owned())
+    } else {
+        LoginResult::Success(fake_session())
+    }
+}
+
+fn fake_session() -> AuthSession {
+    use crate::browser_utils::generate_session_id;
+    AuthSession {
+        session_id: generate_session_id(),
+        cookies: vec![crate::models::CookieData {
+            name: "fake_session".to_owned(),
+            value: "fake_value".to_owned(),
+            domain: "localhost".to_owned(),
+            path: "/".to_owned(),
+            secure: false,
+            http_only: false,
+        }],
+        created_at: Utc::now(),
+        expires_at: None,
+    }
+}
 
 /// Chrome-based sport activity scraper driven by a TOML provider configuration.
 ///
@@ -456,6 +515,11 @@ impl ActivityScraper for ChromeScraper {
             "Starting credential login"
         );
 
+        // Fake mode: return predetermined results without launching Chrome
+        if config.fake_mode != crate::config::FakeMode::Off {
+            return run_fake_credential_login(&config.fake_mode);
+        }
+
         // Vision mode: delegate to the vision login loop
         #[cfg(feature = "vision")]
         if matches!(config.login_mode, LoginMode::Vision) {
@@ -518,6 +582,10 @@ impl ActivityScraper for ChromeScraper {
     }
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
+        if self.config.fake_mode != FakeMode::Off {
+            return Ok(run_fake_submit_otp(code));
+        }
+
         // Delegate to vision scraper if it's active
         #[cfg(feature = "vision")]
         if let Some(ref vision) = *self.vision_scraper.lock().await {
@@ -607,6 +675,13 @@ impl ActivityScraper for ChromeScraper {
     }
 
     async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
+        if self.config.fake_mode != FakeMode::Off {
+            return Ok(run_fake_select_two_factor(
+                &self.config.fake_mode,
+                option_id,
+            ));
+        }
+
         // Delegate to vision scraper if it's active
         #[cfg(feature = "vision")]
         if let Some(ref vision) = *self.vision_scraper.lock().await {

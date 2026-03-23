@@ -80,6 +80,39 @@ impl LoginMode {
     }
 }
 
+/// Fake login mode for testing — returns predetermined results without launching Chrome
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum FakeMode {
+    /// No fake mode — real login
+    #[default]
+    Off,
+    /// Immediate success
+    Success,
+    /// OTP code entry required
+    Otp,
+    /// 2FA method selection, then OTP
+    TwoFactor,
+    /// 2FA selection, then number matching challenge on "app"
+    NumberMatch,
+    /// Login rejected
+    Failed,
+}
+
+impl FakeMode {
+    /// Parse from env var value
+    #[must_use]
+    pub fn from_str_value(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "success" => Self::Success,
+            "otp" => Self::Otp,
+            "2fa" | "twofactor" | "two_factor" => Self::TwoFactor,
+            "number" | "number_match" | "numbermatch" => Self::NumberMatch,
+            "failed" | "fail" => Self::Failed,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// Scraper configuration
 #[derive(Debug, Clone)]
 pub struct ScraperConfig {
@@ -109,6 +142,8 @@ pub struct ScraperConfig {
     pub login_mode: LoginMode,
     /// Whether credential login uses headless Chrome (default: false — Google blocks headless)
     pub credential_login_headless: bool,
+    /// Fake login mode for testing (returns predetermined results, no Chrome)
+    pub fake_mode: FakeMode,
 }
 
 impl Default for ScraperConfig {
@@ -131,6 +166,9 @@ impl Default for ScraperConfig {
             credential_login_headless: env::var("DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            fake_mode: env::var("DRAVR_SCIOTTE_FAKE_MODE")
+                .map(|v| FakeMode::from_str_value(&v))
+                .unwrap_or_default(),
         }
     }
 }
