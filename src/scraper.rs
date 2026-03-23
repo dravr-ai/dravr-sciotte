@@ -219,6 +219,7 @@ impl ChromeScraper {
     ) -> ScraperResult<chromiumoxide::Page> {
         let browser = self.get_headless_browser().await?;
 
+        // Each call creates a new page (tab) with isolated cookies via CDP Network.setCookie.
         // Navigate to the provider's login page first so cookies are set on the right domain
         let page = browser
             .new_page(&self.provider.provider.login_url)
@@ -1652,7 +1653,7 @@ fn deduplicate_by_id(items: &mut Vec<serde_json::Value>) {
     });
 }
 
-/// Apply sport type and limit filters to an activity list
+/// Apply sport type, date range, and limit filters to an activity list
 fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParams) {
     if let Some(ref sport) = params.sport_type {
         let sport_lower = sport.to_lowercase();
@@ -1665,6 +1666,14 @@ fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParam
                     .as_ref()
                     .is_some_and(|d| d.to_lowercase().contains(&sport_lower))
         });
+    }
+
+    if let Some(before) = params.before {
+        activities.retain(|a| a.start_date < before);
+    }
+
+    if let Some(after) = params.after {
+        activities.retain(|a| a.start_date > after);
     }
 
     if let Some(limit) = params.limit {

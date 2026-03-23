@@ -28,6 +28,7 @@ impl CacheKey {
     fn new(session: &AuthSession, params: &ActivityParams) -> Self {
         let mut hasher = std::hash::DefaultHasher::new();
         params.limit.hash(&mut hasher);
+        params.enrich_details.hash(&mut hasher);
         if let Some(before) = params.before {
             before.timestamp().hash(&mut hasher);
         }

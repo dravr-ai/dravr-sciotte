@@ -255,7 +255,7 @@ async fn run_streaming_session(
             Some(msg) = ws_receiver.next() => {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        info!(text = %text, "Received client input");
+                        debug!("Received client input");
                         if let Err(e) = handle_client_input(&text, &page_arc).await {
                             warn!(error = %e, "Input dispatch failed");
                         }
@@ -309,17 +309,18 @@ async fn poll_for_login(
 
         let url = page.url().await.ok().flatten().unwrap_or_default();
 
+        let url_path = url.split('?').next().unwrap_or(&url);
         let on_failure = provider
             .provider
             .login_failure_patterns
             .iter()
-            .any(|p| url.contains(p));
+            .any(|p| url_path.contains(p.as_str()));
 
         let on_success = provider
             .provider
             .login_success_patterns
             .iter()
-            .any(|p| url.contains(p));
+            .any(|p| url_path.contains(p.as_str()));
 
         if !url.is_empty() && !on_failure && on_success {
             info!(url = %url, "Login detected via URL");

@@ -45,7 +45,7 @@ impl McpTool<crate::state::ServerState> for GetActivitiesTool {
 
         let Some(session) = state.session() else {
             return CallToolResult::error(
-                "Not authenticated. Use auth_status to check and get_auth_url to start login."
+                "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
         };
@@ -96,7 +96,7 @@ impl McpTool<crate::state::ServerState> for GetActivityTool {
 
         let Some(session) = state.session() else {
             return CallToolResult::error(
-                "Not authenticated. Use auth_status to check and get_auth_url to start login."
+                "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
         };
