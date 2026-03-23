@@ -409,6 +409,14 @@ pub async fn credential_login(
             }))
             .into_response()
         }
+        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+            info!(number = %number, "Number matching challenge");
+            Json(json!({
+                "status": "number_match",
+                "number": number,
+            }))
+            .into_response()
+        }
         Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "Credential login rejected");
             (
@@ -479,6 +487,14 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
+        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+            info!(number = %number, "Number matching challenge after OTP");
+            Json(json!({
+                "status": "number_match",
+                "number": number,
+            }))
+            .into_response()
+        }
         Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "OTP verification rejected");
             (
@@ -545,6 +561,14 @@ pub async fn select_two_factor(
             Json(json!({
                 "status": "two_factor_choice",
                 "options": options,
+            }))
+            .into_response()
+        }
+        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+            info!(number = %number, "Number matching challenge after 2FA selection");
+            Json(json!({
+                "status": "number_match",
+                "number": number,
             }))
             .into_response()
         }

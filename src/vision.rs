@@ -172,6 +172,42 @@ impl VisionScraper {
         Ok(())
     }
 
+    /// Handle 2FA pages — returns a `LoginResult` if a decision is needed, `None` to keep polling
+    fn handle_2fa_page(analysis: &PageAnalysis) -> Option<LoginResult> {
+        match analysis.page_type.as_str() {
+            "two_factor_selection" => {
+                info!("Vision: 2FA selection page detected");
+                let options: Vec<TwoFactorOption> = analysis
+                    .two_factor_options
+                    .iter()
+                    .map(|o| TwoFactorOption {
+                        id: o.id.clone(),
+                        label: o.label.clone(),
+                    })
+                    .collect();
+                if options.is_empty() {
+                    return None;
+                }
+                // Can't move browser+page here, so we clone what we need
+                // The caller will store them after we return
+                Some(LoginResult::TwoFactorChoice(options))
+            }
+            "otp_entry" => {
+                info!("Vision: OTP entry page detected");
+                Some(LoginResult::OtpRequired)
+            }
+            "number_match" | "phone_approval" => {
+                if let Some(ref number) = analysis.match_number {
+                    info!(number, "Vision: number matching challenge");
+                    return Some(LoginResult::NumberMatch(number.clone()));
+                }
+                info!("Vision: phone approval — waiting");
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Handle passkey challenge — click "Try another way", then "Enter your password"
     async fn handle_passkey_challenge(&self, page: &chromiumoxide::Page, config: &ScraperConfig) {
         let _ = crate::browser_utils::click_element(
@@ -430,28 +466,11 @@ impl ActivityScraper for VisionScraper {
                     info!("Vision: bypassing passkey challenge");
                     self.handle_passkey_challenge(&page, config).await;
                 }
-                "two_factor_selection" => {
-                    info!("Vision: 2FA selection page detected");
-                    let options: Vec<TwoFactorOption> = analysis
-                        .two_factor_options
-                        .into_iter()
-                        .map(|o| TwoFactorOption {
-                            id: o.id,
-                            label: o.label,
-                        })
-                        .collect();
-                    if !options.is_empty() {
+                "two_factor_selection" | "otp_entry" | "phone_approval" | "number_match" => {
+                    if let Some(result) = Self::handle_2fa_page(&analysis) {
                         *self.pending_login.lock().await = Some((browser, page));
-                        return Ok(LoginResult::TwoFactorChoice(options));
+                        return Ok(result);
                     }
-                }
-                "otp_entry" => {
-                    info!("Vision: OTP entry page detected");
-                    *self.pending_login.lock().await = Some((browser, page));
-                    return Ok(LoginResult::OtpRequired);
-                }
-                "phone_approval" => {
-                    info!("Vision: phone approval page — waiting");
                     tokio::time::sleep(Duration::from_secs(3)).await;
                 }
                 "success" => {
@@ -701,6 +720,9 @@ struct PageAnalysis {
     error_message: Option<String>,
     #[serde(default)]
     two_factor_options: Vec<TwoFactorOptionCoords>,
+    /// Number shown on screen for number matching challenge (e.g., "78")
+    #[serde(default)]
+    match_number: Option<String>,
 }
 
 /// An action the LLM identified on the page
@@ -911,10 +933,11 @@ fn generate_session_id() -> String {
 /// Launch a browser for vision scraping
 /// Default page analysis prompt when no provider-specific one is configured
 const DEFAULT_PAGE_ANALYSIS_PROMPT: &str = r#"Analyze this web page screenshot. Return a JSON object with:
-- "page_type": one of "provider_login", "oauth_email", "oauth_password", "cookie_consent", "passkey_challenge", "two_factor_selection", "otp_entry", "phone_approval", "success", "error", "unknown"
+- "page_type": one of "provider_login", "oauth_email", "oauth_password", "cookie_consent", "passkey_challenge", "two_factor_selection", "otp_entry", "phone_approval", "number_match", "success", "error", "unknown"
 - "actions": array of {"type": "click"|"fill", "label": "description", "x": number, "y": number}
 - "error_message": string or null
 - "two_factor_options": array of {"id": "otp"|"app"|"sms", "label": "description", "x": number, "y": number}
+- "match_number": if page shows a number matching challenge (e.g. "Tap 78 on your phone"), extract the number as a string (e.g. "78"), otherwise null
 Return valid JSON only."#;
 
 #[cfg(test)]

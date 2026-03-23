@@ -265,7 +265,10 @@ impl ChromeScraper {
         // Keep the vision scraper alive for OTP/2FA follow-up calls
         if matches!(
             result,
-            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_) | LoginResult::Failed(_)
+            LoginResult::OtpRequired
+                | LoginResult::TwoFactorChoice(_)
+                | LoginResult::NumberMatch(_)
+                | LoginResult::Failed(_)
         ) {
             *self.vision_scraper.lock().await = Some(vision);
         }
@@ -504,7 +507,9 @@ impl ActivityScraper for ChromeScraper {
 
         if matches!(
             result,
-            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+            LoginResult::OtpRequired
+                | LoginResult::TwoFactorChoice(_)
+                | LoginResult::NumberMatch(_)
         ) {
             *self.pending_login.lock().await = Some((browser, page));
         }
@@ -590,7 +595,10 @@ impl ActivityScraper for ChromeScraper {
         // Keep the browser + page alive for retry on failure or further interaction
         if matches!(
             result,
-            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_) | LoginResult::Failed(_)
+            LoginResult::OtpRequired
+                | LoginResult::TwoFactorChoice(_)
+                | LoginResult::NumberMatch(_)
+                | LoginResult::Failed(_)
         ) {
             *self.pending_login.lock().await = Some((browser, page));
         }
@@ -646,7 +654,9 @@ impl ActivityScraper for ChromeScraper {
         // Keep the browser + page alive if more interaction is needed
         if matches!(
             result,
-            LoginResult::OtpRequired | LoginResult::TwoFactorChoice(_)
+            LoginResult::OtpRequired
+                | LoginResult::TwoFactorChoice(_)
+                | LoginResult::NumberMatch(_)
         ) {
             *self.pending_login.lock().await = Some((browser, page));
         }

@@ -22,6 +22,8 @@ Return a JSON object:
   "two_factor_options": [
     {"id": "otp", "label": "Google Authenticator", "x": 100, "y": 200},
     {"id": "app", "label": "Tap Yes on your phone", "x": 100, "y": 300}
+  ],
+  "match_number": "78 or null — if the page shows a number matching challenge (e.g. 'Tap 78 on your phone'), extract that number"
   ]
 }
 ```
@@ -37,7 +39,8 @@ Return a JSON object:
 | `passkey_challenge` | Passkey / security key prompt |
 | `two_factor_selection` | 2FA method chooser (Authenticator, SMS, phone tap) |
 | `otp_entry` | OTP / verification code input field |
-| `phone_approval` | "Check your phone" / "Tap Yes" waiting page |
+| `phone_approval` | "Check your phone" / "Tap Yes" waiting page (no number shown) |
+| `number_match` | Number matching challenge — shows a number the user must tap on their phone |
 | `success` | Dashboard or post-login page (login succeeded) |
 | `error` | Error message displayed (wrong password, account locked) |
 | `unknown` | Page doesn't match any known type |

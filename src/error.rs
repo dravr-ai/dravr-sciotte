@@ -81,6 +81,10 @@ pub enum LoginResult {
     OtpRequired,
     /// Provider shows multiple 2FA options — let the user choose
     TwoFactorChoice(Vec<TwoFactorOption>),
+    /// Provider shows a number matching challenge — user must tap the matching number
+    /// on their phone. Contains the number to display and the scraper continues polling
+    /// for success in the background.
+    NumberMatch(String),
     /// Login was rejected (wrong password, account locked, etc.)
     Failed(String),
 }
