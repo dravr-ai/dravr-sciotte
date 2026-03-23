@@ -6,6 +6,7 @@ All runtime behaviour is controlled through environment variables. No configurat
 
 - [Authentication](#authentication)
 - [Chrome / Browser](#chrome--browser)
+- [Login Behavior](#login-behavior)
 - [Login Timing](#login-timing)
 - [Page Interaction](#page-interaction)
 - [2FA Timing](#2fa-timing)
@@ -35,6 +36,18 @@ Controls which Chrome binary is used for browser automation.
 | Variable | Default | Description |
 |---|---|---|
 | `CHROME_PATH` | _(auto-detected)_ | Absolute path to the Chrome or Chromium binary. When unset, `chromiumoxide` searches the standard installation paths for the current platform. |
+
+---
+
+## Login Behavior
+
+Controls how the credential login flow operates.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DRAVR_SCIOTTE_LOGIN_MODE` | `selector` | Login automation strategy. `selector` uses CSS selectors and URL patterns (fast, no external calls). `vision` uses LLM screenshot analysis via embacle's `LlmProvider` (resilient to UI changes, costs per login). `hybrid` tries selectors first and falls back to vision on failure. Vision requires the `vision` Cargo feature. |
+| `DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS` | `false` | Run credential login in headless Chrome. Defaults to `false` because Google and some providers actively block headless browser fingerprints. Set to `true` when using `DRAVR_SCIOTTE_FAKE_LOGIN` in CI, where real provider detection is not a concern. |
+| `DRAVR_SCIOTTE_FAKE_LOGIN` | `false` | Replace all provider login URLs with embedded static HTML fixtures served on a local port. No external network calls are made. Intended for integration testing and CI environments without real credentials. See [Fake Login Testing](../README.md#fake-login-testing) for available test passwords. |
 
 ---
 
@@ -69,8 +82,8 @@ Controls timeouts for each step of multi-factor authentication flows.
 | Variable | Default | Description |
 |---|---|---|
 | `DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT` | `10` | Timeout in **seconds** waiting for the password field to appear after the email address has been submitted. |
-| `DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT` | `10` | Timeout in **seconds** waiting for a login result after the password has been submitted. |
-| `DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT` | `60` | Timeout in **seconds** waiting for the user to approve a push-notification or phone-tap 2FA prompt. This is intentionally longer to give the user time to act on their device. |
+| `DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT` | `30` | Timeout in **seconds** waiting for a login result after the password has been submitted. |
+| `DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT` | `60` | Timeout in **seconds** waiting for the user to approve a push-notification, phone-tap, or number-match 2FA prompt. This is intentionally longer to give the user time to act on their device. |
 
 ---
 
@@ -123,6 +136,12 @@ The following file covers a typical local development setup. Copy it to the proj
 # Uncomment and set if Chrome is not on the default search path.
 # export CHROME_PATH="/usr/bin/google-chrome-stable"
 
+# ── Login Behavior ────────────────────────────────────────────────────────────
+# Options: selector (default), vision, hybrid
+# export DRAVR_SCIOTTE_LOGIN_MODE="selector"
+# export DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS="false"
+# export DRAVR_SCIOTTE_FAKE_LOGIN="false"
+
 # ── Login Timing ─────────────────────────────────────────────────────────────
 export DRAVR_SCIOTTE_LOGIN_TIMEOUT=120
 export DRAVR_SCIOTTE_LOGIN_POLL_INTERVAL_MS=500
@@ -135,7 +154,7 @@ export DRAVR_SCIOTTE_FORM_DELAY_MS=300
 
 # ── 2FA Timing ───────────────────────────────────────────────────────────────
 export DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT=10
-export DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT=10
+export DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT=30
 export DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT=60
 
 # ── Cache ─────────────────────────────────────────────────────────────────────

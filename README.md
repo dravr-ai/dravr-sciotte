@@ -13,6 +13,8 @@ Sport activity scraper with headless Chrome, TOML-configurable providers, and in
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
 - [Credential Login](#credential-login)
+- [Vision Mode](#vision-mode)
+- [Fake Login Testing](#fake-login-testing)
 - [REST API Server](#rest-api-server-dravr-sciotte-server)
 - [MCP Server](#mcp-server-dravr-sciotte-mcp)
 - [Library Usage](#library-usage-rust-trait)
@@ -104,18 +106,29 @@ Three login flows are supported, selected via the `method` parameter:
 
 ### 2FA Handling
 
-The `credential_login` call returns one of four outcomes:
+The `credential_login` call returns one of five outcomes:
 
 | Status | Meaning | Next Step |
 |--------|---------|-----------|
 | `authenticated` | Login succeeded, session is ready | Use the returned `session_id` |
 | `otp_required` | Provider requires a one-time password or 2FA code | Call `POST /auth/submit-otp` |
 | `two_factor_choice` | Provider shows multiple 2FA options | Call `POST /auth/select-2fa` with an `option_id` |
+| `number_match` | Google shows a number to tap on your phone | Display the number, then call `POST /auth/select-2fa` with `option_id: "poll"` |
 | `failed` | Wrong credentials or account locked | Check the `reason` field |
 
 The browser session is kept alive between `credential_login` and `submit_otp` / `select_two_factor` calls, so the 2FA page remains open until you submit the code or select a method.
 
-**Full 2FA flow example:**
+### NumberMatch — Google Number Matching Challenge
+
+Google sometimes shows a number matching challenge during 2FA: a number is displayed on screen and the user must tap the matching number on their phone. When this page is detected, the scraper returns `LoginResult::NumberMatch(number)` with the number to display to the user.
+
+After showing the number to the user, call `select_two_factor("poll")`. This polls the browser until Google's page auto-redirects to the dashboard (the user tapped the correct number on their phone), then returns `Success`.
+
+```
+TwoFactorChoice → select_two_factor("app") → NumberMatch("78") → select_two_factor("poll") → Success
+```
+
+**Full 2FA flow example with NumberMatch:**
 
 ```bash
 # Step 1 — attempt login
@@ -125,6 +138,31 @@ curl -X POST http://localhost:3000/auth/login-with-credentials \
 
 # Response if 2FA method selection is needed:
 # {"status":"two_factor_choice","options":[{"id":"otp","label":"Google Authenticator"},{"id":"app","label":"Tap Yes on your phone"}]}
+
+# Step 2 — select the app (phone) method
+curl -X POST http://localhost:3000/auth/select-2fa \
+  -H "Content-Type: application/json" \
+  -d '{"option_id": "app"}'
+
+# Response when a number match challenge is shown:
+# {"status":"number_match","number":"78"}
+
+# Step 3 — tell your user to tap "78" on their phone, then poll for approval
+curl -X POST http://localhost:3000/auth/select-2fa \
+  -H "Content-Type: application/json" \
+  -d '{"option_id": "poll"}'
+
+# Response on success:
+# {"status":"authenticated","session_id":"...","cookie_count":12}
+```
+
+**Standard 2FA flow (authenticator app code):**
+
+```bash
+# Step 1 — attempt login
+curl -X POST http://localhost:3000/auth/login-with-credentials \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com", "password": "s3cr3t", "method": "google"}'
 
 # Step 2a — select a 2FA method (triggers the provider to send a code or prompt app approval)
 curl -X POST http://localhost:3000/auth/select-2fa \
@@ -143,7 +181,7 @@ curl -X POST http://localhost:3000/auth/submit-otp \
 # {"status":"authenticated","session_id":"...","cookie_count":12}
 ```
 
-For the `app` method (phone tap), `select_two_factor` polls for up to `DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT` seconds (default 60 s) waiting for the user to approve on their phone, then returns `authenticated` directly without a code.
+For the `app` method (phone tap without number matching), `select_two_factor` polls for up to `DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT` seconds (default 60 s) waiting for the user to approve on their phone, then returns `authenticated` directly without a code.
 
 ### WebSocket Browser Streaming
 
@@ -176,6 +214,97 @@ The client sends JSON text frames to dispatch input:
 {"type":"scroll","x":640,"y":512,"deltaX":0,"deltaY":300}
 ```
 
+## Vision Mode
+
+By default, credential login uses CSS selectors and URL patterns to navigate login forms. Vision mode is an alternative that uses LLM screenshot analysis (via embacle's `LlmProvider`) to understand the page visually instead of relying on specific DOM elements.
+
+Vision mode is designed for login flows only. Scraping (list pages and detail pages) always uses CSS selectors.
+
+### Why Vision Mode
+
+Google's sign-in flow changes frequently. When Google updates their UI, CSS selectors break and need updating. Vision mode handles these changes automatically by analyzing screenshots rather than depending on element attributes.
+
+### Login Mode Options
+
+Set `DRAVR_SCIOTTE_LOGIN_MODE` to select the strategy:
+
+| Value | Description |
+|-------|-------------|
+| `selector` | CSS selectors and URL patterns (default — fast, free) |
+| `vision` | LLM screenshot analysis via embacle (resilient, costs per login) |
+| `hybrid` | Try selectors first, fall back to vision on failure |
+
+### Enabling Vision Mode
+
+Vision mode requires the `vision` Cargo feature and an embacle `LlmProvider` (Copilot Headless):
+
+```toml
+[dependencies]
+dravr-sciotte = { version = "0.4", features = ["vision"] }
+```
+
+```rust
+use std::sync::Arc;
+use dravr_sciotte::{ChromeScraper, ActivityScraper};
+use dravr_sciotte::config::ScraperConfig;
+use dravr_sciotte::provider::ProviderConfig;
+
+// Build the scraper with an LLM provider attached
+let config = ScraperConfig {
+    login_mode: dravr_sciotte::config::LoginMode::Vision,
+    ..ScraperConfig::default()
+};
+
+let llm: Arc<dyn embacle::types::LlmProvider> = /* your embacle provider */;
+let scraper = ChromeScraper::new(config, ProviderConfig::strava_default())
+    .with_llm(llm);
+
+// credential_login uses vision when login_mode == Vision or Hybrid
+let result = scraper.credential_login("you@example.com", "s3cr3t", "google").await?;
+```
+
+Or set the environment variable without changing code:
+
+```bash
+DRAVR_SCIOTTE_LOGIN_MODE=vision dravr-sciotte-server serve
+```
+
+The `hybrid` mode is the safest option for production: it runs the selector-based flow first and only invokes the LLM if a step fails, keeping costs low while maintaining resilience.
+
+## Fake Login Testing
+
+When `DRAVR_SCIOTTE_FAKE_LOGIN=true`, the scraper replaces all provider login URLs with embedded static HTML fixtures served on a local port. No real network calls are made and no real Chrome session is established against an external service.
+
+This is useful for integration testing and CI environments where real credentials are not available.
+
+```bash
+DRAVR_SCIOTTE_FAKE_LOGIN=true cargo test
+```
+
+### Test Passwords
+
+The fake fixtures recognize these passwords for the Strava and Garmin providers:
+
+| Password | Behavior |
+|----------|----------|
+| `correct-password` | Login succeeds directly (no 2FA) |
+| `2fa-password` | Google OAuth path — returns `TwoFactorChoice`, then `NumberMatch("78")` on app selection |
+| `no-mfa-password` | Garmin path — login succeeds without triggering MFA |
+| Any other value | Login fails (wrong password error or stays on login page) |
+
+### OTP Code
+
+For the Garmin MFA fixture (`OtpRequired` flow), submit `123456` to succeed. Any other code returns an error. The OTP code `000000` is not special — it fails like any other wrong code.
+
+### NumberMatch Flow (Fake)
+
+```bash
+# 1. credential_login with "2fa-password" via google method → TwoFactorChoice
+# 2. select_two_factor("app") → NumberMatch("78")
+# 3. The fake page auto-redirects to dashboard after 3 s
+# 4. select_two_factor("poll") → Success
+```
+
 ## REST API Server (`dravr-sciotte-server`)
 
 A unified HTTP server with built-in MCP support that serves scraped activity data. Supports `--transport stdio` for MCP-only mode (editor integration).
@@ -203,7 +332,7 @@ dravr-sciotte-server --transport stdio
 | `DELETE` | `/auth/sessions/{id}` | Remove a specific session |
 | `POST` | `/auth/login-with-credentials` | Programmatic login with email/password |
 | `POST` | `/auth/submit-otp` | Submit OTP/2FA code after `otp_required` |
-| `POST` | `/auth/select-2fa` | Select a 2FA method after `two_factor_choice` |
+| `POST` | `/auth/select-2fa` | Select a 2FA method after `two_factor_choice`, or pass `"poll"` after `number_match` |
 | `GET` | `/browser/login` | WebSocket — stream Chrome frames for interactive login |
 | `GET` | `/api/activities?limit=20` | List scraped activities |
 | `GET` | `/api/activities/{id}` | Single activity detail |
@@ -343,6 +472,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = cached.select_two_factor(&options[0].id).await?;
             match result {
                 LoginResult::Success(session) => session,
+                LoginResult::NumberMatch(number) => {
+                    // Google number matching challenge — show number to user
+                    println!("Tap {number} on your phone");
+                    // Poll until user taps the correct number
+                    match cached.select_two_factor("poll").await? {
+                        LoginResult::Success(session) => session,
+                        other => return Err(format!("Unexpected poll result: {other:?}").into()),
+                    }
+                }
                 LoginResult::OtpRequired => {
                     // Method requires a code (e.g., Google Authenticator)
                     let code = "123456"; // read from user input
@@ -361,6 +499,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match cached.submit_otp(code).await? {
                 LoginResult::Success(session) => session,
                 other => return Err(format!("Unexpected OTP result: {other:?}").into()),
+            }
+        }
+
+        LoginResult::NumberMatch(number) => {
+            // Unlikely at the top level but handled for completeness
+            println!("Tap {number} on your phone");
+            match cached.select_two_factor("poll").await? {
+                LoginResult::Success(session) => session,
+                other => return Err(format!("Unexpected poll result: {other:?}").into()),
             }
         }
 
@@ -458,6 +605,14 @@ All variables are optional. Unset variables use the defaults shown below.
 | `DRAVR_SCIOTTE_API_KEY` | _(unset)_ | Bearer token required on all REST endpoints. When unset, no authentication is enforced. |
 | `CHROME_PATH` | _(auto-detected)_ | Path to a Chrome or Chromium binary. |
 
+### Login Behavior
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DRAVR_SCIOTTE_LOGIN_MODE` | `selector` | Login automation strategy: `selector` (CSS selectors), `vision` (LLM screenshot analysis via embacle), or `hybrid` (selectors with vision fallback). Vision requires the `vision` feature. |
+| `DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS` | `false` | Run credential login in headless Chrome. Defaults to false because Google and some providers block headless browsers. Set to `true` for CI environments using fake login. |
+| `DRAVR_SCIOTTE_FAKE_LOGIN` | `false` | Replace provider login URLs with embedded static HTML fixtures. Useful for testing without real credentials. |
+
 ### Timing (credential login and scraping)
 
 | Variable | Default | Description |
@@ -469,7 +624,7 @@ All variables are optional. Unset variables use the defaults shown below.
 | `DRAVR_SCIOTTE_PAGE_LOAD_WAIT` | `3` | Wait time after navigation for JS to render, in seconds. |
 | `DRAVR_SCIOTTE_FORM_DELAY_MS` | `300` | Delay between form field interactions in milliseconds. |
 | `DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT` | `10` | Timeout waiting for the password field to appear after email submit, in seconds. |
-| `DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT` | `10` | Timeout waiting for login result after password submit, in seconds. |
+| `DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT` | `30` | Timeout waiting for login result after password submit, in seconds. |
 | `DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT` | `60` | Timeout waiting for phone tap / app approval during 2FA, in seconds. |
 
 ### Cache and Session
@@ -517,9 +672,12 @@ Your Application
             │   ├── browser_login()        → visible Chrome, user logs in, cookies captured
             │   ├── credential_login()     → headless Chrome, fills form, handles OAuth
             │   ├── submit_otp()           → submits OTP/2FA code on pending login page
-            │   ├── select_two_factor()    → selects 2FA method on pending login page
+            │   ├── select_two_factor()    → selects 2FA method, or polls after NumberMatch
             │   ├── get_activities()       → headless Chrome, list page + pagination
             │   └── get_activity()         → headless Chrome, detail page JS extraction
+            │
+            ├── Vision Scraper (optional, requires `vision` feature)
+            │   └── VisionScraper         → LLM screenshot analysis via embacle LlmProvider
             │
             ├── Cache Layer (moka TTL cache)
             │   └── CachedScraper         → wraps ActivityScraper with in-memory TTL cache
@@ -541,7 +699,7 @@ The core `ActivityScraper` trait:
 - **`browser_login()`** — open browser, capture session
 - **`credential_login()`** — programmatic login with email/password and OAuth support
 - **`submit_otp()`** — submit OTP/2FA code after `credential_login` returned `OtpRequired`
-- **`select_two_factor()`** — select a 2FA method after `credential_login` returned `TwoFactorChoice`
+- **`select_two_factor()`** — select a 2FA method, or pass `"poll"` to wait after `NumberMatch`
 - **`get_activities()`** — scrape activity list with pagination
 - **`get_activity()`** — scrape single activity detail
 - **`is_authenticated()`** — check session validity

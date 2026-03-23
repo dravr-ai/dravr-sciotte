@@ -83,6 +83,21 @@ Follows the same pattern as Google OAuth but targets Apple's sign-in page elemen
 
 ---
 
+## Vision Mode Login
+
+When `DRAVR_SCIOTTE_LOGIN_MODE` is set to `vision` or `hybrid`, credential login uses LLM
+screenshot analysis instead of (or in addition to) CSS selectors. At each step the scraper
+takes a PNG screenshot, sends it to the configured embacle `LlmProvider` (Copilot Headless),
+and uses the response to determine what action to take next.
+
+Vision mode handles the same login methods (`email`, `google`, `apple`) and produces the same
+`LoginResult` variants as selector mode. The 2FA follow-up calls (`submit_otp`,
+`select_two_factor`) work identically regardless of which mode performed the initial login.
+
+See [Vision Mode](../README.md#vision-mode) in the README for setup instructions.
+
+---
+
 ## Two-Factor Authentication
 
 ### When 2FA Is Triggered
@@ -123,12 +138,52 @@ Timeout behavior differs by option type:
 
 - `app` (phone tap) — waits up to `phone_tap_timeout_secs` (default 60 s) because the user must
   physically approve on their device.
-- All other options — wait up to `password_step_timeout_secs` (default 10 s).
+- All other options — wait up to `password_step_timeout_secs` (default 30 s).
 
 If the option `id` is not found on the page, the browser session is put back into the pending slot
 and `ScraperError::Auth` is returned so the caller can retry with a different `id`.
 
-Returns `OtpRequired`, `Success`, or `Failed`.
+Returns `OtpRequired`, `NumberMatch`, `Success`, or `Failed`.
+
+#### Polling after NumberMatch
+
+Passing `"poll"` as the `option_id` does not click any element. Instead, it waits for the current
+page to redirect away (up to `phone_tap_timeout_secs`) and returns the next result. Use this after
+receiving `NumberMatch` once you have displayed the number to the user and they are tapping their
+phone.
+
+### `NumberMatch` — Google Number Matching Challenge
+
+Google's `app` 2FA option sometimes shows a number matching challenge instead of a simple "Tap
+Yes" prompt. The user must tap the number shown on screen (e.g., "78") from a set of numbers
+displayed on their phone.
+
+When this page is detected, `select_two_factor("app")` returns `LoginResult::NumberMatch(number)`
+instead of polling to completion. The caller is responsible for displaying the number to the user.
+
+After showing the number, call `select_two_factor("poll")` to resume polling. The scraper waits
+up to `phone_tap_timeout_secs` for the page to redirect (which happens automatically when the user
+taps the correct number on their phone), then returns `Success`.
+
+Number extraction uses a JavaScript snippet that reads the large numeric text from the challenge
+page DOM. If the JS extraction fails, the vision fallback (if configured) analyzes a screenshot
+to find the number.
+
+**State machine for the `app` path:**
+
+```
+credential_login()
+  └── TwoFactorChoice([..., {id: "app", ...}])
+
+select_two_factor("app")
+  ├── Success          (phone approved without number matching)
+  └── NumberMatch("78") (number matching challenge shown)
+
+  [display "78" to user]
+
+select_two_factor("poll")
+  └── Success          (user tapped 78 on their phone)
+```
 
 ### `submit_otp(code)`
 
@@ -164,6 +219,10 @@ pub enum LoginResult {
     /// Call select_two_factor() with one of the returned option ids.
     TwoFactorChoice(Vec<TwoFactorOption>),
 
+    /// Provider shows a number matching challenge.
+    /// Display the number to the user, then call select_two_factor("poll").
+    NumberMatch(String),
+
     /// Login was rejected (wrong password, account locked, etc.).
     /// The inner String is the error text from login_error_selector.
     Failed(String),
@@ -176,6 +235,52 @@ pub struct TwoFactorOption {
     pub label: String,
 }
 ```
+
+---
+
+## Fake Login Testing
+
+Setting `DRAVR_SCIOTTE_FAKE_LOGIN=true` replaces all provider login URLs with embedded static HTML
+fixtures served on a local port. This allows integration tests to exercise the full login state
+machine without real credentials or external network access.
+
+The fake fixtures are compiled into the binary from `tests/fixtures/`.
+
+### Test Passwords
+
+| Password | Provider | Behavior |
+|---|---|---|
+| `correct-password` | Strava, Google | Login succeeds directly, no 2FA |
+| `2fa-password` | Google | Returns `TwoFactorChoice`; selecting `app` returns `NumberMatch("78")` |
+| `no-mfa-password` | Garmin | Login succeeds directly, no MFA page |
+| Any other value | All | Login fails (wrong password error or stays on login page) |
+
+### OTP Code (Garmin)
+
+For the Garmin MFA fixture, submit `123456` to succeed. Any other value shows an error and the
+browser session remains open.
+
+### NumberMatch Flow (Fake)
+
+The fake number page (`/google/challenge/number.html`) displays "78" and sets a 3-second timer
+that redirects the browser to the dashboard, simulating the user tapping the correct number on
+their phone.
+
+```
+credential_login("test@example.com", "2fa-password", "google")
+  → TwoFactorChoice
+
+select_two_factor("app")
+  → NumberMatch("78")
+
+// display "78" to the user
+
+select_two_factor("poll")
+  → Success  (after the 3 s fake timer fires)
+```
+
+When `DRAVR_SCIOTTE_FAKE_LOGIN=true`, also set `DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS=true` so
+Chrome runs in headless mode (the fake server serves plain HTML with no anti-headless measures).
 
 ---
 
@@ -222,6 +327,35 @@ Client                    Server (scraper)               Chrome             Goog
   |<-- 200 { status: "authenticated",                        |                 |
   |          session_id: "...",                              |                 |
   |          cookie_count: 12 } ----------------------------|                 |
+```
+
+### Google OAuth with Number Match 2FA
+
+```
+Client                    Server (scraper)               Chrome             Google
+  |                            |                            |                  |
+  |-- POST /auth/login-with-credentials ----------------->  |                  |
+  |   { method: "google" }     |                            |                  |
+  |                            |   ... (email + password steps, passkey bypass) |
+  |<-- 200 { status: "two_factor_choice",                   |                  |
+  |          options: [{id:"app",...}] } ------------------|                  |
+  |                            |                            |                  |
+  |-- POST /auth/select-2fa -->|                            |                  |
+  |   { option_id: "app" }     |                            |                  |
+  |                            |-- CDP-click app option --->|                  |
+  |                            |                            |-- number page --->|
+  |                            |   (extract number from DOM)|                  |
+  |<-- 200 { status: "number_match", number: "78" } -------|                  |
+  |                            |                            |                  |
+  |   [display "78" to user]   |                            |                  |
+  |                            |                            |                  |
+  |-- POST /auth/select-2fa -->|                            |                  |
+  |   { option_id: "poll" }    |                            |                  |
+  |                            |   (poll until redirect)    |                  |
+  |                            |                            |<-- user taps 78 --|
+  |                            |                            |-- dashboard ---->|
+  |                            |-- capture cookies -------->|                  |
+  |<-- 200 { status: "authenticated", ... } ---------------|                  |
 ```
 
 ### Email/Password (No 2FA)
@@ -304,6 +438,14 @@ Start a programmatic login.
 }
 ```
 
+`200 OK` — number matching challenge:
+```json
+{
+  "status": "number_match",
+  "number": "78"
+}
+```
+
 `401 Unauthorized` — wrong credentials:
 ```json
 {
@@ -325,8 +467,8 @@ curl -s -X POST http://localhost:3000/auth/login-with-credentials \
 
 ### `POST /auth/select-2fa`
 
-Choose a 2FA method after receiving `two_factor_choice`. The `option_id` must be one of the `id`
-values returned in the previous response.
+Choose a 2FA method after receiving `two_factor_choice`, or poll for completion after receiving
+`number_match`.
 
 **Request body:**
 
@@ -335,6 +477,11 @@ values returned in the previous response.
   "option_id": "otp"
 }
 ```
+
+| Value | When to use |
+|---|---|
+| `"otp"`, `"app"`, `"sms"`, `"backup"` | Select a method from the `two_factor_choice` options list |
+| `"poll"` | Resume polling after `number_match` — waits for the user to tap on their phone |
 
 **Responses:**
 
@@ -345,7 +492,15 @@ values returned in the previous response.
 }
 ```
 
-`200 OK` — method completed without a code (e.g., phone tap approved):
+`200 OK` — number match challenge shown:
+```json
+{
+  "status": "number_match",
+  "number": "78"
+}
+```
+
+`200 OK` — method completed without a code (phone tap approved or poll succeeded):
 ```json
 {
   "status": "authenticated",
@@ -417,8 +572,8 @@ curl -s -X POST http://localhost:3000/auth/submit-otp \
 
 ## Library Usage (Rust)
 
-The following example demonstrates the complete credential login flow with 2FA using the
-`ActivityScraper` trait directly.
+The following example demonstrates the complete credential login flow with 2FA — including the
+`NumberMatch` variant — using the `ActivityScraper` trait directly.
 
 ```rust
 use dravr_sciotte::error::LoginResult;
@@ -450,7 +605,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match result {
                 LoginResult::OtpRequired => {
-                    // Prompt the user for the code from their authenticator app
                     let code = read_otp_from_user();
                     match scraper.submit_otp(&code).await? {
                         LoginResult::Success(session) => session,
@@ -460,6 +614,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         other => {
                             eprintln!("Unexpected result after OTP: {other:?}");
+                            return Ok(());
+                        }
+                    }
+                }
+                LoginResult::NumberMatch(number) => {
+                    // Google number matching challenge
+                    println!("Tap {number} on your phone");
+                    match scraper.select_two_factor("poll").await? {
+                        LoginResult::Success(session) => session,
+                        other => {
+                            eprintln!("Unexpected result after poll: {other:?}");
                             return Ok(());
                         }
                     }
@@ -477,7 +642,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         LoginResult::OtpRequired => {
-            // Provider went straight to OTP (no method selection)
             let code = read_otp_from_user();
             match scraper.submit_otp(&code).await? {
                 LoginResult::Success(session) => session,
@@ -487,6 +651,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 other => {
                     eprintln!("Unexpected result: {other:?}");
+                    return Ok(());
+                }
+            }
+        }
+
+        LoginResult::NumberMatch(number) => {
+            println!("Tap {number} on your phone");
+            match scraper.select_two_factor("poll").await? {
+                LoginResult::Success(session) => session,
+                other => {
+                    eprintln!("Unexpected result after poll: {other:?}");
                     return Ok(());
                 }
             }
