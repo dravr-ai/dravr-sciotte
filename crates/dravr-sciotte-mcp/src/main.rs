@@ -7,61 +7,54 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use dravr_tronc::mcp::server::McpServer;
+use dravr_tronc::server::cli::McpArgs;
 use tokio::sync::RwLock;
-use tracing::info;
 
 use dravr_sciotte::cache::CachedScraper;
 use dravr_sciotte::config::CacheConfig;
 use dravr_sciotte::scraper::ChromeScraper;
-use dravr_sciotte_mcp::transport::http::HttpTransport;
-use dravr_sciotte_mcp::transport::stdio::StdioTransport;
-use dravr_sciotte_mcp::transport::McpTransport;
-use dravr_sciotte_mcp::{build_tool_registry, McpServer, ServerState};
+use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 
+/// dravr-sciotte-mcp — MCP server exposing Strava scraping via Model Context Protocol
 #[derive(Parser)]
-#[command(
-    name = "dravr-sciotte-mcp",
-    version,
-    about = "Strava scraper MCP server"
-)]
+#[command(name = "dravr-sciotte-mcp", version, about)]
 struct Cli {
-    /// Transport mode
-    #[arg(long, default_value = "stdio")]
-    transport: String,
-
-    /// HTTP host (when transport=http)
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-
-    /// HTTP port (when transport=http)
-    #[arg(long, default_value = "3000")]
-    port: u16,
+    #[command(flatten)]
+    server: McpArgs,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Only log to stderr so we don't pollute the stdio MCP channel
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dravr_sciotte=info,dravr_sciotte_mcp=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    dravr_tronc::server::tracing_init::init(&cli.server.transport);
 
     let scraper = ChromeScraper::default_config();
     let cached = CachedScraper::new(scraper, &CacheConfig::default());
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
-    let tools = build_tool_registry();
-    let server = Arc::new(McpServer::new(state, tools));
+    let tool_registry = build_tool_registry();
+    let server = Arc::new(McpServer::new(
+        "dravr-sciotte-mcp",
+        env!("CARGO_PKG_VERSION"),
+        tool_registry,
+        state,
+    ));
 
-    info!(transport = %cli.transport, "Starting MCP server");
+    tracing::info!(
+        transport = %cli.server.transport,
+        "Starting dravr-sciotte MCP server"
+    );
 
-    match cli.transport.as_str() {
-        "stdio" => StdioTransport.serve(server).await,
-        "http" => HttpTransport::new(cli.host, cli.port).serve(server).await,
-        other => Err(format!("Unknown transport: {other}").into()),
+    match cli.server.transport.as_str() {
+        "stdio" => dravr_tronc::mcp::transport::stdio::run(server).await?,
+        "http" => {
+            dravr_tronc::mcp::transport::http::serve(server, &cli.server.host, cli.server.port)
+                .await?;
+        }
+        other => {
+            return Err(format!("Unknown transport: {other}. Valid: stdio, http").into());
+        }
     }
+
+    Ok(())
 }

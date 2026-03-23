@@ -5,11 +5,11 @@
 // Copyright (c) 2026 dravr.ai
 
 use async_trait::async_trait;
+use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
+use dravr_tronc::McpTool;
 use serde_json::{json, Value};
 
-use crate::protocol::{CallToolResult, ToolDefinition};
 use crate::state::SharedState;
-use crate::tools::McpTool;
 
 use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::ActivityScraper;
@@ -18,7 +18,7 @@ use dravr_sciotte::ActivityScraper;
 pub struct GetActivitiesTool;
 
 #[async_trait]
-impl McpTool for GetActivitiesTool {
+impl McpTool<crate::state::ServerState> for GetActivitiesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_activities".to_owned(),
@@ -73,7 +73,7 @@ impl McpTool for GetActivitiesTool {
 pub struct GetActivityTool;
 
 #[async_trait]
-impl McpTool for GetActivityTool {
+impl McpTool<crate::state::ServerState> for GetActivityTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_activity".to_owned(),

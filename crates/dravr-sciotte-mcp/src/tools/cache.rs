@@ -5,17 +5,17 @@
 // Copyright (c) 2026 dravr.ai
 
 use async_trait::async_trait;
+use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
+use dravr_tronc::McpTool;
 use serde_json::{json, Value};
 
-use crate::protocol::{CallToolResult, ToolDefinition};
 use crate::state::SharedState;
-use crate::tools::McpTool;
 
 /// Get cache hit/miss statistics
 pub struct CacheStatusTool;
 
 #[async_trait]
-impl McpTool for CacheStatusTool {
+impl McpTool<crate::state::ServerState> for CacheStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cache_status".to_owned(),
@@ -39,7 +39,7 @@ impl McpTool for CacheStatusTool {
 pub struct CacheClearTool;
 
 #[async_trait]
-impl McpTool for CacheClearTool {
+impl McpTool<crate::state::ServerState> for CacheClearTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cache_clear".to_owned(),

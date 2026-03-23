@@ -17,9 +17,7 @@ use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
-use dravr_sciotte_mcp::transport::stdio::StdioTransport;
-use dravr_sciotte_mcp::transport::McpTransport;
-use dravr_sciotte_mcp::{build_tool_registry, McpServer, ServerState};
+use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 
 #[derive(Parser)]
 #[command(
@@ -87,15 +85,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dravr_sciotte=info,dravr_sciotte_server=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     let cli = Cli::parse();
+    dravr_tronc::server::tracing_init::init(&cli.transport);
 
     let provider = load_provider_config(cli.provider.as_deref())?;
 
@@ -186,9 +177,7 @@ async fn run_server(
         state.write().await.set_session(session);
     }
 
-    let tools = build_tool_registry();
-    let mcp_server = Arc::new(McpServer::new(state.clone(), tools));
-    let app = dravr_sciotte_server::router::build_router(state, mcp_server);
+    let app = dravr_sciotte_server::router::build_router(state);
 
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -207,9 +196,13 @@ async fn run_mcp_stdio(
         state.write().await.set_session(session);
     }
 
-    let tools = build_tool_registry();
-    let server = Arc::new(McpServer::new(state, tools));
-    StdioTransport.serve(server).await
+    let server = Arc::new(dravr_tronc::McpServer::new(
+        "dravr-sciotte",
+        env!("CARGO_PKG_VERSION"),
+        build_tool_registry(),
+        state,
+    ));
+    dravr_tronc::mcp::transport::stdio::run(server).await
 }
 
 async fn run_login(

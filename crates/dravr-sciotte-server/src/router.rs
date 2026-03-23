@@ -20,18 +20,25 @@ use tracing::info;
 use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
-use dravr_sciotte_mcp::McpServer;
 
 use crate::auth::auth_middleware;
 use crate::health::health_handler;
 use crate::streaming;
 
 /// Build the complete Axum router for the unified server
-pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
+pub fn build_router(state: SharedState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
+
+    let mcp_server = Arc::new(dravr_tronc::McpServer::new(
+        "dravr-sciotte-mcp",
+        env!("CARGO_PKG_VERSION"),
+        dravr_sciotte_mcp::build_tool_registry(),
+        Arc::clone(&state),
+    ));
+    let mcp_router = dravr_tronc::mcp::transport::http::mcp_router(mcp_server);
 
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
@@ -54,13 +61,6 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
         .route("/browser/login", get(streaming::browser_login_ws))
         .with_state(state.clone());
 
-    let mcp_route = Router::new()
-        .route(
-            "/mcp",
-            post(dravr_sciotte_mcp::transport::http::handle_mcp_post),
-        )
-        .with_state(mcp_server);
-
     let health_route = Router::new()
         .route("/health", get(health_handler))
         .with_state(state);
@@ -68,7 +68,7 @@ pub fn build_router(state: SharedState, mcp_server: Arc<McpServer>) -> Router {
     Router::new()
         .merge(api_routes)
         .merge(browser_route)
-        .merge(mcp_route)
+        .merge(mcp_router)
         .merge(health_route)
         .layer(cors)
 }

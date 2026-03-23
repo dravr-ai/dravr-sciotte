@@ -1,50 +1,32 @@
 // ABOUTME: Bearer token authentication middleware for REST API endpoints
-// ABOUTME: Checks DRAVR_SCIOTTE_API_KEY environment variable for optional auth
+// ABOUTME: Delegates to dravr-tronc shared auth, checks DRAVR_SCIOTTE_API_KEY environment variable
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
 use axum::extract::Request;
-use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use subtle::ConstantTimeEq;
+use axum::response::Response;
+
+/// Environment variable name for the API key
+const API_KEY_ENV: &str = "DRAVR_SCIOTTE_API_KEY";
 
 /// Authentication middleware that checks for a valid bearer token.
-/// Skipped if `DRAVR_SCIOTTE_API_KEY` is not set.
+///
+/// The env var is read on every request to allow runtime key rotation
+/// without restarting the server. If the variable is not set, all requests
+/// are allowed through (localhost development mode). If set, requests must
+/// include a matching `Authorization: Bearer <key>` header.
 pub async fn auth_middleware(request: Request, next: Next) -> Response {
-    let Some(expected_key) = std::env::var("DRAVR_SCIOTTE_API_KEY").ok() else {
-        // No API key configured — skip authentication
-        return next.run(request).await;
-    };
+    dravr_tronc::server::auth::require_auth(API_KEY_ENV, request, next).await
+}
 
-    let auth_header = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let provided_key = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
-        _ => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(serde_json::json!({"error": "Missing or invalid Authorization header"})),
-            )
-                .into_response();
-        }
-    };
-
-    if provided_key
-        .as_bytes()
-        .ct_eq(expected_key.as_bytes())
-        .into()
-    {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": "Invalid API key"})),
-        )
-            .into_response()
+    #[test]
+    fn api_key_env_is_correct() {
+        assert_eq!(API_KEY_ENV, "DRAVR_SCIOTTE_API_KEY");
     }
 }

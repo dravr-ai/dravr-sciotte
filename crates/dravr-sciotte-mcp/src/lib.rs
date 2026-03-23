@@ -1,5 +1,5 @@
 // ABOUTME: Library root re-exporting MCP server modules for use by dravr-sciotte-server
-// ABOUTME: Exposes protocol, server, state, tools, and transport as public modules
+// ABOUTME: Delegates protocol, server, and transport to dravr-tronc; provides tools and state
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -8,14 +8,16 @@
 //!
 //! MCP server library exposing Strava scraping via Model Context Protocol.
 //! Supports stdio and HTTP/SSE transports with activity and auth management tools.
+//!
+//! ## Re-exports
+//!
+//! - [`McpServer`] — JSON-RPC request dispatcher (from dravr-tronc)
+//! - [`ServerState`] / [`SharedState`] — shared server state with scraper and session store
+//! - [`build_tool_registry`] — default tool registry with all MCP tools
 
-pub mod protocol;
-pub mod server;
 pub mod state;
 pub mod tools;
-pub mod transport;
 
-pub use server::McpServer;
+pub use dravr_tronc::McpServer;
 pub use state::{ServerState, SharedState};
 pub use tools::build_tool_registry;
-pub use transport::McpTransport;

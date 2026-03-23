@@ -530,10 +530,10 @@ Your Application
             ├── Multi-Session Store
             │   └── ServerState           → HashMap<session_id, AuthSession>, X-Session-Id routing
             │
-            ├── MCP Server (library + binary crate)
+            ├── MCP Server (library + binary crate, powered by dravr-tronc)
             │   └── dravr-sciotte-mcp     → JSON-RPC 2.0 over stdio or HTTP/SSE
             │
-            └── Unified REST API + MCP + CLI (binary crate)
+            └── Unified REST API + MCP + CLI (binary crate, powered by dravr-tronc)
                 └── dravr-sciotte-server  → REST endpoints, MCP HTTP, WebSocket streaming, CLI
 ```
 
