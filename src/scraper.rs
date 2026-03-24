@@ -680,21 +680,42 @@ impl ActivityScraper for ChromeScraper {
 
         // For "app" (phone tap): check if a number matching challenge appeared
         if option_id == "app" {
-            if let Some(number) = extract_number_from_page(&page).await {
-                info!(number = %number, "Number matching challenge detected");
-                *self.pending_login.lock().await = Some((browser, page));
-                return Ok(LoginResult::NumberMatch(number));
-            }
+            let js_number = extract_number_from_page(&page).await;
 
-            // Number not found via JS — try vision fallback if available
+            // Always try vision if available — compare results for reliability
             #[cfg(feature = "vision")]
-            if let Some(ref vision) = *self.vision_scraper.lock().await {
-                info!("Number not found via JS, trying vision fallback");
-                if let Some(number) = vision.extract_match_number(&page).await {
-                    info!(number = %number, "Number found via vision");
-                    *self.pending_login.lock().await = Some((browser, page));
-                    return Ok(LoginResult::NumberMatch(number));
+            let vision_number = if let Some(ref vision) = *self.vision_scraper.lock().await {
+                vision.extract_match_number(&page).await
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vision"))]
+            let vision_number: Option<String> = None;
+
+            // Pick the best number: prefer vision on mismatch, fall back to JS
+            let number = match (&js_number, &vision_number) {
+                (Some(js), Some(vis)) if js == vis => {
+                    info!(number = %js, "Number match confirmed (JS + vision agree)");
+                    Some(js.clone())
                 }
+                (Some(js), Some(vis)) => {
+                    warn!(js = %js, vision = %vis, "Number mismatch — trusting vision");
+                    Some(vis.clone())
+                }
+                (None, Some(vis)) => {
+                    info!(number = %vis, "Number found via vision only");
+                    Some(vis.clone())
+                }
+                (Some(js), None) => {
+                    info!(number = %js, "Number found via JS only");
+                    Some(js.clone())
+                }
+                (None, None) => None,
+            };
+
+            if let Some(n) = number {
+                *self.pending_login.lock().await = Some((browser, page));
+                return Ok(LoginResult::NumberMatch(n));
             }
         }
 
@@ -893,18 +914,32 @@ impl ActivityScraper for ChromeScraper {
 /// Looks for a prominent number displayed on screen.
 async fn extract_number_from_page(page: &chromiumoxide::Page) -> Option<String> {
     let js = r"(function() {
+        // Find the most prominent 2-3 digit number on the page.
+        // Google renders the match number with the largest font size.
+        var best = null;
+        var bestSize = 0;
         var all = document.querySelectorAll('div, span, p');
         for (var i = 0; i < all.length; i++) {
             var el = all[i];
             var text = el.textContent.trim();
-            if (/^\d{2,3}$/.test(text)) {
-                var rect = el.getBoundingClientRect();
-                if (rect.width > 30 && rect.height > 20) {
-                    return text;
-                }
+            if (!/^\d{2,3}$/.test(text)) continue;
+            // Must be the direct text (not inherited from children with other text)
+            var directText = '';
+            for (var j = 0; j < el.childNodes.length; j++) {
+                if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent;
+            }
+            if (directText.trim() !== text && el.children.length > 0) continue;
+            var style = window.getComputedStyle(el);
+            var fontSize = parseFloat(style.fontSize) || 0;
+            var rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            if (fontSize > bestSize) {
+                bestSize = fontSize;
+                best = text;
             }
         }
-        return null;
+        // Only return if the font size is significantly larger than body text (>24px)
+        return bestSize > 24 ? best : null;
     })()";
     let result = page.evaluate(js).await.ok()?;
     result.value().and_then(|v| v.as_str().map(String::from))
