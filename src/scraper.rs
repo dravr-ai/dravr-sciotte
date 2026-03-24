@@ -680,42 +680,10 @@ impl ActivityScraper for ChromeScraper {
 
         // For "app" (phone tap): check if a number matching challenge appeared
         if option_id == "app" {
-            let js_number = extract_number_from_page(&page).await;
-
-            // Always try vision if available — compare results for reliability
-            #[cfg(feature = "vision")]
-            let vision_number = if let Some(ref vision) = *self.vision_scraper.lock().await {
-                vision.extract_match_number(&page).await
-            } else {
-                None
-            };
-            #[cfg(not(feature = "vision"))]
-            let vision_number: Option<String> = None;
-
-            // Pick the best number: prefer vision on mismatch, fall back to JS
-            let number = match (&js_number, &vision_number) {
-                (Some(js), Some(vis)) if js == vis => {
-                    info!(number = %js, "Number match confirmed (JS + vision agree)");
-                    Some(js.clone())
-                }
-                (Some(js), Some(vis)) => {
-                    warn!(js = %js, vision = %vis, "Number mismatch — trusting vision");
-                    Some(vis.clone())
-                }
-                (None, Some(vis)) => {
-                    info!(number = %vis, "Number found via vision only");
-                    Some(vis.clone())
-                }
-                (Some(js), None) => {
-                    info!(number = %js, "Number found via JS only");
-                    Some(js.clone())
-                }
-                (None, None) => None,
-            };
-
-            if let Some(n) = number {
+            if let Some(number) = extract_number_from_page(&page).await {
+                info!(number = %number, "Number matching challenge detected");
                 *self.pending_login.lock().await = Some((browser, page));
-                return Ok(LoginResult::NumberMatch(n));
+                return Ok(LoginResult::NumberMatch(number));
             }
         }
 
