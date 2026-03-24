@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.1] — 2026-03-24
+
+### Added
+
+- feat: add commit-msg hook and update CLAUDE.md commit rules Enforce max 2-line commits, conventional format, no AI signatures
+
+### Fixed
+
+- fix: handle Google /challenge/dp device prompt on Cloud Run Click 'Try another way' to reach 2FA selection with OTP options
+
+
+
 ## [0.4.0] — 2026-03-23
 
 ### Added
