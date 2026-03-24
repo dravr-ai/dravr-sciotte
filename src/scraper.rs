@@ -685,6 +685,43 @@ impl ActivityScraper for ChromeScraper {
                 *self.pending_login.lock().await = Some((browser, page));
                 return Ok(LoginResult::NumberMatch(number));
             }
+            // Debug: dump what's visible on the page so we can improve extraction
+            let current_url = page.url().await.ok().flatten().unwrap_or_default();
+            warn!(url = %current_url, "Number extraction returned None — dumping page debug info");
+            if let Ok(screenshot) = page
+                .save_screenshot(
+                    chromiumoxide::page::ScreenshotParams::builder()
+                        .full_page(true)
+                        .build(),
+                    "/tmp/sciotte-number-match-debug.png",
+                )
+                .await
+            {
+                warn!(
+                    "Debug screenshot saved to /tmp/sciotte-number-match-debug.png ({} bytes)",
+                    screenshot.len()
+                );
+            }
+            // Dump all visible 2-3 digit numbers and their font sizes
+            let debug_js = r"(function() {
+                var results = [];
+                var all = document.querySelectorAll('div, span, p');
+                for (var i = 0; i < all.length; i++) {
+                    var el = all[i];
+                    var text = el.textContent.trim();
+                    if (!/^\d{2,3}$/.test(text)) continue;
+                    var style = window.getComputedStyle(el);
+                    var fontSize = parseFloat(style.fontSize) || 0;
+                    var rect = el.getBoundingClientRect();
+                    results.push({text: text, fontSize: fontSize, tag: el.tagName, w: rect.width, h: rect.height, visible: rect.width > 0 && rect.height > 0});
+                }
+                return JSON.stringify(results);
+            })()";
+            if let Ok(result) = page.evaluate(debug_js).await {
+                if let Some(v) = result.value().and_then(|v| v.as_str()) {
+                    warn!(candidates = %v, "All 2-3 digit numbers found on page");
+                }
+            }
         }
 
         // Phone tap needs longer — user must pick up their phone
@@ -881,36 +918,33 @@ impl ActivityScraper for ChromeScraper {
 /// Try to extract a 2-3 digit number from the page (Google number matching challenge).
 /// Looks for a prominent number displayed on screen.
 async fn extract_number_from_page(page: &chromiumoxide::Page) -> Option<String> {
-    let js = r"(function() {
-        // Find the most prominent 2-3 digit number on the page.
-        // Google renders the match number with the largest font size.
-        var best = null;
-        var bestSize = 0;
-        var all = document.querySelectorAll('div, span, p');
+    let js = r#"(function() {
+        // Find all 2-3 digit numbers on the page with their font sizes
+        var candidates = [];
+        var all = document.querySelectorAll('*');
         for (var i = 0; i < all.length; i++) {
             var el = all[i];
             var text = el.textContent.trim();
             if (!/^\d{2,3}$/.test(text)) continue;
-            // Must be the direct text (not inherited from children with other text)
-            var directText = '';
-            for (var j = 0; j < el.childNodes.length; j++) {
-                if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent;
-            }
-            if (directText.trim() !== text && el.children.length > 0) continue;
             var style = window.getComputedStyle(el);
             var fontSize = parseFloat(style.fontSize) || 0;
             var rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) continue;
-            if (fontSize > bestSize) {
-                bestSize = fontSize;
-                best = text;
-            }
+            candidates.push({text: text, size: fontSize, tag: el.tagName, w: rect.width, h: rect.height});
         }
-        // Only return if the font size is significantly larger than body text (>24px)
-        return bestSize > 24 ? best : null;
-    })()";
+        if (candidates.length === 0) return JSON.stringify({number: null, debug: "no candidates"});
+        // Sort by font size descending, pick the largest
+        candidates.sort(function(a, b) { return b.size - a.size; });
+        return JSON.stringify({number: candidates[0].text, debug: JSON.stringify(candidates.slice(0, 5))});
+    })()"#;
     let result = page.evaluate(js).await.ok()?;
-    result.value().and_then(|v| v.as_str().map(String::from))
+    let json_str = result.value().and_then(|v| v.as_str().map(String::from))?;
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+
+    let dbg_info = parsed["debug"].as_str().unwrap_or("");
+    info!(candidates = %dbg_info, "Number extraction candidates");
+
+    parsed["number"].as_str().map(String::from)
 }
 
 fn url_path_matches(url: &str, patterns: &[String]) -> bool {
