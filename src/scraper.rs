@@ -52,7 +52,10 @@ const TRY_ANOTHER_WAY_SELECTOR: &str = "text:Try another way, text:Essayer autre
 const CHALLENGE_URL_PATTERN: &str = "/challenge/";
 
 /// Challenge URL suffixes that are NOT 2FA selection pages (skip these for option parsing)
-const CHALLENGE_SKIP_PATTERNS: &[&str] = &["challenge/pk", "challenge/pwd"];
+const CHALLENGE_SKIP_PATTERNS: &[&str] = &["challenge/pk", "challenge/pwd", "challenge/dp"];
+
+/// URL pattern for Google device prompt (phone tap without selection)
+const DEVICE_PROMPT_PATTERN: &str = "challenge/dp";
 
 /// JS to parse 2FA options from Google's challenge selection page.
 /// Uses `[data-challengetype]` elements which Google uses to identify each method.
@@ -1006,6 +1009,15 @@ async fn poll_for_next_step(
             continue;
         }
 
+        // Device prompt (/challenge/dp) — Google sent push to phone, click "Try another way"
+        // to get to the selection page with OTP/Authenticator options
+        if url.contains(DEVICE_PROMPT_PATTERN) {
+            info!("Device prompt detected, clicking 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            continue;
+        }
+
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
         if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
             info!(url = %url, "OTP/2FA page detected during step transition");
@@ -1190,6 +1202,14 @@ async fn poll_credential_login_result(
         // Don't try "Enter your password" here — password was already submitted.
         if url.contains(PASSKEY_CHALLENGE_PATTERN) {
             info!("Passkey challenge detected post-password, clicking 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            continue;
+        }
+
+        // Device prompt (/challenge/dp) — Google sent push to phone, click "Try another way"
+        if url.contains(DEVICE_PROMPT_PATTERN) {
+            info!("Device prompt detected post-password, clicking 'Try another way'");
             let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
             tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             continue;
