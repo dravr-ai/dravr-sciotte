@@ -975,13 +975,14 @@ async fn poll_for_next_step(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google sent push to phone, click "Try another way"
-        // to get to the selection page with OTP/Authenticator options
+        // Device prompt (/challenge/dp) — notification already sent to phone.
+        // Don't click "Try another way" — it kills the existing notification.
+        // Return to caller so user can approve on their phone.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected, clicking 'Try another way'");
-            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            continue;
+            info!("Device prompt detected — user has phone notification");
+            return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(
+                "Check your phone".to_owned(),
+            )));
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
@@ -1179,12 +1180,11 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google sent push to phone, click "Try another way"
+        // Device prompt (/challenge/dp) — notification already sent to phone.
+        // Don't click "Try another way" — return so user can approve on phone.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected post-password, clicking 'Try another way'");
-            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            continue;
+            info!("Device prompt detected post-password — user has phone notification");
+            return Ok(LoginResult::NumberMatch("Check your phone".to_owned()));
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
