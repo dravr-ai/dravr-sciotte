@@ -377,38 +377,9 @@ pub async fn click_element(page: &chromiumoxide::Page, selector: &str) -> Scrape
 
 /// Auto-dismiss cookie consent dialogs (`Cookiebot`, `CookieFirst`, generic accept buttons)
 pub async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
-    let dismiss_js = r#"
-        (function() {
-            // Cookiebot
-            var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
-                || document.querySelector('[data-cookiefirst-action="accept"]')
-                || document.querySelector('button[id*="accept"], button[class*="accept"]');
-            if (btn) { btn.click(); return 'dismissed'; }
-            // Text-based fallback: find any button with Accept All / Tout accepter
-            var allButtons = document.querySelectorAll('button, a, [role=button]');
-            for (var i = 0; i < allButtons.length; i++) {
-                var text = allButtons[i].textContent.trim();
-                if (text === 'Accept All' || text === 'Tout accepter' || text === 'Accept all'
-                    || text === 'Accepter tout' || text === 'Accept All Cookies') {
-                    allButtons[i].click();
-                    return 'dismissed_text';
-                }
-            }
-            // Iframe fallback
-            var iframes = document.querySelectorAll('iframe');
-            for (var j = 0; j < iframes.length; j++) {
-                try {
-                    var doc = iframes[j].contentDocument;
-                    if (doc) {
-                        var b = doc.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
-                            || doc.querySelector('button[id*="accept"]');
-                        if (b) { b.click(); return 'dismissed_iframe'; }
-                    }
-                } catch(e) {}
-            }
-            return 'not_found';
-        })()
-    "#;
+    let dismiss_js = crate::script_loader::loader()
+        .load("dismiss_cookie.js")
+        .await;
     if let Ok(result) = page.evaluate(dismiss_js).await {
         let val = result
             .value()

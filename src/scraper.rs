@@ -57,62 +57,7 @@ const CHALLENGE_SKIP_PATTERNS: &[&str] = &["challenge/pk", "challenge/pwd", "cha
 /// URL pattern for Google device prompt (phone tap without selection)
 const DEVICE_PROMPT_PATTERN: &str = "challenge/dp";
 
-/// JS to parse 2FA options from Google's challenge selection page.
-/// Uses `[data-challengetype]` elements which Google uses to identify each method.
-/// Returns JSON array of `{id, label, x, y}` for each visible option.
-const PARSE_TWO_FA_OPTIONS_JS: &str = r"(function() {
-    var options = [];
-    var seen = {};
-    var els = document.querySelectorAll('[data-challengetype]');
-    for (var i = 0; i < els.length; i++) {
-        var el = els[i];
-        var ct = el.getAttribute('data-challengetype');
-        var rect = el.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        var text = el.textContent.trim();
-        if (!text || text.length < 5) continue;
-        var lower = text.toLowerCase();
-        if (lower.includes('passkey') || lower.includes('security key')) continue;
-        if (lower.includes('enter your password') || lower.includes('mot de passe')) continue;
-        if (lower === 'help' || lower === 'aide') continue;
-        if (lower.includes('another way') || lower.includes('autrement')) continue;
-        var id = ct || 'unknown';
-        if (lower.includes('authenticator') || lower.includes('verification code') || lower.includes('code de validation')) id = 'otp';
-        else if (lower.includes('tap') || lower.includes('yes on your') || lower.includes('appuyez')) id = 'app';
-        else if (lower.includes('text message') || lower.includes('sms') || lower.includes('texto')) id = 'sms';
-        else if (lower.includes('backup') || lower.includes('secours')) id = 'backup';
-        if (seen[id]) continue;
-        seen[id] = true;
-        options.push({id: id, label: text.substring(0, 120), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
-    }
-    if (options.length === 0) {
-        var debug = Array.from(els).map(function(e) {
-            return {ct: e.getAttribute('data-challengetype'), text: e.textContent.trim().substring(0, 80)};
-        });
-        return 'debug:' + JSON.stringify(debug);
-    }
-    return JSON.stringify(options);
-})()";
-
-/// JS to find the "Enter your password" element on Google's alternative sign-in page.
-/// Returns coordinates for CDP click, or debug info if not found.
-const ENTER_PASSWORD_COORDS_JS: &str = r"(function() {
-    var all = document.querySelectorAll('[data-challengetype], [jsname] li, div[role=link], li, div, span');
-    for (var i = 0; i < all.length; i++) {
-        var el = all[i];
-        var rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0 && rect.height < 100) {
-            var text = el.textContent.trim();
-            if (text === 'Enter your password' || text === 'Saisir votre mot de passe') {
-                return JSON.stringify({x: rect.x + rect.width / 2, y: rect.y + rect.height / 2});
-            }
-        }
-    }
-    var debug = Array.from(document.querySelectorAll('[data-challengetype], li, div[role=link]')).map(function(e) {
-        return {tag: e.tagName, text: e.textContent.trim().substring(0, 50), ct: e.getAttribute('data-challengetype')};
-    });
-    return 'not_found:' + JSON.stringify(debug);
-})()";
+// JS scripts moved to scripts/js/ — loaded at runtime via script_loader
 
 /// Google's OTP submit button selectors (used as fallback in `submit_otp`)
 const GOOGLE_OTP_SUBMIT_SELECTOR: &str = "#totpNext button, #totpNext, text:Next";
@@ -918,25 +863,9 @@ impl ActivityScraper for ChromeScraper {
 /// Try to extract a 2-3 digit number from the page (Google number matching challenge).
 /// Looks for a prominent number displayed on screen.
 async fn extract_number_from_page(page: &chromiumoxide::Page) -> Option<String> {
-    let js = r#"(function() {
-        // Find all 2-3 digit numbers on the page with their font sizes
-        var candidates = [];
-        var all = document.querySelectorAll('*');
-        for (var i = 0; i < all.length; i++) {
-            var el = all[i];
-            var text = el.textContent.trim();
-            if (!/^\d{2,3}$/.test(text)) continue;
-            var style = window.getComputedStyle(el);
-            var fontSize = parseFloat(style.fontSize) || 0;
-            var rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) continue;
-            candidates.push({text: text, size: fontSize, tag: el.tagName, w: rect.width, h: rect.height});
-        }
-        if (candidates.length === 0) return JSON.stringify({number: null, debug: "no candidates"});
-        // Sort by font size descending, pick the largest
-        candidates.sort(function(a, b) { return b.size - a.size; });
-        return JSON.stringify({number: candidates[0].text, debug: JSON.stringify(candidates.slice(0, 5))});
-    })()"#;
+    let js = crate::script_loader::loader()
+        .load("extract_number.js")
+        .await;
     let result = page.evaluate(js).await.ok()?;
     let json_str = result.value().and_then(|v| v.as_str().map(String::from))?;
     let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
@@ -1109,7 +1038,10 @@ struct TwoFactorOptionWithCoords {
 
 /// Parse 2FA options from the current page
 async fn parse_two_fa_options(page: &chromiumoxide::Page) -> Vec<TwoFactorOptionWithCoords> {
-    let Ok(result) = page.evaluate(PARSE_TWO_FA_OPTIONS_JS).await else {
+    let js = crate::script_loader::loader()
+        .load("parse_2fa_options.js")
+        .await;
+    let Ok(result) = page.evaluate(js).await else {
         return Vec::new();
     };
     let json_str = result
@@ -1152,7 +1084,10 @@ async fn cdp_click_two_fa_option(page: &chromiumoxide::Page, option_id: &str) ->
 
 /// Find and CDP-click the "Enter your password" option on Google's challenge page
 async fn cdp_click_enter_password(page: &chromiumoxide::Page) {
-    if let Ok(result) = page.evaluate(ENTER_PASSWORD_COORDS_JS).await {
+    let js = crate::script_loader::loader()
+        .load("enter_password_coords.js")
+        .await;
+    if let Ok(result) = page.evaluate(js).await {
         let val = result
             .value()
             .and_then(|v| v.as_str().map(String::from))

@@ -53,6 +53,9 @@ pub mod auth;
 /// Shared browser automation utilities (launch, cookies, CDP input)
 pub mod browser_utils;
 
+/// Runtime-loadable JS scripts with compiled-in defaults
+pub mod script_loader;
+
 /// Embedded fake login server for testing
 pub mod fake_login;
 
