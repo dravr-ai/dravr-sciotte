@@ -67,7 +67,7 @@ redundant_pub_crate = "allow"
 
 [package]
 name = "dravr-sciotte"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Sport activity scraper with headless Chrome, TOML-configurable providers, and in-memory caching"

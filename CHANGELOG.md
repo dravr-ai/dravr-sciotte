@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.2] — 2026-03-24
+
+### Fixed
+
+- fix: don't click 'Try another way' on /challenge/dp device prompt Notification already on user's phone — return NumberMatch to let user approve
+- fix: log all number candidates for debugging on Cloud Run Removed direct-text and font-size filters, picks largest font number
+- fix: simplify number extraction to JS-only with largest font heuristic Picks the 2-3 digit number with the largest computed font-size (>24px)
+
+### Other
+
+- refactor: externalize JS scripts with runtime override via DRAVR_SCIOTTE_SCRIPTS_DIR TTL-cached script loader, compiled-in defaults, no recompile for JS changes
+
+
+
 ## [0.4.1] — 2026-03-24
 
 ### Added
