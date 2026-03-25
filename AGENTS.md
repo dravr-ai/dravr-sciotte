@@ -43,6 +43,14 @@ This enables commit-msg hooks. Sessions get archived/revived, so this must run E
 - Bug fixes go directly to `main` branch (no feature branch needed)
 - Commit and push directly: `git push origin main`
 
+## Release Safety — MANDATORY
+
+Before triggering a release:
+1. **CI must pass** — never release without green CI (`gh run list --limit 1`)
+2. **Verify `cargo package`** — run `cargo package -p dravr-sciotte --list --allow-dirty` and confirm all `include_str!` / `include_bytes!` files are present
+3. **Check `exclude` in Cargo.toml** — if you add files referenced by `include_str!()` or `include_bytes!()`, ensure they are NOT in the `exclude` list
+4. **Never swallow publish errors** — the `|| echo "already published"` fallback in release.yml can mask real failures. Check crates.io after release to confirm the version is live
+
 ## Rust Workspace Architecture
 
 The backend is a Cargo workspace with 3 crates:

@@ -77,7 +77,7 @@ documentation = "https://docs.rs/dravr-sciotte"
 keywords = ["scraper", "fitness", "training", "headless-chrome", "sport"]
 categories = ["web-programming::http-client", "command-line-utilities"]
 readme = "README.md"
-exclude = [".claude/", ".githooks/", ".github/", "scripts/"]
+exclude = [".claude/", ".githooks/", ".github/", "scripts/*.sh"]
 
 [package.metadata.docs.rs]
 all-features = true
