@@ -7,6 +7,7 @@
 [package]
 name = "dravr-sciotte-server"
 version = "0.4.3"
+publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Unified REST API + MCP server + CLI for sport activity scraping"

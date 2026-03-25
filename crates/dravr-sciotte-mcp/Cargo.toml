@@ -7,6 +7,7 @@
 [package]
 name = "dravr-sciotte-mcp"
 version = "0.4.3"
+publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "MCP server for dravr-sciotte — expose sport activity scraping via Model Context Protocol"

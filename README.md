@@ -1,7 +1,5 @@
 # Sciotte — Sport Activity Scraper
 
-[![crates.io](https://img.shields.io/crates/v/dravr-sciotte.svg)](https://crates.io/crates/dravr-sciotte)
-[![docs.rs](https://docs.rs/dravr-sciotte/badge.svg)](https://docs.rs/dravr-sciotte)
 [![CI](https://github.com/dravr-ai/dravr-sciotte/actions/workflows/ci.yml/badge.svg)](https://github.com/dravr-ai/dravr-sciotte/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue.svg)](LICENSE.md)
 
@@ -704,7 +702,7 @@ The core `ActivityScraper` trait:
 - **`get_activity()`** — scrape single activity detail
 - **`is_authenticated()`** — check session validity
 
-For detailed API docs see [docs.rs/dravr-sciotte](https://docs.rs/dravr-sciotte).
+For detailed API docs run `cargo doc --open` from the workspace root.
 
 ## License
 
