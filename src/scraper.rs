@@ -1192,6 +1192,10 @@ async fn poll_credential_login_result(
             && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
         {
             info!(url = %url, "Challenge selection page detected");
+            // Wait for the page DOM to render before parsing options —
+            // without this, slow runners (Windows CI) may see an empty DOM
+            // and misclassify a 2FA page as a sign-in method chooser.
+            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             let options = parse_two_fa_options(page).await;
             if !options.is_empty() {
                 // Real 2FA options found (Authenticator, phone tap, SMS)
