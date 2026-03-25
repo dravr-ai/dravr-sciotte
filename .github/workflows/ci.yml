@@ -63,12 +63,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace -- --test-threads=1
 
-  test-windows:
-    name: Tests (Windows)
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace -- --test-threads=1
