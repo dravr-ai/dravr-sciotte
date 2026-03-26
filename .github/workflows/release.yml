@@ -151,16 +151,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-14
-            archive: tar.gz
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -176,8 +166,7 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --workspace --target ${{ matrix.target }}
 
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package
         run: |
           VERSION="${{ needs.version.outputs.version }}"
           TARGET="${{ matrix.target }}"
@@ -187,23 +176,11 @@ jobs:
           cp "target/${TARGET}/release/dravr-sciotte-server" "$DIR/"
           tar czf "${DIR}.tar.gz" "$DIR"
 
-      - name: Package (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $VERSION = "${{ needs.version.outputs.version }}"
-          $TARGET = "${{ matrix.target }}"
-          $DIR = "dravr-sciotte-v${VERSION}-${TARGET}"
-          New-Item -ItemType Directory -Path $DIR
-          Copy-Item "target/${TARGET}/release/dravr-sciotte-mcp.exe" "$DIR/"
-          Copy-Item "target/${TARGET}/release/dravr-sciotte-server.exe" "$DIR/"
-          Compress-Archive -Path "$DIR/*" -DestinationPath "${DIR}.zip"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: dravr-sciotte-${{ matrix.target }}
-          path: dravr-sciotte-v*.*
+          path: dravr-sciotte-v*.tar.gz
 
   docker:
     name: Docker Image

@@ -53,13 +53,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace -- --test-threads=1
 
-  test-macos:
-    name: Tests (macOS)
-    runs-on: macos-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace -- --test-threads=1
-
