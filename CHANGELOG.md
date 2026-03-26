@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.4] — 2026-03-26
+
+### Fixed
+
+- fix: wait for DOM before parsing 2FA options on challenge page Race condition on slow CI runners caused empty parse_two_fa_options, looping until timeout
+
+### Other
+
+- deps: bump dravr-tronc to 0.2 with error notification support
+
+
+
 ## [0.4.3] — 2026-03-25
 
 
