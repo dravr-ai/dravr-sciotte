@@ -31,7 +31,7 @@ vision = ["dravr-sciotte/vision", "dep:embacle"]
 [dependencies]
 dravr-sciotte = { path = "../..", version = "0.4.3" }
 dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.4.3" }
-dravr-tronc = "0.1.0"
+dravr-tronc = { version = "0.2", features = ["notifications"] }
 embacle = { version = "0.13", features = ["copilot-headless"], optional = true }
 axum = { version = "0.8", features = ["ws"] }
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }

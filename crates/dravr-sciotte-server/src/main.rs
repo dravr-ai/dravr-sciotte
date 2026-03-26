@@ -86,7 +86,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
-    dravr_tronc::server::tracing_init::init(&cli.transport);
+    dravr_tronc::server::tracing_init::init_with_notifications(&cli.transport);
 
     let provider = load_provider_config(cli.provider.as_deref())?;
 
