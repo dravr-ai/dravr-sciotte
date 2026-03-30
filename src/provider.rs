@@ -19,6 +19,18 @@ pub struct ProviderConfig {
     pub list_page: ListPageConfig,
     /// Detail page for a single activity with full metrics
     pub detail_page: DetailPageConfig,
+    /// Health/wellness daily summary page (optional — not all providers have one)
+    #[serde(default)]
+    pub health_page: Option<HealthPageConfig>,
+}
+
+/// Configuration for a daily health/wellness summary page
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthPageConfig {
+    /// URL template with a `{date}` placeholder replaced at runtime with `YYYY-MM-DD`
+    pub url_template: String,
+    /// JavaScript snippet that extracts health metrics and returns JSON
+    pub js_extract: String,
 }
 
 /// Provider identity: name, login URL, and how to detect successful login
@@ -135,6 +147,15 @@ impl ProviderConfig {
         self.detail_page.url_template.replace("{id}", activity_id)
     }
 
+    /// Build the health page URL for a given date, if the provider has a health page
+    pub fn health_url(&self, date: &chrono::NaiveDate) -> Option<String> {
+        const DATE_PLACEHOLDER: &str = "{date}";
+        self.health_page.as_ref().map(|hp| {
+            hp.url_template
+                .replace(DATE_PLACEHOLDER, &date.format("%Y-%m-%d").to_string())
+        })
+    }
+
     /// Generate the JS snippet for extracting activities from the list page.
     ///
     /// Uses double-quote JS strings and `new RegExp()` to avoid quoting conflicts
@@ -244,6 +265,53 @@ mod tests {
         let url = config.detail_url("12345");
         assert!(url.contains("12345"));
         assert!(!url.contains("{id}"));
+    }
+
+    #[test]
+    fn health_url_substitution() {
+        let config = ProviderConfig::from_toml(
+            r#"
+[provider]
+name = "test"
+login_url = "http://example.com/login"
+login_success_patterns = ["/home"]
+login_failure_patterns = ["/login"]
+
+[list_page]
+url = "http://example.com/activities"
+row_selector = "tr"
+link_selector = "a"
+id_regex = '/(\d+)/'
+[list_page.fields]
+name = "td"
+sport_type = "td"
+date = "td"
+time = "td"
+distance = "td"
+elevation = "td"
+
+[detail_page]
+url_template = "http://example.com/activity/{id}"
+js_extract = '(function() { return "{}"; })()'
+
+[health_page]
+url_template = "http://example.com/daily-summary/{date}"
+js_extract = '(function() { return "{}"; })()'
+"#,
+        )
+        .unwrap();
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 30).unwrap();
+        let url = config.health_url(&date);
+        assert_eq!(url.unwrap(), "http://example.com/daily-summary/2026-03-30");
+    }
+
+    #[test]
+    fn health_page_optional() {
+        let config = ProviderConfig::strava_default();
+        assert!(config.health_page.is_none());
+        assert!(config
+            .health_url(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .is_none());
     }
 
     #[test]

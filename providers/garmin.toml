@@ -132,3 +132,76 @@ js_extract = '''
     return JSON.stringify(data);
 })()
 '''
+
+# Daily health/wellness summary — uses card-based DOM on Garmin Connect
+[health_page]
+url_template = "https://connect.garmin.com/app/daily-summary/{date}"
+js_extract = '''
+(function() {
+    var data = {};
+    var mainVal = function(card) {
+        var el = card.querySelector('[class*="DailySummaryCardMainValue_mainValue"]');
+        return el ? el.textContent.trim() : "";
+    };
+    var dataBlocks = function(card) {
+        var labels = card.querySelectorAll('[class*="DailySummaryCardDataBlock_dataLabel"]');
+        var values = card.querySelectorAll('[class*="DailySummaryCardDataBlock_dataValue"]');
+        var result = [];
+        for (var i = 0; i < labels.length; i++) {
+            result.push({
+                label: labels[i].textContent.trim().toLowerCase(),
+                value: values[i] ? values[i].textContent.trim() : ""
+            });
+        }
+        return result;
+    };
+
+    // Heart Rate card
+    var hrCard = document.querySelector('[class*="HeartRateCardMain_wrapper"]');
+    if (hrCard) {
+        data.resting_hr = mainVal(hrCard);
+        dataBlocks(hrCard).forEach(function(b) {
+            if (b.label.includes("haut") || b.label.includes("high")) data.max_hr = b.value;
+            else if (b.label.includes("repos") || b.label.includes("rest")) data.avg_hr_7day = b.value;
+        });
+    }
+
+    // Body Battery card
+    var bbCard = document.querySelector('[class*="BodyBatteryCardMain_wrapper"]');
+    if (bbCard) data.body_battery = mainVal(bbCard);
+
+    // Stress card
+    var stressCard = document.querySelector('[class*="StressCardMain_wrapper"]');
+    if (stressCard) data.stress = mainVal(stressCard);
+
+    // Steps card
+    var stepsCard = document.querySelector('[class*="StepsCardMain_wrapper"]');
+    if (stepsCard) {
+        data.steps = mainVal(stepsCard);
+        dataBlocks(stepsCard).forEach(function(b) {
+            if (b.label.includes("distance")) data.step_distance = b.value;
+            else if (b.label.includes("objectif") || b.label.includes("goal")) data.step_goal = b.value;
+        });
+    }
+
+    // Intensity Minutes card
+    var imCard = document.querySelector('[class*="IntensityMinutesCardMain_wrapper"]');
+    if (imCard) {
+        data.intensity_minutes = mainVal(imCard);
+        dataBlocks(imCard).forEach(function(b) {
+            if (b.label.includes("objectif") || b.label.includes("goal")) data.intensity_goal = b.value;
+        });
+    }
+
+    // Training Status card
+    var tsCard = document.querySelector('[class*="TrainingStatusCard_wrapper"]');
+    if (tsCard) {
+        dataBlocks(tsCard).forEach(function(b) {
+            if (b.label.includes("vo2") || b.label.includes("v02")) data.vo2_max = b.value;
+            else if (b.label.includes("charge") || b.label.includes("load")) data.training_load = b.value;
+        });
+    }
+
+    return JSON.stringify(data);
+})()
+'''

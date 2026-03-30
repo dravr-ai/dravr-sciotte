@@ -19,7 +19,9 @@ use tracing::{debug, info, warn};
 
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
-use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, CookieData};
+use crate::models::{
+    Activity, ActivityParams, AthleteProfile, AuthSession, CookieData, DailySummary, HealthParams,
+};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
@@ -708,6 +710,16 @@ impl ActivityScraper for VisionScraper {
 
         serde_json::from_str(&json).map_err(|e| ScraperError::Scraping {
             reason: format!("Failed to parse athlete profile: {e}"),
+        })
+    }
+
+    async fn get_daily_summary(
+        &self,
+        _session: &AuthSession,
+        _params: &HealthParams,
+    ) -> ScraperResult<DailySummary> {
+        Err(ScraperError::Config {
+            reason: "Vision-based health summary extraction is not yet supported".to_owned(),
         })
     }
 }

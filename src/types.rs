@@ -7,7 +7,9 @@
 use async_trait::async_trait;
 
 use crate::error::{LoginResult, ScraperResult};
-use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession};
+use crate::models::{
+    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams,
+};
 
 /// Core trait for Strava training page scraping
 ///
@@ -70,4 +72,15 @@ pub trait ActivityScraper: Send + Sync {
 
     /// Scrape the authenticated user's profile from the provider
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile>;
+
+    /// Scrape the daily health/wellness summary for a given date.
+    ///
+    /// Returns structured health data (heart rate, body battery, stress, steps, etc.)
+    /// from the provider's daily summary page. Not all providers support this —
+    /// returns `ScraperError::Config` if the provider has no health page configured.
+    async fn get_daily_summary(
+        &self,
+        session: &AuthSession,
+        params: &HealthParams,
+    ) -> ScraperResult<DailySummary>;
 }

@@ -14,7 +14,9 @@ use tracing::{debug, info};
 
 use crate::config::CacheConfig;
 use crate::error::{LoginResult, ScraperResult};
-use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession};
+use crate::models::{
+    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams,
+};
 use crate::types::ActivityScraper;
 
 /// Cache key combining session identity and query parameters
@@ -49,6 +51,7 @@ pub struct CachedScraper<S> {
     inner: S,
     activity_cache: Cache<CacheKey, Vec<Activity>>,
     detail_cache: Cache<String, Activity>,
+    health_cache: Cache<String, DailySummary>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -68,6 +71,10 @@ impl<S: ActivityScraper> CachedScraper<S> {
                 .max_capacity(config.max_entries)
                 .time_to_live(ttl)
                 .build(),
+            health_cache: Cache::builder()
+                .max_capacity(config.max_entries)
+                .time_to_live(ttl)
+                .build(),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
@@ -80,6 +87,7 @@ impl<S: ActivityScraper> CachedScraper<S> {
             misses: self.misses.load(Ordering::Relaxed),
             activity_entries: self.activity_cache.entry_count(),
             detail_entries: self.detail_cache.entry_count(),
+            health_entries: self.health_cache.entry_count(),
         }
     }
 
@@ -87,6 +95,7 @@ impl<S: ActivityScraper> CachedScraper<S> {
     pub fn clear(&self) {
         self.activity_cache.invalidate_all();
         self.detail_cache.invalidate_all();
+        self.health_cache.invalidate_all();
         info!("Cache cleared");
     }
 
@@ -170,6 +179,28 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
         self.inner.get_athlete(session).await
     }
+
+    async fn get_daily_summary(
+        &self,
+        session: &AuthSession,
+        params: &HealthParams,
+    ) -> ScraperResult<DailySummary> {
+        let key = format!("{}:{}", session.session_id, params.date);
+
+        if let Some(cached) = self.health_cache.get(&key).await {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            debug!(date = %params.date, "Cache hit for daily summary");
+            return Ok(cached);
+        }
+
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        debug!(date = %params.date, "Cache miss for daily summary");
+
+        let summary = self.inner.get_daily_summary(session, params).await?;
+        self.health_cache.insert(key, summary.clone()).await;
+
+        Ok(summary)
+    }
 }
 
 /// Cache hit/miss statistics
@@ -183,6 +214,8 @@ pub struct CacheStats {
     pub activity_entries: u64,
     /// Number of cached activity detail entries
     pub detail_entries: u64,
+    /// Number of cached daily health summary entries
+    pub health_entries: u64,
 }
 
 #[cfg(test)]

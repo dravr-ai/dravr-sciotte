@@ -17,7 +17,7 @@ use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use dravr_sciotte::models::ActivityParams;
+use dravr_sciotte::models::{ActivityParams, HealthParams};
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
 
@@ -54,6 +54,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/athlete", get(athlete_handler))
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
+        .route("/api/daily-summary", get(daily_summary_handler))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -267,6 +268,54 @@ async fn activity_detail_handler(
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to get activity {id}: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+// ============================================================================
+// Health Summary Handler
+// ============================================================================
+
+#[derive(Deserialize)]
+struct DailySummaryQuery {
+    date: String,
+}
+
+/// GET /api/daily-summary?date=YYYY-MM-DD — get daily health/wellness summary
+async fn daily_summary_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(query): Query<DailySummaryQuery>,
+) -> impl IntoResponse {
+    let guard = state.read().await;
+
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+
+    let Some(session) = session else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "session_not_found"})),
+        )
+            .into_response();
+    };
+
+    let Ok(date) = chrono::NaiveDate::parse_from_str(&query.date, "%Y-%m-%d") else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("Invalid date format '{}', expected YYYY-MM-DD", query.date)})),
+        )
+            .into_response();
+    };
+
+    let params = HealthParams { date };
+
+    match guard.scraper().get_daily_summary(session, &params).await {
+        Ok(summary) => Json(json!(summary)).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to get daily summary: {e}")})),
         )
             .into_response(),
     }

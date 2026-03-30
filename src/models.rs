@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -394,6 +394,95 @@ pub struct ActivityParams {
 }
 
 // ============================================================================
+// Daily Health Summary
+// ============================================================================
+
+/// Daily health and wellness summary scraped from a provider's dashboard page.
+///
+/// All metric fields are optional — providers fill what they can.
+/// The same struct is used across all providers (Garmin, Strava, etc.),
+/// each populating different fields based on available data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailySummary {
+    /// Calendar date for this summary
+    pub date: NaiveDate,
+    /// Source provider name (e.g., "garmin", "strava")
+    pub provider: String,
+
+    // Heart rate
+    /// Resting heart rate (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resting_heart_rate: Option<u32>,
+    /// 7-day average resting heart rate (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_resting_heart_rate_7day: Option<u32>,
+    /// Highest heart rate of the day (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_heart_rate: Option<u32>,
+
+    // Body battery (Garmin-specific, 0-100 scale)
+    /// Current body battery level
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_battery: Option<u32>,
+
+    // Stress (0-100 scale)
+    /// Average stress level
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stress_level: Option<u32>,
+
+    // Steps
+    /// Total steps for the day
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    /// Daily step goal
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_goal: Option<u32>,
+
+    // Intensity minutes
+    /// Weekly intensity minutes accumulated
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intensity_minutes: Option<u32>,
+    /// Weekly intensity minutes goal
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intensity_minutes_goal: Option<u32>,
+
+    // Training status
+    /// VO2 max estimate
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vo2_max: Option<f32>,
+    /// Training load (7-day cumulative)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub training_load: Option<u32>,
+
+    // Sleep (summary from daily view)
+    /// Sleep quality score (0-100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_score: Option<u32>,
+    /// Total sleep duration in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_duration_seconds: Option<u64>,
+
+    // Calories
+    /// Active calories burned
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_calories: Option<u32>,
+    /// Total calories (active + resting)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_calories: Option<u32>,
+}
+
+// ============================================================================
+// Health Query Parameters
+// ============================================================================
+
+/// Parameters for daily health summary queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthParams {
+    /// Calendar date to retrieve health data for
+    pub date: NaiveDate,
+}
+
+// ============================================================================
 // Auth Session
 // ============================================================================
 
@@ -455,6 +544,43 @@ mod tests {
         assert_eq!(SportType::Run.display_name(), "Run");
         assert_eq!(SportType::MountainBike.display_name(), "Mountain Bike");
         assert_eq!(SportType::Other("Foo".to_owned()).display_name(), "Other");
+    }
+
+    #[test]
+    fn daily_summary_serialization() {
+        let summary = DailySummary {
+            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(),
+            provider: "garmin".to_owned(),
+            resting_heart_rate: Some(49),
+            average_resting_heart_rate_7day: Some(52),
+            max_heart_rate: Some(113),
+            body_battery: Some(75),
+            stress_level: Some(19),
+            steps: Some(5156),
+            step_goal: None,
+            intensity_minutes: Some(72),
+            intensity_minutes_goal: None,
+            vo2_max: Some(50.0),
+            training_load: Some(326),
+            sleep_score: None,
+            sleep_duration_seconds: None,
+            active_calories: None,
+            total_calories: None,
+        };
+        let json = serde_json::to_string(&summary).expect("serialize");
+        assert!(json.contains("2026-03-30"));
+        assert!(json.contains(r#""resting_heart_rate":49"#));
+        assert!(!json.contains("sleep_score")); // None fields skipped
+        assert!(!json.contains("step_goal"));
+    }
+
+    #[test]
+    fn health_params_date() {
+        let params = HealthParams {
+            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(),
+        };
+        let json = serde_json::to_string(&params).expect("serialize");
+        assert!(json.contains("2026-03-30"));
     }
 
     #[test]

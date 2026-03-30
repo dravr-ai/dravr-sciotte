@@ -7,6 +7,7 @@
 pub mod activities;
 pub mod auth;
 pub mod cache;
+pub mod health;
 
 use dravr_tronc::mcp::tool::ToolRegistry;
 
@@ -21,5 +22,6 @@ pub fn build_tool_registry() -> ToolRegistry<ServerState> {
     registry.register(Box::new(activities::GetActivityTool));
     registry.register(Box::new(cache::CacheStatusTool));
     registry.register(Box::new(cache::CacheClearTool));
+    registry.register(Box::new(health::GetDailySummaryTool));
     registry
 }

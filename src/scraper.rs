@@ -23,7 +23,9 @@ use crate::browser_utils::{
 use crate::config::LoginMode;
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult};
-use crate::models::{Activity, ActivityParams, AthleteProfile, AuthSession, SportType};
+use crate::models::{
+    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, SportType,
+};
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
@@ -853,6 +855,61 @@ impl ActivityScraper for ChromeScraper {
         );
         Ok(profile)
     }
+
+    async fn get_daily_summary(
+        &self,
+        session: &AuthSession,
+        params: &HealthParams,
+    ) -> ScraperResult<DailySummary> {
+        let health_page =
+            self.provider
+                .health_page
+                .as_ref()
+                .ok_or_else(|| ScraperError::Config {
+                    reason: format!(
+                        "Provider '{}' has no health_page configured",
+                        self.provider.provider.name
+                    ),
+                })?;
+
+        let url = self
+            .provider
+            .health_url(&params.date)
+            .ok_or_else(|| ScraperError::Config {
+                reason: "Failed to build health page URL".to_owned(),
+            })?;
+
+        info!(url = %url, date = %params.date, "Navigating to health summary page");
+        let page = self.open_authenticated_page(session, &url).await?;
+        check_session_redirect(&page, &self.provider).await?;
+
+        // Health dashboards are React SPAs that load data asynchronously —
+        // wait for the JS framework to render the metric cards
+        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs * 2)).await;
+
+        let result = page
+            .evaluate(health_page.js_extract.as_str())
+            .await
+            .map_err(|e| ScraperError::Scraping {
+                reason: format!("Health page JS extraction failed: {e}"),
+            })?;
+
+        let json_str = result
+            .value()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+
+        debug!(raw_json = %json_str, "Health page JS extraction result");
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&json_str).map_err(|e| ScraperError::Scraping {
+                reason: format!("Failed to parse health data JSON: {e}"),
+            })?;
+
+        let summary = build_daily_summary(&raw, params.date, &self.provider.provider.name);
+        info!(date = %params.date, "Daily summary scraped");
+        Ok(summary)
+    }
 }
 
 // ============================================================================
@@ -1294,6 +1351,57 @@ async fn check_session_redirect(
         });
     }
     Ok(())
+}
+
+// ============================================================================
+// Daily summary parsing
+// ============================================================================
+
+/// Extract the first integer from a string like "49 bpm", "5,156", "75/100"
+fn parse_numeric_u32(s: &str) -> Option<u32> {
+    let cleaned: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',' || *c == ' ')
+        .collect();
+    cleaned.replace([',', ' '], "").parse().ok()
+}
+
+/// Extract the first float from a string like "50", "50.5"
+fn parse_numeric_f32(s: &str) -> Option<f32> {
+    let cleaned: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == ',')
+        .collect();
+    cleaned.replace(',', ".").parse().ok()
+}
+
+/// Convert raw JS extraction output into a structured `DailySummary`
+fn build_daily_summary(
+    raw: &serde_json::Value,
+    date: chrono::NaiveDate,
+    provider: &str,
+) -> DailySummary {
+    let str_field = |key| raw[key].as_str().unwrap_or_default();
+
+    DailySummary {
+        date,
+        provider: provider.to_owned(),
+        resting_heart_rate: parse_numeric_u32(str_field("resting_hr")),
+        average_resting_heart_rate_7day: parse_numeric_u32(str_field("avg_hr_7day")),
+        max_heart_rate: parse_numeric_u32(str_field("max_hr")),
+        body_battery: parse_numeric_u32(str_field("body_battery")),
+        stress_level: parse_numeric_u32(str_field("stress")),
+        steps: parse_numeric_u32(str_field("steps")),
+        step_goal: parse_numeric_u32(str_field("step_goal")),
+        intensity_minutes: parse_numeric_u32(str_field("intensity_minutes")),
+        intensity_minutes_goal: parse_numeric_u32(str_field("intensity_goal")),
+        vo2_max: parse_numeric_f32(str_field("vo2_max")),
+        training_load: parse_numeric_u32(str_field("training_load")),
+        sleep_score: parse_numeric_u32(str_field("sleep_score")),
+        sleep_duration_seconds: str_field("sleep_duration").parse().ok(),
+        active_calories: parse_numeric_u32(str_field("active_calories")),
+        total_calories: parse_numeric_u32(str_field("total_calories")),
+    }
 }
 
 // ============================================================================
