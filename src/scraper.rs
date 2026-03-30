@@ -619,7 +619,7 @@ impl ActivityScraper for ChromeScraper {
 
         // Check if we're already on an OTP code entry page
         let current_url = page.url().await.ok().flatten().unwrap_or_default();
-        if OTP_URL_PATTERNS.iter().any(|p| current_url.contains(p)) {
+        if path_contains_any(&current_url, OTP_URL_PATTERNS) {
             info!(url = %current_url, "Already on OTP page after selecting 2FA method");
             *self.pending_login.lock().await = Some((browser, page));
             return Ok(LoginResult::OtpRequired);
@@ -926,6 +926,13 @@ fn url_path_matches(url: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|p| path.contains(p.as_str()))
 }
 
+/// Check if the URL path (excluding query params) contains any of the given patterns.
+/// Prevents false positives from base64 tokens in query strings matching short patterns like "2fa".
+fn path_contains_any(url: &str, patterns: &[&str]) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    patterns.iter().any(|p| path.contains(p))
+}
+
 /// Extracted login selectors from provider config, validated upfront
 #[derive(Debug)]
 struct LoginSelectors<'a> {
@@ -1031,7 +1038,7 @@ async fn poll_for_next_step(
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
-        if OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+        if path_contains_any(&url, OTP_URL_PATTERNS) {
             info!(url = %url, "OTP/2FA page detected during step transition");
             return Ok(StepOutcome::LoginResult(LoginResult::OtpRequired));
         }
@@ -1192,7 +1199,7 @@ async fn poll_credential_login_result(
 
         // Check OTP patterns — only if the URL has changed to a DIFFERENT OTP page.
         // If we're still on the same OTP page we started on, keep waiting for redirect.
-        if url != initial_url && OTP_URL_PATTERNS.iter().any(|p| url.contains(p)) {
+        if url != initial_url && path_contains_any(&url, OTP_URL_PATTERNS) {
             info!(url = %url, "OTP/2FA page detected");
             return Ok(LoginResult::OtpRequired);
         }
