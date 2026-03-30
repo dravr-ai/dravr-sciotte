@@ -213,6 +213,15 @@ js_extract = '''
         else if (key === 'fatigue') data.fatigue = val;
         else if (key === 'form') data.form = val;
     });
+
+    // FTP from the inline form on the fitness page
+    var ftpInput = document.querySelector('input[name="ftp"], input[id*="ftp"]');
+    if (ftpInput && ftpInput.value) data.ftp = ftpInput.value;
+
+    // Weight from the page (may be embedded in JS data)
+    var weightInput = document.querySelector('input[name="weight"], input[id*="weight"]');
+    if (weightInput && weightInput.value) data.weight_kg = weightInput.value;
+
     return JSON.stringify(data);
 })()
 '''

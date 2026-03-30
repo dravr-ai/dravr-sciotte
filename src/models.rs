@@ -491,6 +491,9 @@ pub struct DailySummary {
     pub body_fat_percent: Option<f32>,
 
     // Training load (Strava Fitness & Freshness)
+    /// Functional Threshold Power (watts)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ftp: Option<u32>,
     /// Fitness score (CTL — Chronic Training Load)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fitness_score: Option<u32>,
@@ -611,6 +614,7 @@ mod tests {
             hrv_value: None,
             weight_kg: None,
             body_fat_percent: None,
+            ftp: None,
             fitness_score: None,
             fatigue_score: None,
             form_score: None,

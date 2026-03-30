@@ -235,14 +235,5 @@ async fn explore_strava_wellness_pages() {
         probe_page(&browser, &session, name, url).await;
     }
 
-    // Check what training links exist from dashboard
-    eprintln!("\n== TRAINING LINKS FROM DASHBOARD ==");
-    let dash_page = open_page(&browser, &session, "https://www.strava.com/dashboard", 5).await;
-    let links = eval_js(&dash_page, r#"JSON.stringify(
-        Array.from(document.querySelectorAll('a[href*="training"], a[href*="fitness"], a[href*="log"]'))
-            .map(function(a) { return {href: a.href, text: a.textContent.trim().substring(0, 60)}; })
-    )"#).await;
-    eprintln!("  Links: {links}");
-
     eprintln!("\nDone. Screenshots at /tmp/sciotte-strava-*.png");
 }

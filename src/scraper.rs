@@ -1389,6 +1389,7 @@ fn empty_daily_summary(date: chrono::NaiveDate, provider: &str) -> DailySummary 
         hrv_value: None,
         weight_kg: None,
         body_fat_percent: None,
+        ftp: None,
         fitness_score: None,
         fatigue_score: None,
         form_score: None,
@@ -1465,6 +1466,7 @@ fn merge_health_data(summary: &mut DailySummary, raw: &serde_json::Value) {
     set_f32(&mut summary.body_fat_percent, "body_fat_percent");
 
     // Training load (Strava Fitness & Freshness)
+    set_u32(&mut summary.ftp, "ftp");
     set_u32(&mut summary.fitness_score, "fitness");
     set_u32(&mut summary.fatigue_score, "fatigue");
     if summary.form_score.is_none() {
