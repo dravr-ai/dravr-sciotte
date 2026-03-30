@@ -358,25 +358,15 @@ async fn poll_for_login(
 }
 
 // ============================================================================
-// Credential Login (Flow 1 — no streaming, delegates to core library)
+// Login result → HTTP response helper
 // ============================================================================
 
-/// POST /auth/login-with-credentials handler.
-///
-/// Delegates to the core library's `credential_login()` which launches headless Chrome,
-/// fills email/password via JS, submits the form, and polls for login success.
-pub async fn credential_login(
-    State(state): State<SharedState>,
-    Json(request): Json<CredentialLoginRequest>,
-) -> impl IntoResponse {
-    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
-        let guard = state.read().await;
-        guard
-            .scraper()
-            .credential_login(&request.email, &request.password, &request.method)
-            .await
-    };
-
+/// Convert a login result into an HTTP response, saving the session on success.
+async fn handle_login_result(
+    result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult>,
+    state: &SharedState,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     match result {
         Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
             if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
@@ -385,8 +375,7 @@ pub async fn credential_login(
             let session_id = session.session_id.clone();
             let cookie_count = session.cookies.len();
             state.write().await.add_session(session);
-
-            info!(session_id = %session_id, "Credential login successful");
+            info!(session_id = %session_id, "Login successful");
             Json(json!({
                 "status": "authenticated",
                 "session_id": session_id,
@@ -395,7 +384,7 @@ pub async fn credential_login(
             .into_response()
         }
         Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
-            info!("Credential login requires OTP/2FA code");
+            info!("OTP/2FA code required");
             Json(json!({
                 "status": "otp_required",
                 "reason": "Provider requires a one-time password or 2FA verification",
@@ -419,28 +408,70 @@ pub async fn credential_login(
             .into_response()
         }
         Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
-            warn!(reason = %reason, "Credential login rejected");
+            warn!(reason = %reason, "Login rejected");
             (
                 axum::http::StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "failed",
-                    "reason": reason,
-                })),
+                Json(json!({ "status": "failed", "reason": reason })),
             )
                 .into_response()
         }
         Err(e) => {
-            error!(error = %e, "Credential login error");
+            error!(error = %e, "Login error");
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "reason": e.to_string(),
-                })),
+                Json(json!({ "status": "error", "reason": e.to_string() })),
             )
                 .into_response()
         }
     }
+}
+
+// ============================================================================
+// Credential Login (Flow 1 — no streaming, delegates to core library)
+// ============================================================================
+
+/// POST /auth/login-with-credentials handler.
+///
+/// Delegates to the core library's `credential_login()` which launches headless Chrome,
+/// fills email/password via JS, submits the form, and polls for login success.
+pub async fn credential_login(
+    State(state): State<SharedState>,
+    Json(request): Json<CredentialLoginRequest>,
+) -> impl IntoResponse {
+    let result = {
+        let guard = state.read().await;
+        guard
+            .scraper()
+            .credential_login(&request.email, &request.password, &request.method)
+            .await
+    };
+
+    // Auto-orchestrate 2FA: select preferred method → poll for phone tap
+    if let Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(ref options)) = result {
+        let preferred = options
+            .iter()
+            .find(|o| o.id == "app")
+            .or_else(|| options.first());
+        if let Some(opt) = preferred {
+            info!(id = %opt.id, label = %opt.label, "Auto-selecting 2FA method");
+            let step = {
+                let guard = state.read().await;
+                guard.scraper().select_two_factor(&opt.id).await
+            };
+            // If phone tap → auto-poll for approval
+            if matches!(step, Ok(dravr_sciotte::error::LoginResult::NumberMatch(_))) {
+                info!("Phone tap required — polling for approval");
+                let poll = {
+                    let guard = state.read().await;
+                    guard.scraper().select_two_factor("poll").await
+                };
+                return handle_login_result(poll, &state).await;
+            }
+            return handle_login_result(step, &state).await;
+        }
+    }
+
+    handle_login_result(result, &state).await
 }
 
 /// POST /auth/submit-otp handler.

@@ -310,13 +310,12 @@ async fn google_oauth_2fa_number_match() {
     let provider = fake_strava_google_provider(&base);
     let scraper = ChromeScraper::new(test_config(), provider);
 
-    // Step 1: Google OAuth login with 2FA password
+    // Step 1: Login — should return TwoFactorChoice (2FA options on challenge page)
     let result = scraper
         .credential_login("test@example.com", "2fa-password", "google")
         .await
         .unwrap();
 
-    // Should get TwoFactorChoice (the challenge-selection page has options)
     assert!(
         matches!(result, LoginResult::TwoFactorChoice(ref opts) if !opts.is_empty()),
         "Expected TwoFactorChoice, got {result:?}"
@@ -325,7 +324,7 @@ async fn google_oauth_2fa_number_match() {
     // Step 2: Select "app" (phone tap) — should show number match
     let result = scraper.select_two_factor("app").await.unwrap();
 
-    // Should get NumberMatch("78") or Success (if number detection works)
+    // Should get NumberMatch("78") or Success (if auto-redirect was fast)
     match &result {
         LoginResult::NumberMatch(number) => {
             assert_eq!(number, "78", "Expected number 78, got {number}");

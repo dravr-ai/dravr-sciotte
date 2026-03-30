@@ -1101,19 +1101,6 @@ async fn parse_two_fa_options(page: &chromiumoxide::Page) -> Vec<TwoFactorOption
     serde_json::from_str(&json_str).unwrap_or_default()
 }
 
-/// Convert parsed 2FA options to the public `TwoFactorOption` type
-fn two_fa_options_to_choices(
-    options: Vec<TwoFactorOptionWithCoords>,
-) -> Vec<crate::error::TwoFactorOption> {
-    options
-        .into_iter()
-        .map(|o| crate::error::TwoFactorOption {
-            id: o.id,
-            label: o.label,
-        })
-        .collect()
-}
-
 /// CDP-click a 2FA option by its id, using stored coordinates
 async fn cdp_click_two_fa_option(page: &chromiumoxide::Page, option_id: &str) -> bool {
     let options = parse_two_fa_options(page).await;
@@ -1243,8 +1230,14 @@ async fn poll_credential_login_result(
             tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
             let options = parse_two_fa_options(page).await;
             if !options.is_empty() {
-                // Real 2FA options found (Authenticator, phone tap, SMS)
-                let choices = two_fa_options_to_choices(options);
+                // Real 2FA options found — return to caller for orchestration
+                let choices: Vec<crate::error::TwoFactorOption> = options
+                    .into_iter()
+                    .map(|o| crate::error::TwoFactorOption {
+                        id: o.id,
+                        label: o.label,
+                    })
+                    .collect();
                 return Ok(LoginResult::TwoFactorChoice(choices));
             }
             // No 2FA options — this is the sign-in method chooser page.
@@ -2143,31 +2136,6 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("login_button_selector"));
-    }
-
-    #[test]
-    fn two_fa_options_to_choices_converts_correctly() {
-        let options = vec![
-            TwoFactorOptionWithCoords {
-                id: "otp".to_owned(),
-                label: "Google Authenticator".to_owned(),
-                x: 100.0,
-                y: 200.0,
-            },
-            TwoFactorOptionWithCoords {
-                id: "app".to_owned(),
-                label: "Tap Yes on your phone".to_owned(),
-                x: 100.0,
-                y: 300.0,
-            },
-        ];
-
-        let choices = two_fa_options_to_choices(options);
-        assert_eq!(choices.len(), 2);
-        assert_eq!(choices[0].id, "otp");
-        assert_eq!(choices[0].label, "Google Authenticator");
-        assert_eq!(choices[1].id, "app");
-        assert_eq!(choices[1].label, "Tap Yes on your phone");
     }
 
     #[test]
