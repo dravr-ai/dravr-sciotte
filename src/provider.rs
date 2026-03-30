@@ -19,9 +19,10 @@ pub struct ProviderConfig {
     pub list_page: ListPageConfig,
     /// Detail page for a single activity with full metrics
     pub detail_page: DetailPageConfig,
-    /// Health/wellness daily summary page (optional — not all providers have one)
+    /// Health/wellness pages keyed by name (e.g., "sleep", "weight").
+    /// Each page contributes fields to a single `DailySummary` via JS extraction.
     #[serde(default)]
-    pub health_page: Option<HealthPageConfig>,
+    pub health_pages: HashMap<String, HealthPageConfig>,
 }
 
 /// Configuration for a daily health/wellness summary page
@@ -147,13 +148,23 @@ impl ProviderConfig {
         self.detail_page.url_template.replace("{id}", activity_id)
     }
 
-    /// Build the health page URL for a given date, if the provider has a health page
-    pub fn health_url(&self, date: &chrono::NaiveDate) -> Option<String> {
+    /// Build URLs for all configured health pages, substituting the date placeholder.
+    /// Returns (name, url) pairs sorted alphabetically by name.
+    pub fn health_urls(&self, date: &chrono::NaiveDate) -> Vec<(&str, String)> {
         const DATE_PLACEHOLDER: &str = "{date}";
-        self.health_page.as_ref().map(|hp| {
-            hp.url_template
-                .replace(DATE_PLACEHOLDER, &date.format("%Y-%m-%d").to_string())
-        })
+        let formatted = date.format("%Y-%m-%d").to_string();
+        let mut pages: Vec<(&str, String)> = self
+            .health_pages
+            .iter()
+            .map(|(name, hp)| {
+                (
+                    name.as_str(),
+                    hp.url_template.replace(DATE_PLACEHOLDER, &formatted),
+                )
+            })
+            .collect();
+        pages.sort_by_key(|(name, _)| *name);
+        pages
     }
 
     /// Generate the JS snippet for extracting activities from the list page.
@@ -268,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn health_url_substitution() {
+    fn health_urls_substitution() {
         let config = ProviderConfig::from_toml(
             r#"
 [provider]
@@ -294,24 +305,32 @@ elevation = "td"
 url_template = "http://example.com/activity/{id}"
 js_extract = '(function() { return "{}"; })()'
 
-[health_page]
+[health_pages.daily_summary]
 url_template = "http://example.com/daily-summary/{date}"
+js_extract = '(function() { return "{}"; })()'
+
+[health_pages.sleep]
+url_template = "http://example.com/sleep/{date}"
 js_extract = '(function() { return "{}"; })()'
 "#,
         )
         .unwrap();
         let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 30).unwrap();
-        let url = config.health_url(&date);
-        assert_eq!(url.unwrap(), "http://example.com/daily-summary/2026-03-30");
+        let urls = config.health_urls(&date);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].0, "daily_summary");
+        assert_eq!(urls[0].1, "http://example.com/daily-summary/2026-03-30");
+        assert_eq!(urls[1].0, "sleep");
+        assert_eq!(urls[1].1, "http://example.com/sleep/2026-03-30");
     }
 
     #[test]
-    fn health_page_optional() {
+    fn health_pages_empty_when_not_configured() {
         let config = ProviderConfig::strava_default();
-        assert!(config.health_page.is_none());
+        assert!(config.health_pages.is_empty());
         assert!(config
-            .health_url(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
-            .is_none());
+            .health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            .is_empty());
     }
 
     #[test]

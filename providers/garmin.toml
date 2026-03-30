@@ -134,7 +134,7 @@ js_extract = '''
 '''
 
 # Daily health/wellness summary — uses card-based DOM on Garmin Connect
-[health_page]
+[health_pages.daily_summary]
 url_template = "https://connect.garmin.com/app/daily-summary/{date}"
 js_extract = '''
 (function() {
@@ -201,6 +201,36 @@ js_extract = '''
             else if (b.label.includes("charge") || b.label.includes("load")) data.training_load = b.value;
         });
     }
+
+    return JSON.stringify(data);
+})()
+'''
+
+# Sleep page — extracts sleep score, duration, and stage breakdown
+[health_pages.sleep]
+url_template = "https://connect.garmin.com/app/sleep/{date}"
+js_extract = '''
+(function() {
+    var data = {};
+
+    // Sleep score (prominent number on the page)
+    var scoreEl = document.querySelector('[class*="sleepScore"], [class*="SleepScore"], [class*="Score"]');
+    if (scoreEl) data.sleep_score = scoreEl.textContent.trim();
+
+    // Total sleep duration
+    var durationEl = document.querySelector('[class*="sleepDuration"], [class*="totalSleep"], [class*="SleepDuration"]');
+    if (durationEl) data.sleep_duration = durationEl.textContent.trim();
+
+    // Sleep stages — look for label/value pairs (French + English)
+    var allText = document.body.textContent;
+    var deepMatch = allText.match(/(?:profond|deep)\s*[:\-]?\s*(\d+\s*h?\s*\d*\s*min?)/i);
+    if (deepMatch) data.sleep_deep = deepMatch[1].trim();
+    var lightMatch = allText.match(/(?:l.ger|light)\s*[:\-]?\s*(\d+\s*h?\s*\d*\s*min?)/i);
+    if (lightMatch) data.sleep_light = lightMatch[1].trim();
+    var remMatch = allText.match(/(?:rem|paradoxal)\s*[:\-]?\s*(\d+\s*h?\s*\d*\s*min?)/i);
+    if (remMatch) data.sleep_rem = remMatch[1].trim();
+    var awakeMatch = allText.match(/(?:.veill.|awake)\s*[:\-]?\s*(\d+\s*h?\s*\d*\s*min?)/i);
+    if (awakeMatch) data.sleep_awake = awakeMatch[1].trim();
 
     return JSON.stringify(data);
 })()

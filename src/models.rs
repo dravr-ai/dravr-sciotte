@@ -454,13 +454,41 @@ pub struct DailySummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub training_load: Option<u32>,
 
-    // Sleep (summary from daily view)
+    // Sleep
     /// Sleep quality score (0-100)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sleep_score: Option<u32>,
     /// Total sleep duration in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sleep_duration_seconds: Option<u64>,
+    /// Deep sleep duration in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_deep_seconds: Option<u64>,
+    /// Light sleep duration in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_light_seconds: Option<u64>,
+    /// REM sleep duration in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_rem_seconds: Option<u64>,
+    /// Awake duration in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sleep_awake_seconds: Option<u64>,
+
+    // HRV (Heart Rate Variability)
+    /// HRV status label (e.g., "Balanced", "Low", "Unbalanced")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hrv_status: Option<String>,
+    /// HRV value in milliseconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hrv_value: Option<u32>,
+
+    // Body composition
+    /// Body weight in kilograms
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub weight_kg: Option<f32>,
+    /// Body fat percentage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_fat_percent: Option<f32>,
 
     // Calories
     /// Active calories burned
@@ -564,6 +592,14 @@ mod tests {
             training_load: Some(326),
             sleep_score: None,
             sleep_duration_seconds: None,
+            sleep_deep_seconds: None,
+            sleep_light_seconds: None,
+            sleep_rem_seconds: None,
+            sleep_awake_seconds: None,
+            hrv_status: None,
+            hrv_value: None,
+            weight_kg: None,
+            body_fat_percent: None,
             active_calories: None,
             total_calories: None,
         };

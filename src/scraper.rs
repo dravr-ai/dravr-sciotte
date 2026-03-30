@@ -861,53 +861,41 @@ impl ActivityScraper for ChromeScraper {
         session: &AuthSession,
         params: &HealthParams,
     ) -> ScraperResult<DailySummary> {
-        let health_page =
-            self.provider
-                .health_page
-                .as_ref()
-                .ok_or_else(|| ScraperError::Config {
-                    reason: format!(
-                        "Provider '{}' has no health_page configured",
-                        self.provider.provider.name
-                    ),
-                })?;
+        if self.provider.health_pages.is_empty() {
+            return Err(ScraperError::Config {
+                reason: format!(
+                    "Provider '{}' has no health_pages configured",
+                    self.provider.provider.name
+                ),
+            });
+        }
 
-        let url = self
-            .provider
-            .health_url(&params.date)
-            .ok_or_else(|| ScraperError::Config {
-                reason: "Failed to build health page URL".to_owned(),
-            })?;
+        let pages = self.provider.health_urls(&params.date);
+        let mut summary = empty_daily_summary(params.date, &self.provider.provider.name);
 
-        info!(url = %url, date = %params.date, "Navigating to health summary page");
-        let page = self.open_authenticated_page(session, &url).await?;
-        check_session_redirect(&page, &self.provider).await?;
+        for (page_name, url) in &pages {
+            info!(url = %url, page = %page_name, date = %params.date, "Navigating to health page");
+            let page = self.open_authenticated_page(session, url).await?;
+            check_session_redirect(&page, &self.provider).await?;
 
-        // Health dashboards are React SPAs that load data asynchronously —
-        // wait for the JS framework to render the metric cards
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs * 2)).await;
+            // Health dashboards are React SPAs — wait for async rendering
+            tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs * 2)).await;
 
-        let result = page
-            .evaluate(health_page.js_extract.as_str())
-            .await
-            .map_err(|e| ScraperError::Scraping {
-                reason: format!("Health page JS extraction failed: {e}"),
-            })?;
+            let js = &self.provider.health_pages[*page_name].js_extract;
+            match extract_health_json(&page, js).await {
+                Ok(raw) => {
+                    debug!(page = %page_name, raw_json = %raw, "Health page extraction result");
+                    let parsed: serde_json::Value = serde_json::from_str(&raw)
+                        .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+                    merge_health_data(&mut summary, &parsed);
+                }
+                Err(e) => {
+                    warn!(page = %page_name, error = %e, "Health page extraction failed, skipping");
+                }
+            }
+        }
 
-        let json_str = result
-            .value()
-            .and_then(|v| v.as_str().map(String::from))
-            .unwrap_or_default();
-
-        debug!(raw_json = %json_str, "Health page JS extraction result");
-
-        let raw: serde_json::Value =
-            serde_json::from_str(&json_str).map_err(|e| ScraperError::Scraping {
-                reason: format!("Failed to parse health data JSON: {e}"),
-            })?;
-
-        let summary = build_daily_summary(&raw, params.date, &self.provider.provider.name);
-        info!(date = %params.date, "Daily summary scraped");
+        info!(date = %params.date, pages = pages.len(), "Daily summary scraped");
         Ok(summary)
     }
 }
@@ -1375,33 +1363,142 @@ fn parse_numeric_f32(s: &str) -> Option<f32> {
     cleaned.replace(',', ".").parse().ok()
 }
 
-/// Convert raw JS extraction output into a structured `DailySummary`
-fn build_daily_summary(
-    raw: &serde_json::Value,
-    date: chrono::NaiveDate,
-    provider: &str,
-) -> DailySummary {
-    let str_field = |key| raw[key].as_str().unwrap_or_default();
-
+/// Create an empty `DailySummary` with only date and provider set
+fn empty_daily_summary(date: chrono::NaiveDate, provider: &str) -> DailySummary {
     DailySummary {
         date,
         provider: provider.to_owned(),
-        resting_heart_rate: parse_numeric_u32(str_field("resting_hr")),
-        average_resting_heart_rate_7day: parse_numeric_u32(str_field("avg_hr_7day")),
-        max_heart_rate: parse_numeric_u32(str_field("max_hr")),
-        body_battery: parse_numeric_u32(str_field("body_battery")),
-        stress_level: parse_numeric_u32(str_field("stress")),
-        steps: parse_numeric_u32(str_field("steps")),
-        step_goal: parse_numeric_u32(str_field("step_goal")),
-        intensity_minutes: parse_numeric_u32(str_field("intensity_minutes")),
-        intensity_minutes_goal: parse_numeric_u32(str_field("intensity_goal")),
-        vo2_max: parse_numeric_f32(str_field("vo2_max")),
-        training_load: parse_numeric_u32(str_field("training_load")),
-        sleep_score: parse_numeric_u32(str_field("sleep_score")),
-        sleep_duration_seconds: str_field("sleep_duration").parse().ok(),
-        active_calories: parse_numeric_u32(str_field("active_calories")),
-        total_calories: parse_numeric_u32(str_field("total_calories")),
+        resting_heart_rate: None,
+        average_resting_heart_rate_7day: None,
+        max_heart_rate: None,
+        body_battery: None,
+        stress_level: None,
+        steps: None,
+        step_goal: None,
+        intensity_minutes: None,
+        intensity_minutes_goal: None,
+        vo2_max: None,
+        training_load: None,
+        sleep_score: None,
+        sleep_duration_seconds: None,
+        sleep_deep_seconds: None,
+        sleep_light_seconds: None,
+        sleep_rem_seconds: None,
+        sleep_awake_seconds: None,
+        hrv_status: None,
+        hrv_value: None,
+        weight_kg: None,
+        body_fat_percent: None,
+        active_calories: None,
+        total_calories: None,
     }
+}
+
+/// Merge raw JSON health data into an existing `DailySummary`.
+/// Only fills fields that are still `None` — earlier pages take priority.
+fn merge_health_data(summary: &mut DailySummary, raw: &serde_json::Value) {
+    let s = |key| raw[key].as_str().unwrap_or_default();
+    let set_u32 = |field: &mut Option<u32>, key| {
+        if field.is_none() {
+            *field = parse_numeric_u32(s(key));
+        }
+    };
+    let set_f32 = |field: &mut Option<f32>, key| {
+        if field.is_none() {
+            *field = parse_numeric_f32(s(key));
+        }
+    };
+
+    // Heart rate
+    set_u32(&mut summary.resting_heart_rate, "resting_hr");
+    set_u32(&mut summary.average_resting_heart_rate_7day, "avg_hr_7day");
+    set_u32(&mut summary.max_heart_rate, "max_hr");
+
+    // Body metrics
+    set_u32(&mut summary.body_battery, "body_battery");
+    set_u32(&mut summary.stress_level, "stress");
+
+    // Steps
+    set_u32(&mut summary.steps, "steps");
+    set_u32(&mut summary.step_goal, "step_goal");
+
+    // Intensity
+    set_u32(&mut summary.intensity_minutes, "intensity_minutes");
+    set_u32(&mut summary.intensity_minutes_goal, "intensity_goal");
+
+    // Training
+    set_f32(&mut summary.vo2_max, "vo2_max");
+    set_u32(&mut summary.training_load, "training_load");
+
+    // Sleep
+    set_u32(&mut summary.sleep_score, "sleep_score");
+    if summary.sleep_duration_seconds.is_none() {
+        summary.sleep_duration_seconds = s("sleep_duration").parse().ok();
+    }
+    if summary.sleep_deep_seconds.is_none() {
+        summary.sleep_deep_seconds = parse_duration_to_seconds(s("sleep_deep"));
+    }
+    if summary.sleep_light_seconds.is_none() {
+        summary.sleep_light_seconds = parse_duration_to_seconds(s("sleep_light"));
+    }
+    if summary.sleep_rem_seconds.is_none() {
+        summary.sleep_rem_seconds = parse_duration_to_seconds(s("sleep_rem"));
+    }
+    if summary.sleep_awake_seconds.is_none() {
+        summary.sleep_awake_seconds = parse_duration_to_seconds(s("sleep_awake"));
+    }
+
+    // HRV
+    if summary.hrv_status.is_none() {
+        let v = s("hrv_status");
+        if !v.is_empty() {
+            summary.hrv_status = Some(v.to_owned());
+        }
+    }
+    set_u32(&mut summary.hrv_value, "hrv_value");
+
+    // Body composition
+    set_f32(&mut summary.weight_kg, "weight_kg");
+    set_f32(&mut summary.body_fat_percent, "body_fat_percent");
+
+    // Calories
+    set_u32(&mut summary.active_calories, "active_calories");
+    set_u32(&mut summary.total_calories, "total_calories");
+}
+
+/// Parse a duration string like "1h 23min", "45 min", "2h" into seconds
+fn parse_duration_to_seconds(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    if let Some(caps) = s.find('h') {
+        total += s[..caps].trim().parse::<u64>().unwrap_or(0) * 3600;
+    }
+    // Look for minutes after 'h' or standalone
+    let min_part = s.split('h').next_back().unwrap_or(s);
+    if let Some(m) = min_part.find('m') {
+        total += min_part[..m].trim().parse::<u64>().unwrap_or(0) * 60;
+    }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
+}
+
+/// Execute a JS snippet on a health page and return the raw JSON string
+async fn extract_health_json(page: &chromiumoxide::Page, js: &str) -> ScraperResult<String> {
+    let result = page
+        .evaluate(js)
+        .await
+        .map_err(|e| ScraperError::Scraping {
+            reason: format!("Health JS evaluation failed: {e}"),
+        })?;
+    Ok(result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default())
 }
 
 // ============================================================================
