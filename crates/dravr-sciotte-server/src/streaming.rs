@@ -446,12 +446,15 @@ pub async fn credential_login(
             .await
     };
 
-    // Auto-orchestrate 2FA: select preferred method → poll for phone tap
+    // Auto-orchestrate 2FA: try methods in priority order (app → otp → first available)
     if let Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(ref options)) = result {
-        let preferred = options
+        // Priority: "app" (phone tap) > "otp" (authenticator) > first available
+        let priority = ["app", "otp"];
+        let preferred = priority
             .iter()
-            .find(|o| o.id == "app")
+            .find_map(|id| options.iter().find(|o| o.id == *id))
             .or_else(|| options.first());
+
         if let Some(opt) = preferred {
             info!(id = %opt.id, label = %opt.label, "Auto-selecting 2FA method");
             let step = {
@@ -467,6 +470,7 @@ pub async fn credential_login(
                 };
                 return handle_login_result(poll, &state).await;
             }
+            // If OTP required → return to caller (they need to provide the code)
             return handle_login_result(step, &state).await;
         }
     }
