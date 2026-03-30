@@ -194,3 +194,25 @@ js_extract = '''
 })()
 '''
 vision_prompt = "providers/strava/detail_page.md"
+
+# Fitness & Freshness page — shows current fitness, fatigue, and form scores
+# No date parameter — always shows current values
+[health_pages.fitness]
+url_template = "https://www.strava.com/athlete/fitness"
+js_extract = '''
+(function() {
+    var data = {};
+    var stats = document.querySelectorAll('div.stat');
+    stats.forEach(function(stat) {
+        var label = stat.querySelector('p.data-label');
+        var value = stat.querySelector('div.stat-text.current-fitness-values');
+        if (!label || !value) return;
+        var key = label.textContent.trim().toLowerCase();
+        var val = value.textContent.trim();
+        if (key === 'fitness') data.fitness = val;
+        else if (key === 'fatigue') data.fatigue = val;
+        else if (key === 'form') data.form = val;
+    });
+    return JSON.stringify(data);
+})()
+'''

@@ -490,6 +490,17 @@ pub struct DailySummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_fat_percent: Option<f32>,
 
+    // Training load (Strava Fitness & Freshness)
+    /// Fitness score (CTL — Chronic Training Load)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fitness_score: Option<u32>,
+    /// Fatigue score (ATL — Acute Training Load)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fatigue_score: Option<u32>,
+    /// Form score (TSB — Training Stress Balance)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form_score: Option<i32>,
+
     // Calories
     /// Active calories burned
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -600,6 +611,9 @@ mod tests {
             hrv_value: None,
             weight_kg: None,
             body_fat_percent: None,
+            fitness_score: None,
+            fatigue_score: None,
+            form_score: None,
             active_calories: None,
             total_calories: None,
         };

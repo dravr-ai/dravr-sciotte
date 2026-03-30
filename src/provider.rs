@@ -325,12 +325,12 @@ js_extract = '(function() { return "{}"; })()'
     }
 
     #[test]
-    fn health_pages_empty_when_not_configured() {
+    fn strava_has_fitness_health_page() {
         let config = ProviderConfig::strava_default();
-        assert!(config.health_pages.is_empty());
-        assert!(config
-            .health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
-            .is_empty());
+        assert!(config.health_pages.contains_key("fitness"));
+        let urls = config.health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        assert!(!urls.is_empty());
+        assert!(urls[0].1.contains("fitness"));
     }
 
     #[test]
