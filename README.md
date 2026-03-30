@@ -55,7 +55,7 @@ docker run -p 3000:3000 ghcr.io/dravr-ai/dravr-sciotte
 
 ```toml
 [dependencies]
-dravr-sciotte = "0.4"
+dravr-sciotte = "0.5"
 ```
 
 ## Quick Start
@@ -238,7 +238,7 @@ Vision mode requires the `vision` Cargo feature and an embacle `LlmProvider` (Co
 
 ```toml
 [dependencies]
-dravr-sciotte = { version = "0.4", features = ["vision"] }
+dravr-sciotte = { version = "0.5", features = ["vision"] }
 ```
 
 ```rust
@@ -413,7 +413,7 @@ For Claude Code, add the same configuration to your MCP settings.
 
 ```toml
 [dependencies]
-dravr-sciotte = "0.4"
+dravr-sciotte = "0.5"
 ```
 
 ### Browser login

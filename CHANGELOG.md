@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0] — 2026-03-30
+
+### Added
+
+- feat(health): add FTP field to DailySummary, attempt weight/FTP extraction from Strava fitness page
+- feat(health): add Strava Fitness & Freshness extraction with fitness/fatigue/form scores New DailySummary fields and health_pages.fitness config for Strava provider
+- feat(auth): auto-orchestrate Google 2FA selection at server level Server auto-selects preferred 2FA method and polls for phone tap, scraper returns TwoFactorChoice unchanged
+- feat(health): support multiple health pages per provider with merge Adds sleep/HRV/weight fields to DailySummary, loops all configured health_pages and merges results
+- feat(health): add provider-agnostic daily health summary extraction REST, MCP, and cache support for HR, body battery, stress, steps, VO2 max from Garmin Connect
+
+### Fixed
+
+- fix(auth): OTP false positive from base64 tokens in Google URLs, interactive login scripts Strip query params before matching OTP_URL_PATTERNS; rewrite login scripts with full 2FA flow
+- fix(auth): 2FA method selection with priority fallback (app → otp → first) Handles users without Google app by falling back to authenticator code
+
+
+
 ## [0.4.4] — 2026-03-26
 
 ### Fixed
