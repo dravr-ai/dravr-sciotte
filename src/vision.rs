@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn parse_vision_activity_minimal() {
         let v = serde_json::json!({"id": "123", "name": "Run", "type": "Run"});
-        let activity = parse_vision_activity(&v).unwrap();
+        let activity = parse_vision_activity(&v).unwrap(); // Safe: test with valid JSON fields
         assert_eq!(activity.id, "123");
         assert_eq!(activity.name, "Run");
     }
@@ -1005,7 +1005,7 @@ mod tests {
             "error_message": null,
             "two_factor_options": []
         }"#;
-        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap(); // Safe: test with valid JSON
         assert_eq!(analysis.page_type, "oauth_email");
         assert_eq!(analysis.actions.len(), 2);
         assert!(analysis.find_fill_action().is_some());
@@ -1021,10 +1021,10 @@ mod tests {
                 {"type": "click", "label": "Use passkey", "x": 300, "y": 400}
             ]
         }"#;
-        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap(); // Safe: test with valid JSON
         let action = analysis.find_action_by_label("another way");
         assert!(action.is_some());
-        assert!((action.unwrap().y - 500.0).abs() < 0.1);
+        assert!((action.unwrap().y - 500.0).abs() < 0.1); // Safe: guarded by is_some assert above
     }
 
     #[test]
@@ -1037,7 +1037,7 @@ mod tests {
                 {"id": "app", "label": "Tap Yes on phone", "x": 100, "y": 300}
             ]
         }"#;
-        let analysis: PageAnalysis = serde_json::from_str(json).unwrap();
+        let analysis: PageAnalysis = serde_json::from_str(json).unwrap(); // Safe: test with valid JSON
         assert_eq!(analysis.two_factor_options.len(), 2);
         assert_eq!(analysis.two_factor_options[0].id, "otp");
     }

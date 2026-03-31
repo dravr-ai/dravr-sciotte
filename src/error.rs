@@ -165,7 +165,7 @@ mod tests {
             id: "sms".to_owned(),
             label: "Text message".to_owned(),
         };
-        let json = serde_json::to_string(&opt).unwrap();
+        let json = serde_json::to_string(&opt).unwrap(); // Safe: test with simple struct
         assert!(json.contains("sms"));
         assert!(json.contains("Text message"));
     }

@@ -2011,22 +2011,22 @@ mod tests {
 
     #[test]
     fn parse_distance() {
-        let d = parse_distance_string("5.2 km").unwrap();
+        let d = parse_distance_string("5.2 km").unwrap(); // Safe: test with valid distance string
         assert!((d - 5200.0).abs() < 1.0);
 
-        let d = parse_distance_string("3.1 mi").unwrap();
+        let d = parse_distance_string("3.1 mi").unwrap(); // Safe: test with valid distance string
         assert!((d - 4988.967).abs() < 1.0);
 
-        let d = parse_distance_string("800m").unwrap();
+        let d = parse_distance_string("800m").unwrap(); // Safe: test with valid distance string
         assert!((d - 800.0).abs() < 1.0);
     }
 
     #[test]
     fn parse_speed() {
-        let s = parse_speed_string("10 km/h").unwrap();
+        let s = parse_speed_string("10 km/h").unwrap(); // Safe: test with valid speed string
         assert!((s - 2.7778).abs() < 0.01);
 
-        let s = parse_speed_string("6.2 mph").unwrap();
+        let s = parse_speed_string("6.2 mph").unwrap(); // Safe: test with valid speed string
         assert!((s - 2.7716).abs() < 0.01);
     }
 
@@ -2124,7 +2124,7 @@ mod tests {
     #[test]
     fn login_selectors_from_valid_provider() {
         let provider = ProviderConfig::strava_default();
-        let selectors = LoginSelectors::from_provider(&provider).unwrap();
+        let selectors = LoginSelectors::from_provider(&provider).unwrap(); // Safe: test with valid default provider
         assert!(!selectors.email.is_empty());
         assert!(!selectors.password.is_empty());
         assert!(!selectors.button.is_empty());
@@ -2166,7 +2166,7 @@ mod tests {
             {"id": "otp", "label": "Get a verification code", "x": 150.5, "y": 250.0},
             {"id": "sms", "label": "Text message to (•••) ••••-53", "x": 150.5, "y": 350.0}
         ]"#;
-        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str(json).unwrap();
+        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str(json).unwrap(); // Safe: test with valid JSON
         assert_eq!(options.len(), 2);
         assert_eq!(options[0].id, "otp");
         assert!((options[0].x - 150.5).abs() < 0.01);
@@ -2175,7 +2175,7 @@ mod tests {
 
     #[test]
     fn two_fa_option_with_coords_empty_json() {
-        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str("[]").unwrap();
+        let options: Vec<TwoFactorOptionWithCoords> = serde_json::from_str("[]").unwrap(); // Safe: test with valid empty JSON array
         assert!(options.is_empty());
     }
 
@@ -2185,7 +2185,7 @@ mod tests {
             id: "otp".to_owned(),
             label: "Google Authenticator".to_owned(),
         };
-        let json = serde_json::to_string(&option).unwrap();
+        let json = serde_json::to_string(&option).unwrap(); // Safe: test with serializable struct
         assert!(json.contains(r#""id":"otp""#));
         assert!(json.contains(r#""label":"Google Authenticator""#));
     }

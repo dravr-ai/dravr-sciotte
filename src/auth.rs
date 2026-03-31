@@ -190,13 +190,13 @@ mod tests {
     fn encrypt_decrypt_round_trip() {
         let rng = SystemRandom::new();
         let mut key_bytes = vec![0u8; 32];
-        rng.fill(&mut key_bytes).unwrap();
-        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap();
+        rng.fill(&mut key_bytes).unwrap(); // Safe: test with valid buffer
+        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap(); // Safe: test with valid key size
         let key = aead::LessSafeKey::new(unbound);
 
         let plaintext = b"hello strava session data";
-        let encrypted = encrypt(&key, plaintext).unwrap();
-        let decrypted = decrypt(&key, &encrypted).unwrap();
+        let encrypted = encrypt(&key, plaintext).unwrap(); // Safe: test with valid key and plaintext
+        let decrypted = decrypt(&key, &encrypted).unwrap(); // Safe: test decrypting just-encrypted data
         assert_eq!(decrypted, plaintext);
     }
 
@@ -204,8 +204,8 @@ mod tests {
     fn decrypt_too_short() {
         let rng = SystemRandom::new();
         let mut key_bytes = vec![0u8; 32];
-        rng.fill(&mut key_bytes).unwrap();
-        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap();
+        rng.fill(&mut key_bytes).unwrap(); // Safe: test with valid buffer
+        let unbound = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes).unwrap(); // Safe: test with valid key size
         let key = aead::LessSafeKey::new(unbound);
 
         let result = decrypt(&key, &[0u8; 5]);

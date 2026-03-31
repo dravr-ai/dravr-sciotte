@@ -238,7 +238,7 @@ impl ProviderConfig {
     ///
     /// Panics if the embedded TOML is malformed (compile-time constant, tested).
     pub fn strava_default() -> Self {
-        Self::from_toml(STRAVA_PROVIDER_TOML).expect("embedded strava config is valid")
+        Self::from_toml(STRAVA_PROVIDER_TOML).expect("strava config") // Safe: static data
     }
 
     /// Create with the built-in Garmin Connect provider configuration
@@ -248,7 +248,7 @@ impl ProviderConfig {
     /// Panics if the embedded TOML is malformed (compile-time constant, tested).
     #[must_use]
     pub fn garmin_default() -> Self {
-        Self::from_toml(GARMIN_PROVIDER_TOML).expect("embedded garmin config is valid")
+        Self::from_toml(GARMIN_PROVIDER_TOML).expect("garmin config") // Safe: static data
     }
 }
 
@@ -314,8 +314,8 @@ url_template = "http://example.com/sleep/{date}"
 js_extract = '(function() { return "{}"; })()'
 "#,
         )
-        .unwrap();
-        let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 30).unwrap();
+        .unwrap(); // Safe: test with valid inline TOML
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(); // Safe: valid date literal
         let urls = config.health_urls(&date);
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0].0, "daily_summary");
@@ -328,7 +328,7 @@ js_extract = '(function() { return "{}"; })()'
     fn strava_has_fitness_health_page() {
         let config = ProviderConfig::strava_default();
         assert!(config.health_pages.contains_key("fitness"));
-        let urls = config.health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        let urls = config.health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()); // Safe: valid date literal
         assert!(!urls.is_empty());
         assert!(urls[0].1.contains("fitness"));
     }

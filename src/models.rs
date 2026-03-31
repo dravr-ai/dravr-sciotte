@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn daily_summary_serialization() {
         let summary = DailySummary {
-            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(), // Safe: valid date literal
             provider: "garmin".to_owned(),
             resting_heart_rate: Some(49),
             average_resting_heart_rate_7day: Some(52),
@@ -621,7 +621,7 @@ mod tests {
             active_calories: None,
             total_calories: None,
         };
-        let json = serde_json::to_string(&summary).expect("serialize");
+        let json = serde_json::to_string(&summary).expect("serialize"); // Safe: test with serializable struct
         assert!(json.contains("2026-03-30"));
         assert!(json.contains(r#""resting_heart_rate":49"#));
         assert!(!json.contains("sleep_score")); // None fields skipped
@@ -631,9 +631,9 @@ mod tests {
     #[test]
     fn health_params_date() {
         let params = HealthParams {
-            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(),
+            date: NaiveDate::from_ymd_opt(2026, 3, 30).unwrap(), // Safe: valid date literal
         };
-        let json = serde_json::to_string(&params).expect("serialize");
+        let json = serde_json::to_string(&params).expect("serialize"); // Safe: test with serializable struct
         assert!(json.contains("2026-03-30"));
     }
 
@@ -681,7 +681,7 @@ mod tests {
             segment_efforts: None,
             provider: "strava-scraper".to_owned(),
         };
-        let json = serde_json::to_string(&activity).expect("serialize");
+        let json = serde_json::to_string(&activity).expect("serialize"); // Safe: test with serializable struct
         assert!(json.contains("Morning Run"));
         assert!(!json.contains("elevation_gain")); // None fields skipped
     }
