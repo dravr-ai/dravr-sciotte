@@ -1,0 +1,2 @@
+# Flaky 2FA test requiring headless Chrome with Google OAuth mock
+files = ["tests/login_flow.rs"]
