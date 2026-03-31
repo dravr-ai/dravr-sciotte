@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.1] — 2026-03-31
+
+### Fixed
+
+- fix: increase login test timeouts to 30s to reduce CI flakiness
+- fix: add ignored-tests-allowlist for flaky 2FA login test
+- fix: resolve error handling violations found by dravr-build-config validation
+
+
+
 ## [0.5.0] — 2026-03-30
 
 ### Added
