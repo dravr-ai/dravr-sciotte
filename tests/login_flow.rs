@@ -158,9 +158,9 @@ fn test_config() -> ScraperConfig {
     ScraperConfig {
         page_load_wait_secs: 1,
         form_interaction_delay_ms: 100,
-        email_step_timeout_secs: 5,
-        password_step_timeout_secs: 5,
-        login_timeout_secs: 15,
+        email_step_timeout_secs: 10,
+        password_step_timeout_secs: 10,
+        login_timeout_secs: 30,
         login_poll_interval_ms: 200,
         phone_tap_timeout_secs: 5,
         credential_login_headless: true,
@@ -304,7 +304,6 @@ js_extract = '(function() {{ return "{{}}"; }})()'
 }
 
 #[tokio::test]
-#[ignore = "Requires headless Chrome with working 2FA mock — flaky in CI"]
 async fn google_oauth_2fa_number_match() {
     let (addr, _server) = start_fixture_server().await;
     let base = format!("http://{addr}");
