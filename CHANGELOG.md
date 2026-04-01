@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.4] — 2026-04-01
+
+### Fixed
+
+- fix: drop page before close_browsers to release Arc reference Arc::into_inner silently failed because the Page held a browser ref
+
+
+
 ## [0.5.3] — 2026-04-01
 
 
