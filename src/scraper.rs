@@ -815,6 +815,7 @@ impl ActivityScraper for ChromeScraper {
         }
 
         info!(count = activities.len(), "Activities scraped");
+        drop(page);
         self.close_browsers().await;
         Ok(activities)
     }
@@ -832,6 +833,7 @@ impl ActivityScraper for ChromeScraper {
         let activity = build_activity_from_detail(activity_id, &data);
 
         info!(id = activity_id, name = %activity.name, "Activity detail scraped");
+        drop(page);
         self.close_browsers().await;
         Ok(activity)
     }
@@ -877,6 +879,7 @@ impl ActivityScraper for ChromeScraper {
             name = profile.display_name.as_deref().unwrap_or("unknown"),
             "Athlete profile scraped"
         );
+        drop(page);
         self.close_browsers().await;
         Ok(profile)
     }
