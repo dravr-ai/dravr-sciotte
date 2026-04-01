@@ -83,4 +83,11 @@ pub trait ActivityScraper: Send + Sync {
         session: &AuthSession,
         params: &HealthParams,
     ) -> ScraperResult<DailySummary>;
+
+    /// Gracefully shut down any browser instances held by the scraper.
+    ///
+    /// Sends `Browser.close` CDP command so Chrome exits cleanly and the
+    /// WebSocket handler task terminates without error-looping. Implementations
+    /// that don't manage a browser can use the default no-op.
+    async fn close_browser(&self) {}
 }

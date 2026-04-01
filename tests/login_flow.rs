@@ -379,3 +379,46 @@ fn fake_garmin_provider_parses() {
     assert_eq!(provider.provider.name, "fake-garmin");
     assert!(provider.provider.login_otp_selector.is_some());
 }
+
+// ============================================================================
+// Browser lifecycle tests
+// ============================================================================
+
+/// Verify that `close_browser` gracefully shuts down Chrome after login.
+///
+/// Previously, dropping the scraper without closing caused the chromiumoxide
+/// WebSocket handler to error-loop on the dead connection, spamming ERROR logs
+/// and triggering error notification alerts.
+#[tokio::test]
+async fn close_browser_after_login_no_error_loop() {
+    let (addr, _server) = start_fixture_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_strava_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    // Login launches a browser
+    let result = scraper
+        .credential_login("test@example.com", "correct-password", "email")
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, LoginResult::Success(_)),
+        "Expected Success, got {result:?}"
+    );
+
+    // Explicitly close — should not panic or hang
+    scraper.close_browser().await;
+
+    // Calling close again is a safe no-op
+    scraper.close_browser().await;
+}
+
+/// Verify that `close_browser` is safe on a scraper that never launched a browser.
+#[tokio::test]
+async fn close_browser_without_launch_is_noop() {
+    let provider = fake_strava_provider("http://localhost:9999");
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    // No browser was ever launched — close should be a no-op
+    scraper.close_browser().await;
+}

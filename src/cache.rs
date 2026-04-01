@@ -201,6 +201,10 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
 
         Ok(summary)
     }
+
+    async fn close_browser(&self) {
+        self.inner.close_browser().await;
+    }
 }
 
 /// Cache hit/miss statistics

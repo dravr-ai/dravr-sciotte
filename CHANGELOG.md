@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.2] — 2026-04-01
+
+### Fixed
+
+- fix: close headless browser gracefully after scraping operations
+  Sends `Browser.close` CDP command so Chrome shuts down cleanly and
+  the WebSocket handler task exits without error-looping. Previously,
+  dropping the browser without closing caused chromiumoxide to spam
+  ERROR-level deserialization failures in a tight loop.
+- feat: add `close_browser()` to `ActivityScraper` trait (default no-op)
+  and `ChromeScraper`/`CachedScraper` implementations
+
 ## [0.5.1] — 2026-03-31
 
 ### Fixed

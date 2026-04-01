@@ -161,6 +161,28 @@ impl ChromeScraper {
         Ok(browser)
     }
 
+    /// Gracefully close the headless browser and pending login browser if open.
+    ///
+    /// Sends `Browser.close` CDP command so Chrome shuts down cleanly and the
+    /// WebSocket handler task exits without error-looping. Safe to call multiple
+    /// times — subsequent calls are no-ops.
+    async fn close_browsers(&self) {
+        let headless = self.browser.lock().await.take();
+        if let Some(browser) = headless {
+            if let Some(mut browser) = Arc::into_inner(browser) {
+                if let Err(e) = browser.close().await {
+                    debug!(error = %e, "Browser close returned error (Chrome may already be gone)");
+                }
+            }
+        }
+        let pending = self.pending_login.lock().await.take();
+        if let Some((mut browser, _page)) = pending {
+            if let Err(e) = browser.close().await {
+                debug!(error = %e, "Pending login browser close returned error");
+            }
+        }
+    }
+
     /// Open a new page with session cookies and navigate to the given URL
     async fn open_authenticated_page(
         &self,
@@ -793,6 +815,7 @@ impl ActivityScraper for ChromeScraper {
         }
 
         info!(count = activities.len(), "Activities scraped");
+        self.close_browsers().await;
         Ok(activities)
     }
 
@@ -809,6 +832,7 @@ impl ActivityScraper for ChromeScraper {
         let activity = build_activity_from_detail(activity_id, &data);
 
         info!(id = activity_id, name = %activity.name, "Activity detail scraped");
+        self.close_browsers().await;
         Ok(activity)
     }
 
@@ -853,6 +877,7 @@ impl ActivityScraper for ChromeScraper {
             name = profile.display_name.as_deref().unwrap_or("unknown"),
             "Athlete profile scraped"
         );
+        self.close_browsers().await;
         Ok(profile)
     }
 
@@ -896,7 +921,12 @@ impl ActivityScraper for ChromeScraper {
         }
 
         info!(date = %params.date, pages = pages.len(), "Daily summary scraped");
+        self.close_browsers().await;
         Ok(summary)
+    }
+
+    async fn close_browser(&self) {
+        self.close_browsers().await;
     }
 }
 
