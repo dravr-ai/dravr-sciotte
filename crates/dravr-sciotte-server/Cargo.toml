@@ -6,7 +6,7 @@
 
 [package]
 name = "dravr-sciotte-server"
-version = "0.5.4"
+version = "0.5.5"
 publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -29,8 +29,8 @@ default = []
 vision = ["dravr-sciotte/vision", "dep:embacle"]
 
 [dependencies]
-dravr-sciotte = { path = "../..", version = "0.5.4" }
-dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.5.4" }
+dravr-sciotte = { path = "../..", version = "0.5.5" }
+dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.5.5" }
 dravr-tronc = { version = "0.2", features = ["notifications"] }
 embacle = { version = "0.13", features = ["copilot-headless"], optional = true }
 axum = { version = "0.8", features = ["ws"] }
