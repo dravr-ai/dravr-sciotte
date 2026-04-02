@@ -169,10 +169,20 @@ impl ChromeScraper {
     async fn close_browsers(&self) {
         let headless = self.browser.lock().await.take();
         if let Some(browser) = headless {
+            let strong_count = Arc::strong_count(&browser);
+            if strong_count > 1 {
+                warn!(
+                    strong_count,
+                    "Browser Arc has multiple references, close will be skipped by Arc::into_inner"
+                );
+            }
             if let Some(mut browser) = Arc::into_inner(browser) {
                 if let Err(e) = browser.close().await {
                     debug!(error = %e, "Browser close returned error (Chrome may already be gone)");
                 }
+                info!("Browser closed gracefully");
+            } else {
+                warn!("Arc::into_inner returned None — browser will be killed on drop");
             }
         }
         let pending = self.pending_login.lock().await.take();
