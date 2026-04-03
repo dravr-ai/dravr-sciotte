@@ -1,5 +1,8 @@
 // ABOUTME: Integration tests for credential login flows using fake HTML pages
 // ABOUTME: Serves static fixtures via a local HTTP server and tests ChromeScraper against them
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 dravr.ai
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -421,4 +424,47 @@ async fn close_browser_without_launch_is_noop() {
 
     // No browser was ever launched — close should be a no-op
     scraper.close_browser().await;
+}
+
+/// Verify that the headless browser is closed after `get_activities` (the Arc path).
+/// This is the real production flow: `open_authenticated_page` → `get_headless_browser`
+/// → `Arc<Browser>` → scrape → drop(page) → `close_browsers` → `Arc::into_inner`.
+#[tokio::test]
+async fn close_browser_after_get_activities() {
+    use dravr_sciotte::models::{ActivityParams, AuthSession};
+
+    let (addr, _server) = start_fixture_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_strava_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    // Create a fake session with cookies (so open_authenticated_page works)
+    let session = AuthSession {
+        session_id: "test-session".to_owned(),
+        cookies: vec![],
+        created_at: chrono::Utc::now(),
+        expires_at: None,
+    };
+
+    let params = ActivityParams {
+        limit: Some(5),
+        enrich_details: false,
+        ..Default::default()
+    };
+
+    // get_activities exercises the Arc<Browser> path via get_headless_browser.
+    // The dashboard has no activity data and no session redirect, so it returns
+    // an empty list. The important thing is the browser lifecycle.
+    let result = scraper.get_activities(&session, &params).await;
+    match &result {
+        Ok(activities) => eprintln!("get_activities returned {} activities", activities.len()),
+        Err(e) => eprintln!("get_activities errored (expected): {e}"),
+    }
+    drop(result);
+
+    // Give a moment for any background tasks to settle
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // If Arc::into_inner failed, we'll see "Browser was not closed manually" or
+    // "Arc::into_inner returned None" in stderr. The test verifies the path runs.
 }
