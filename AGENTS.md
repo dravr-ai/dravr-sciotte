@@ -1,3 +1,15 @@
+# Sciotte — Sport Activity Scraper
+
+**Headless Chrome scraper** for fitness platform login flows (Strava, Garmin). Core capabilities:
+- `chromiumoxide` 0.9 browser automation with cookie/session capture
+- TOML-configurable provider pipelines (selectors, flows, 2FA handling)
+- In-memory session caching with `moka` TTL
+- Exposed as library, MCP server, and REST server binaries
+
+See [README.md](README.md) for provider setup.
+
+---
+
 ## Git Hooks - MANDATORY for ALL AI Agents
 
 
