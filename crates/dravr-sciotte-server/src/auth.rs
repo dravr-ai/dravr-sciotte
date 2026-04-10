@@ -7,6 +7,7 @@
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
+use dravr_tronc::server::auth;
 
 /// Environment variable name for the API key
 const API_KEY_ENV: &str = "DRAVR_SCIOTTE_API_KEY";
@@ -18,7 +19,7 @@ const API_KEY_ENV: &str = "DRAVR_SCIOTTE_API_KEY";
 /// are allowed through (localhost development mode). If set, requests must
 /// include a matching `Authorization: Bearer <key>` header.
 pub async fn auth_middleware(request: Request, next: Next) -> Response {
-    dravr_tronc::server::auth::require_auth(API_KEY_ENV, request, next).await
+    auth::require_auth(API_KEY_ENV, request, next).await
 }
 
 #[cfg(test)]

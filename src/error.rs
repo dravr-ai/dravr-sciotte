@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use crate::models::AuthSession;
+
 /// Result type alias for scraper operations
 pub type ScraperResult<T> = Result<T, ScraperError>;
 
@@ -76,7 +78,7 @@ impl ScraperError {
 #[derive(Debug)]
 pub enum LoginResult {
     /// Login succeeded — session cookies captured
-    Success(crate::models::AuthSession),
+    Success(AuthSession),
     /// Provider requires a one-time password / 2FA code entry
     OtpRequired,
     /// Provider shows multiple 2FA options — let the user choose
@@ -133,7 +135,7 @@ mod tests {
 
     #[test]
     fn login_result_success_holds_session() {
-        let session = crate::models::AuthSession {
+        let session = AuthSession {
             session_id: "test-123".to_owned(),
             cookies: vec![],
             created_at: chrono::Utc::now(),

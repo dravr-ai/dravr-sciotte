@@ -5,16 +5,20 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use dravr_sciotte::config::ScraperConfig;
 use dravr_sciotte::error::LoginResult;
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::{ActivityScraper, ChromeScraper};
-use tokio::net::TcpListener;
+use tokio::fs;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 /// Serve the test fixtures directory via a minimal HTTP server
-async fn start_fixture_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn start_fixture_server() -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -36,7 +40,7 @@ async fn start_fixture_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 }
 
 /// Minimal HTTP/1.1 handler that serves static files from the fixtures directory
-async fn handle_http(stream: tokio::net::TcpStream, fixtures_dir: PathBuf) {
+async fn handle_http(stream: TcpStream, fixtures_dir: PathBuf) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut buf = vec![0u8; 4096];
@@ -61,8 +65,8 @@ async fn handle_http(stream: tokio::net::TcpStream, fixtures_dir: PathBuf) {
     let full_path = fixtures_dir.join(file_path);
 
     let (status, content_type, body) = if full_path.exists() && full_path.is_file() {
-        let body = tokio::fs::read(&full_path).await.unwrap_or_default();
-        let ct = if std::path::Path::new(file_path)
+        let body = fs::read(&full_path).await.unwrap_or_default();
+        let ct = if Path::new(file_path)
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
         {
@@ -463,7 +467,7 @@ async fn close_browser_after_get_activities() {
     drop(result);
 
     // Give a moment for any background tasks to settle
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    sleep(Duration::from_millis(1000)).await;
 
     // If Arc::into_inner failed, we'll see "Browser was not closed manually" or
     // "Arc::into_inner returned None" in stderr. The test verifies the path runs.

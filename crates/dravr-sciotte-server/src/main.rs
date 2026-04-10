@@ -4,20 +4,28 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use tokio::sync::RwLock;
-use tracing::info;
-
+use dravr_sciotte::auth;
 use dravr_sciotte::cache::CachedScraper;
+#[cfg(feature = "vision")]
+use dravr_sciotte::config::LoginMode;
 use dravr_sciotte::config::{CacheConfig, ScraperConfig};
-use dravr_sciotte::models::ActivityParams;
+use dravr_sciotte::models::{Activity, ActivityParams};
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::{build_tool_registry, ServerState};
+use dravr_sciotte_server::router;
+use dravr_tronc::mcp::transport::stdio;
+use dravr_tronc::server::tracing_init;
+use dravr_tronc::McpServer;
+use tokio::net::TcpListener;
+use tokio::sync::RwLock;
+use tracing::info;
 
 #[derive(Parser)]
 #[command(
@@ -84,9 +92,9 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
-    dravr_tronc::server::tracing_init::init_with_notifications(&cli.transport);
+    tracing_init::init_with_notifications(&cli.transport);
 
     let provider = load_provider_config(cli.provider.as_deref())?;
 
@@ -118,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 /// Load provider config from a TOML file path, or use the built-in Strava default
 fn load_provider_config(
     path: Option<&str>,
-) -> Result<ProviderConfig, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ProviderConfig, Box<dyn Error + Send + Sync>> {
     match path {
         Some(p) => {
             info!(provider = %p, "Loading provider config");
@@ -138,7 +146,7 @@ fn create_scraper(provider: ProviderConfig) -> CachedScraper<ChromeScraper> {
 #[cfg(feature = "vision")]
 async fn create_vision_scraper(
     provider: ProviderConfig,
-) -> Result<CachedScraper<ChromeScraper>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<CachedScraper<ChromeScraper>, Box<dyn Error + Send + Sync>> {
     use std::sync::Arc;
 
     let headless_config = embacle::CopilotHeadlessConfig::from_env();
@@ -155,14 +163,11 @@ async fn run_server(
     host: String,
     port: u16,
     provider: ProviderConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     #[cfg(feature = "vision")]
     let cached = {
         let config = ScraperConfig::default();
-        if matches!(
-            config.login_mode,
-            dravr_sciotte::config::LoginMode::Vision | dravr_sciotte::config::LoginMode::Hybrid
-        ) {
+        if matches!(config.login_mode, LoginMode::Vision | LoginMode::Hybrid) {
             create_vision_scraper(provider).await?
         } else {
             create_scraper(provider)
@@ -172,42 +177,38 @@ async fn run_server(
     let cached = create_scraper(provider);
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
-    if let Ok(Some(session)) = dravr_sciotte::auth::load_session().await {
+    if let Ok(Some(session)) = auth::load_session().await {
         info!("Loaded persisted session");
         state.write().await.set_session(session);
     }
 
-    let app = dravr_sciotte_server::router::build_router(state);
+    let app = router::build_router(state);
 
     let addr = format!("{host}:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(&addr).await?;
     info!(address = %addr, "Server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-async fn run_mcp_stdio(
-    provider: ProviderConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let cached = create_scraper(provider);
     let state = Arc::new(RwLock::new(ServerState::new(cached)));
 
-    if let Ok(Some(session)) = dravr_sciotte::auth::load_session().await {
+    if let Ok(Some(session)) = auth::load_session().await {
         state.write().await.set_session(session);
     }
 
-    let server = Arc::new(dravr_tronc::McpServer::new(
+    let server = Arc::new(McpServer::new(
         "dravr-sciotte",
         env!("CARGO_PKG_VERSION"),
         build_tool_registry(),
         state,
     ));
-    dravr_tronc::mcp::transport::stdio::run(server).await
+    stdio::run(server).await
 }
 
-async fn run_login(
-    provider: ProviderConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn run_login(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let cached = create_scraper(provider);
 
     println!("Opening browser for login...");
@@ -216,7 +217,7 @@ async fn run_login(
 
     let session = cached.browser_login().await?;
 
-    dravr_sciotte::auth::save_session(&session).await?;
+    auth::save_session(&session).await?;
 
     println!("Login successful! Session saved.");
     println!("Session ID: {}", session.session_id);
@@ -231,21 +232,21 @@ async fn run_activities(
     force_login: bool,
     detail: bool,
     provider: ProviderConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let cached = create_scraper(provider);
 
     let session = if force_login {
         println!("Opening browser for login...");
         let s = cached.browser_login().await?;
-        dravr_sciotte::auth::save_session(&s).await?;
+        auth::save_session(&s).await?;
         println!("Login successful!\n");
         s
-    } else if let Some(s) = dravr_sciotte::auth::load_session().await? {
+    } else if let Some(s) = auth::load_session().await? {
         s
     } else {
         println!("No saved session — opening browser for Strava login...");
         let s = cached.browser_login().await?;
-        dravr_sciotte::auth::save_session(&s).await?;
+        auth::save_session(&s).await?;
         println!("Login successful!\n");
         s
     };
@@ -274,7 +275,7 @@ async fn run_activities(
     Ok(())
 }
 
-fn print_activity_table(activities: &[dravr_sciotte::models::Activity]) {
+fn print_activity_table(activities: &[Activity]) {
     println!(
         "{:<12} {:<30} {:<15} {:<12} {:<10} {:<8}",
         "ID", "Name", "Type", "Date", "Distance", "Time"
@@ -301,8 +302,8 @@ fn print_activity_table(activities: &[dravr_sciotte::models::Activity]) {
     println!("\n{} activities found.", activities.len());
 }
 
-async fn run_auth_status() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(session) = dravr_sciotte::auth::load_session().await? {
+async fn run_auth_status() -> Result<(), Box<dyn Error + Send + Sync>> {
+    if let Some(session) = auth::load_session().await? {
         println!("Authenticated: yes");
         println!("Session ID: {}", session.session_id);
         println!("Created: {}", session.created_at);

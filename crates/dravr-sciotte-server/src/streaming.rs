@@ -4,12 +4,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
+use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::extract::{Query, State, WebSocketUpgrade};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::input::{
@@ -18,16 +21,23 @@ use chromiumoxide::cdp::browser_protocol::input::{
 };
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
-use futures::{SinkExt, StreamExt};
-use serde::Deserialize;
-use serde_json::json;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
-
+use chromiumoxide::Page;
+use dravr_sciotte::auth;
+use dravr_sciotte::error::{LoginResult, ScraperResult};
+use dravr_sciotte::js_utils;
 use dravr_sciotte::models::{AuthSession, CookieData};
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
+use futures::stream::SplitSink;
+use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::json;
+use subtle::ConstantTimeEq;
+use tokio::sync::oneshot;
+use tokio::sync::Mutex;
+use tokio::time::{self, Instant};
+use tracing::{debug, error, info, warn};
 
 const VIEWPORT_WIDTH: u32 = 1280;
 const VIEWPORT_HEIGHT: u32 = 1024;
@@ -128,19 +138,14 @@ pub struct BrowserLoginParams {
 pub async fn browser_login_ws(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
-    axum::extract::Query(params): axum::extract::Query<BrowserLoginParams>,
+    Query(params): Query<BrowserLoginParams>,
 ) -> impl IntoResponse {
     // Validate bearer token if DRAVR_SCIOTTE_API_KEY is set
-    if let Ok(expected) = std::env::var("DRAVR_SCIOTTE_API_KEY") {
+    if let Ok(expected) = env::var("DRAVR_SCIOTTE_API_KEY") {
         let provided = params.token.as_deref().unwrap_or("");
-        let is_valid: bool =
-            subtle::ConstantTimeEq::ct_eq(provided.as_bytes(), expected.as_bytes()).into();
+        let is_valid: bool = ConstantTimeEq::ct_eq(provided.as_bytes(), expected.as_bytes()).into();
         if !is_valid {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Invalid or missing token",
-            )
-                .into_response();
+            return (StatusCode::UNAUTHORIZED, "Invalid or missing token").into_response();
         }
     }
 
@@ -173,7 +178,7 @@ async fn run_streaming_session(
     state: SharedState,
     provider: &ProviderConfig,
     method: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     send_status(&mut ws_sender, "launching", "Starting browser...").await;
@@ -186,7 +191,7 @@ async fn run_streaming_session(
 
     send_status(&mut ws_sender, "navigating", &provider.provider.login_url).await;
 
-    tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+    time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
     dismiss_cookie_dialog(&page).await;
 
     // For OAuth methods, click the provider button before starting screenshot streaming
@@ -199,7 +204,7 @@ async fn run_streaming_session(
             )
             .await;
             click_oauth_button(&page, selector).await?;
-            tokio::time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
+            time::sleep(Duration::from_secs(PAGE_LOAD_WAIT_SECS)).await;
         } else {
             return Err(format!("Unknown OAuth method: {method}").into());
         }
@@ -210,18 +215,18 @@ async fn run_streaming_session(
     // Login detection via URL polling
     let page_login = Arc::clone(&page_arc);
     let provider_clone = provider.clone();
-    let (login_tx, mut login_rx) = tokio::sync::oneshot::channel::<AuthSession>();
+    let (login_tx, mut login_rx) = oneshot::channel::<AuthSession>();
     let login_tx = Arc::new(Mutex::new(Some(login_tx)));
 
     let login_task =
         tokio::spawn(async move { poll_for_login(&page_login, &provider_clone, login_tx).await });
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
+    let deadline = Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
     let mut screenshot_interval =
-        tokio::time::interval(Duration::from_millis(SCREENSHOT_POLL_INTERVAL_MS));
+        time::interval(Duration::from_millis(SCREENSHOT_POLL_INTERVAL_MS));
 
     loop {
-        if tokio::time::Instant::now() > deadline {
+        if Instant::now() > deadline {
             let msg = serde_json::json!({"type": "login_failed", "reason": "timeout"});
             let _ = ws_sender.send(Message::Text(msg.to_string().into())).await;
             break;
@@ -233,7 +238,7 @@ async fn run_streaming_session(
             // Login completed (highest priority)
             result = &mut login_rx => {
                 if let Ok(session) = result {
-                    if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+                    if let Err(e) = auth::save_session(&session).await {
                         warn!(error = %e, "Failed to persist session");
                     }
                     let session_id = session.session_id.clone();
@@ -296,14 +301,14 @@ async fn run_streaming_session(
 
 /// Poll the page URL until login is detected, then capture cookies
 async fn poll_for_login(
-    page: &chromiumoxide::Page,
+    page: &Page,
     provider: &ProviderConfig,
-    login_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<AuthSession>>>>,
+    login_tx: Arc<Mutex<Option<oneshot::Sender<AuthSession>>>>,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
+    let deadline = Instant::now() + Duration::from_secs(LOGIN_TIMEOUT_SECS);
 
     loop {
-        if tokio::time::Instant::now() > deadline {
+        if Instant::now() > deadline {
             return;
         }
 
@@ -353,7 +358,7 @@ async fn poll_for_login(
             return;
         }
 
-        tokio::time::sleep(Duration::from_millis(URL_POLL_INTERVAL_MS)).await;
+        time::sleep(Duration::from_millis(URL_POLL_INTERVAL_MS)).await;
     }
 }
 
@@ -362,14 +367,10 @@ async fn poll_for_login(
 // ============================================================================
 
 /// Convert a login result into an HTTP response, saving the session on success.
-async fn handle_login_result(
-    result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult>,
-    state: &SharedState,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
+async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedState) -> Response {
     match result {
-        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
-            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+        Ok(LoginResult::Success(session)) => {
+            if let Err(e) = auth::save_session(&session).await {
                 warn!(error = %e, "Failed to persist session to disk");
             }
             let session_id = session.session_id.clone();
@@ -383,7 +384,7 @@ async fn handle_login_result(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+        Ok(LoginResult::OtpRequired) => {
             info!("OTP/2FA code required");
             Json(json!({
                 "status": "otp_required",
@@ -391,7 +392,7 @@ async fn handle_login_result(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+        Ok(LoginResult::TwoFactorChoice(options)) => {
             info!(count = options.len(), "2FA method selection required");
             Json(json!({
                 "status": "two_factor_choice",
@@ -399,7 +400,7 @@ async fn handle_login_result(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+        Ok(LoginResult::NumberMatch(number)) => {
             info!(number = %number, "Number matching challenge");
             Json(json!({
                 "status": "number_match",
@@ -407,10 +408,10 @@ async fn handle_login_result(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+        Ok(LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "Login rejected");
             (
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 Json(json!({ "status": "failed", "reason": reason })),
             )
                 .into_response()
@@ -418,7 +419,7 @@ async fn handle_login_result(
         Err(e) => {
             error!(error = %e, "Login error");
             (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "status": "error", "reason": e.to_string() })),
             )
                 .into_response()
@@ -456,14 +457,14 @@ pub async fn submit_otp(
     State(state): State<SharedState>,
     Json(request): Json<OtpSubmitRequest>,
 ) -> impl IntoResponse {
-    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
+    let result: ScraperResult<LoginResult> = {
         let guard = state.read().await;
         guard.scraper().submit_otp(&request.code).await
     };
 
     match result {
-        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
-            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+        Ok(LoginResult::Success(session)) => {
+            if let Err(e) = auth::save_session(&session).await {
                 warn!(error = %e, "Failed to persist session to disk");
             }
             let session_id = session.session_id.clone();
@@ -478,7 +479,7 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+        Ok(LoginResult::OtpRequired) => {
             info!("OTP submitted but another verification step required");
             Json(json!({
                 "status": "otp_required",
@@ -486,7 +487,7 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+        Ok(LoginResult::TwoFactorChoice(options)) => {
             info!(count = options.len(), "OTP led to 2FA method selection");
             Json(json!({
                 "status": "two_factor_choice",
@@ -494,7 +495,7 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+        Ok(LoginResult::NumberMatch(number)) => {
             info!(number = %number, "Number matching challenge after OTP");
             Json(json!({
                 "status": "number_match",
@@ -502,10 +503,10 @@ pub async fn submit_otp(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+        Ok(LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "OTP verification rejected");
             (
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "status": "failed",
                     "reason": reason,
@@ -516,7 +517,7 @@ pub async fn submit_otp(
         Err(e) => {
             error!(error = %e, "OTP submission error");
             (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "status": "error",
                     "reason": e.to_string(),
@@ -534,14 +535,14 @@ pub async fn select_two_factor(
     State(state): State<SharedState>,
     Json(request): Json<TwoFactorSelectRequest>,
 ) -> impl IntoResponse {
-    let result: dravr_sciotte::error::ScraperResult<dravr_sciotte::error::LoginResult> = {
+    let result: ScraperResult<LoginResult> = {
         let guard = state.read().await;
         guard.scraper().select_two_factor(&request.option_id).await
     };
 
     match result {
-        Ok(dravr_sciotte::error::LoginResult::Success(session)) => {
-            if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+        Ok(LoginResult::Success(session)) => {
+            if let Err(e) = auth::save_session(&session).await {
                 warn!(error = %e, "Failed to persist session to disk");
             }
             let session_id = session.session_id.clone();
@@ -556,14 +557,14 @@ pub async fn select_two_factor(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::OtpRequired) => {
+        Ok(LoginResult::OtpRequired) => {
             info!("2FA method requires code entry");
             Json(json!({
                 "status": "otp_required",
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::TwoFactorChoice(options)) => {
+        Ok(LoginResult::TwoFactorChoice(options)) => {
             info!(count = options.len(), "2FA method led to another choice");
             Json(json!({
                 "status": "two_factor_choice",
@@ -571,7 +572,7 @@ pub async fn select_two_factor(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::NumberMatch(number)) => {
+        Ok(LoginResult::NumberMatch(number)) => {
             info!(number = %number, "Number matching challenge after 2FA selection");
             Json(json!({
                 "status": "number_match",
@@ -579,10 +580,10 @@ pub async fn select_two_factor(
             }))
             .into_response()
         }
-        Ok(dravr_sciotte::error::LoginResult::Failed(reason)) => {
+        Ok(LoginResult::Failed(reason)) => {
             warn!(reason = %reason, "2FA method failed");
             (
-                axum::http::StatusCode::UNAUTHORIZED,
+                StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "status": "failed",
                     "reason": reason,
@@ -593,7 +594,7 @@ pub async fn select_two_factor(
         Err(e) => {
             error!(error = %e, "2FA selection error");
             (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "status": "error",
                     "reason": e.to_string(),
@@ -610,7 +611,7 @@ pub async fn select_two_factor(
 
 /// Auto-dismiss cookie consent dialogs for the WebSocket streaming flow.
 /// Delegates to the same JS logic used by the core library.
-async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
+async fn dismiss_cookie_dialog(page: &Page) {
     let dismiss_js = r#"
         (function() {
             var btn = document.querySelector('#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll')
@@ -644,10 +645,10 @@ async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
 ///
 /// Supports CSS selectors and `text:` prefix for text-content matching.
 async fn click_oauth_button(
-    page: &chromiumoxide::Page,
+    page: &Page,
     selector: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let escaped_selector = dravr_sciotte::js_utils::escape_js_selector(selector);
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let escaped_selector = js_utils::escape_js_selector(selector);
     let js = format!(
         r#"(function() {{
             var parts = "{escaped_selector}".split(",").map(function(s) {{ return s.trim(); }});
@@ -690,10 +691,7 @@ async fn click_oauth_button(
 }
 
 /// Handle a client input message by dispatching the appropriate CDP command
-async fn handle_client_input(
-    text: &str,
-    page: &chromiumoxide::Page,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn handle_client_input(text: &str, page: &Page) -> Result<(), Box<dyn Error + Send + Sync>> {
     let msg: ClientMessage = serde_json::from_str(text)?;
 
     match msg {
@@ -777,11 +775,11 @@ async fn handle_client_input(
 
 /// Dispatch a mouse press/release event
 async fn dispatch_mouse(
-    page: &chromiumoxide::Page,
+    page: &Page,
     event_type: DispatchMouseEventType,
     x: f64,
     y: f64,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let params = DispatchMouseEventParams {
         r#type: event_type,
         x,
@@ -805,11 +803,7 @@ async fn dispatch_mouse(
 }
 
 /// Dispatch a click (mouse down + mouse up) at the given coordinates
-async fn dispatch_click(
-    page: &chromiumoxide::Page,
-    x: f64,
-    y: f64,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn dispatch_click(page: &Page, x: f64, y: f64) -> Result<(), Box<dyn Error + Send + Sync>> {
     dispatch_mouse(page, DispatchMouseEventType::MousePressed, x, y).await?;
     dispatch_mouse(page, DispatchMouseEventType::MouseReleased, x, y).await?;
     Ok(())
@@ -817,11 +811,11 @@ async fn dispatch_click(
 
 /// Dispatch a keyboard event
 async fn dispatch_key(
-    page: &chromiumoxide::Page,
+    page: &Page,
     event_type: DispatchKeyEventType,
     key: &str,
     code: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let params = DispatchKeyEventParams {
         r#type: event_type,
         modifiers: None,
@@ -851,11 +845,7 @@ fn scale_coords(x: f64, y: f64) -> (f64, f64) {
 }
 
 /// Send a JSON status message over the WebSocket
-async fn send_status(
-    ws: &mut futures::stream::SplitSink<WebSocket, Message>,
-    state_name: &str,
-    detail: &str,
-) {
+async fn send_status(ws: &mut SplitSink<WebSocket, Message>, state_name: &str, detail: &str) {
     let msg = serde_json::json!({
         "type": "status",
         "state": state_name,
@@ -865,7 +855,7 @@ async fn send_status(
 }
 
 /// Launch a Chrome browser configured for streaming (headless with rendering)
-async fn launch_streaming_browser() -> Result<Browser, Box<dyn std::error::Error + Send + Sync>> {
+async fn launch_streaming_browser() -> Result<Browser, Box<dyn Error + Send + Sync>> {
     let config = BrowserConfig::builder()
         .arg("--headless=new")
         .arg("--disable-gpu")

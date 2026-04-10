@@ -5,6 +5,8 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -129,8 +131,8 @@ pub struct DetailPageConfig {
 
 impl ProviderConfig {
     /// Load a provider configuration from a TOML file
-    pub fn from_file(path: &std::path::Path) -> ScraperResult<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| ScraperError::Config {
+    pub fn from_file(path: &Path) -> ScraperResult<Self> {
+        let content = fs::read_to_string(path).map_err(|e| ScraperError::Config {
             reason: format!("Failed to read provider config {}: {e}", path.display()),
         })?;
         Self::from_toml(&content)

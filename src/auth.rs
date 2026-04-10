@@ -4,9 +4,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::path::Path;
+
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
+use tokio::fs;
 use tracing::{debug, warn};
 
 use crate::config::session_dir;
@@ -19,7 +23,7 @@ const KEY_FILE: &str = "session.key";
 /// Save an authenticated session to disk (encrypted)
 pub async fn save_session(session: &AuthSession) -> ScraperResult<()> {
     let dir = session_dir();
-    tokio::fs::create_dir_all(&dir)
+    fs::create_dir_all(&dir)
         .await
         .map_err(|e| ScraperError::Internal {
             reason: format!("Failed to create session dir: {e}"),
@@ -31,9 +35,9 @@ pub async fn save_session(session: &AuthSession) -> ScraperResult<()> {
     })?;
 
     let encrypted = encrypt(&key, &plaintext)?;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&encrypted);
+    let encoded = BASE64_STANDARD.encode(&encrypted);
 
-    tokio::fs::write(dir.join(SESSION_FILE), encoded.as_bytes())
+    fs::write(dir.join(SESSION_FILE), encoded.as_bytes())
         .await
         .map_err(|e| ScraperError::Internal {
             reason: format!("Failed to write session file: {e}"),
@@ -53,13 +57,13 @@ pub async fn load_session() -> ScraperResult<Option<AuthSession>> {
     }
 
     let key = load_or_create_key(&dir).await?;
-    let encoded = tokio::fs::read_to_string(&session_path)
+    let encoded = fs::read_to_string(&session_path)
         .await
         .map_err(|e| ScraperError::Internal {
             reason: format!("Failed to read session file: {e}"),
         })?;
 
-    let encrypted = base64::engine::general_purpose::STANDARD
+    let encrypted = BASE64_STANDARD
         .decode(encoded.trim())
         .map_err(|e| ScraperError::Internal {
             reason: format!("Failed to decode session: {e}"),
@@ -81,7 +85,7 @@ pub async fn clear_session() -> ScraperResult<()> {
     let session_path = dir.join(SESSION_FILE);
 
     if session_path.exists() {
-        tokio::fs::remove_file(&session_path)
+        fs::remove_file(&session_path)
             .await
             .map_err(|e| ScraperError::Internal {
                 reason: format!("Failed to remove session file: {e}"),
@@ -97,17 +101,16 @@ pub async fn clear_session() -> ScraperResult<()> {
 // Encryption helpers (AES-256-GCM)
 // ============================================================================
 
-async fn load_or_create_key(dir: &std::path::Path) -> ScraperResult<aead::LessSafeKey> {
+async fn load_or_create_key(dir: &Path) -> ScraperResult<aead::LessSafeKey> {
     let key_path = dir.join(KEY_FILE);
 
     let key_bytes = if key_path.exists() {
-        let encoded =
-            tokio::fs::read_to_string(&key_path)
-                .await
-                .map_err(|e| ScraperError::Internal {
-                    reason: format!("Failed to read key file: {e}"),
-                })?;
-        base64::engine::general_purpose::STANDARD
+        let encoded = fs::read_to_string(&key_path)
+            .await
+            .map_err(|e| ScraperError::Internal {
+                reason: format!("Failed to read key file: {e}"),
+            })?;
+        BASE64_STANDARD
             .decode(encoded.trim())
             .map_err(|e| ScraperError::Internal {
                 reason: format!("Failed to decode key: {e}"),
@@ -119,8 +122,8 @@ async fn load_or_create_key(dir: &std::path::Path) -> ScraperResult<aead::LessSa
             .map_err(|_| ScraperError::Internal {
                 reason: "Failed to generate encryption key".to_owned(),
             })?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
-        tokio::fs::write(&key_path, encoded.as_bytes())
+        let encoded = BASE64_STANDARD.encode(&key_bytes);
+        fs::write(&key_path, encoded.as_bytes())
             .await
             .map_err(|e| ScraperError::Internal {
                 reason: format!("Failed to write key file: {e}"),

@@ -9,13 +9,13 @@ use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 use serde_json::{json, Value};
 
-use crate::state::SharedState;
+use crate::state::{ServerState, SharedState};
 
 /// Get cache hit/miss statistics
 pub struct CacheStatusTool;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for CacheStatusTool {
+impl McpTool<ServerState> for CacheStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cache_status".to_owned(),
@@ -39,7 +39,7 @@ impl McpTool<crate::state::ServerState> for CacheStatusTool {
 pub struct CacheClearTool;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for CacheClearTool {
+impl McpTool<ServerState> for CacheClearTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cache_clear".to_owned(),

@@ -7,19 +7,21 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use dravr_sciotte::auth;
+use dravr_sciotte::models::{ActivityParams, HealthParams};
+use dravr_sciotte::ActivityScraper;
+use dravr_sciotte_mcp::state::SharedState;
+use dravr_tronc::mcp::transport::http;
+use dravr_tronc::McpServer;
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
-
-use dravr_sciotte::models::{ActivityParams, HealthParams};
-use dravr_sciotte::ActivityScraper;
-use dravr_sciotte_mcp::state::SharedState;
 
 use crate::auth::auth_middleware;
 use crate::health::health_handler;
@@ -32,13 +34,13 @@ pub fn build_router(state: SharedState) -> Router {
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers(Any);
 
-    let mcp_server = Arc::new(dravr_tronc::McpServer::new(
+    let mcp_server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",
         env!("CARGO_PKG_VERSION"),
         dravr_sciotte_mcp::build_tool_registry(),
         Arc::clone(&state),
     ));
-    let mcp_router = dravr_tronc::mcp::transport::http::mcp_router(mcp_server);
+    let mcp_router = http::mcp_router(mcp_server);
 
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
@@ -102,7 +104,7 @@ async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
         }
     };
 
-    if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+    if let Err(e) = auth::save_session(&session).await {
         tracing::warn!(error = %e, "Failed to persist session to disk");
     }
 
@@ -181,7 +183,7 @@ async fn athlete_handler(
 
     let Some(session) = session else {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
             Json(json!({"error": "session_not_found"})),
         )
             .into_response();
@@ -190,7 +192,7 @@ async fn athlete_handler(
     match guard.scraper().get_athlete(session).await {
         Ok(profile) => Json(json!(profile)).into_response(),
         Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to get athlete profile: {e}")})),
         )
             .into_response(),
@@ -217,7 +219,7 @@ async fn activities_handler(
 
     let Some(session) = session else {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
             Json(json!({"error": "session_not_found", "message": "Provide X-Session-Id header or login first."})),
         )
             .into_response();
@@ -237,7 +239,7 @@ async fn activities_handler(
         }))
         .into_response(),
         Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Scraping failed: {e}")})),
         )
             .into_response(),
@@ -257,7 +259,7 @@ async fn activity_detail_handler(
 
     let Some(session) = session else {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
             Json(json!({"error": "session_not_found"})),
         )
             .into_response();
@@ -266,7 +268,7 @@ async fn activity_detail_handler(
     match guard.scraper().get_activity(session, &id).await {
         Ok(activity) => Json(json!(activity)).into_response(),
         Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to get activity {id}: {e}")})),
         )
             .into_response(),
@@ -295,7 +297,7 @@ async fn daily_summary_handler(
 
     let Some(session) = session else {
         return (
-            axum::http::StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
             Json(json!({"error": "session_not_found"})),
         )
             .into_response();
@@ -303,7 +305,7 @@ async fn daily_summary_handler(
 
     let Ok(date) = chrono::NaiveDate::parse_from_str(&query.date, "%Y-%m-%d") else {
         return (
-            axum::http::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("Invalid date format '{}', expected YYYY-MM-DD", query.date)})),
         )
             .into_response();
@@ -314,7 +316,7 @@ async fn daily_summary_handler(
     match guard.scraper().get_daily_summary(session, &params).await {
         Ok(summary) => Json(json!(summary)).into_response(),
         Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("Failed to get daily summary: {e}")})),
         )
             .into_response(),

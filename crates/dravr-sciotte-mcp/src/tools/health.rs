@@ -5,20 +5,19 @@
 // Copyright (c) 2026 dravr.ai
 
 use async_trait::async_trait;
+use dravr_sciotte::models::HealthParams;
+use dravr_sciotte::ActivityScraper;
 use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 use serde_json::{json, Value};
 
-use crate::state::SharedState;
-
-use dravr_sciotte::models::HealthParams;
-use dravr_sciotte::ActivityScraper;
+use crate::state::{ServerState, SharedState};
 
 /// Scrape daily health/wellness summary for a given date
 pub struct GetDailySummaryTool;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for GetDailySummaryTool {
+impl McpTool<ServerState> for GetDailySummaryTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "get_daily_summary".to_owned(),

@@ -1,9 +1,13 @@
 // ABOUTME: Exploration test for Garmin Connect health pages (sleep, recovery, body battery)
 // ABOUTME: Validates whether sciotte's authenticated session can access health-specific endpoints
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 dravr.ai
 
 use std::env;
 use std::time::Duration;
 
+use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use dravr_sciotte::auth::{load_session, save_session};
@@ -13,6 +17,8 @@ use dravr_sciotte::error::LoginResult;
 use dravr_sciotte::models::AuthSession;
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::{ActivityScraper, ChromeScraper};
+use tokio::fs;
+use tokio::time::sleep;
 
 /// Garmin SSO login URL — used as initial navigation target before cookie injection
 const GARMIN_LOGIN_URL: &str = "https://sso.garmin.com/portal/sso/en-US/sign-in?clientId=GarminConnect&service=https%3A%2F%2Fconnect.garmin.com%2Fmodern";
@@ -157,7 +163,7 @@ async fn take_screenshot(page: &chromiumoxide::Page, label: &str) {
     match page.screenshot(params).await {
         Ok(data) => {
             let path = format!("/tmp/sciotte-garmin-{label}.png");
-            if tokio::fs::write(&path, &data).await.is_ok() {
+            if fs::write(&path, &data).await.is_ok() {
                 eprintln!("  Screenshot: {path} ({} bytes)", data.len());
             }
         }
@@ -169,7 +175,7 @@ async fn take_screenshot(page: &chromiumoxide::Page, label: &str) {
 /// Mirrors `ChromeScraper::open_authenticated_page`: navigate to login domain
 /// first so cookies bind to the right domain, then redirect to target.
 async fn open_page(
-    browser: &chromiumoxide::browser::Browser,
+    browser: &Browser,
     session: &AuthSession,
     url: &str,
     wait_secs: u64,
@@ -178,12 +184,12 @@ async fn open_page(
         .new_page(GARMIN_LOGIN_URL)
         .await
         .expect("open browser tab");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(500)).await;
     inject_cookies(&page, session)
         .await
         .expect("inject cookies");
     page.goto(url).await.expect("navigate to target URL");
-    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+    sleep(Duration::from_secs(wait_secs)).await;
     page
 }
 
@@ -273,7 +279,7 @@ async fn api_call(
 }
 
 /// Validate the session by navigating to the known-good activities page
-async fn validate_session(browser: &chromiumoxide::browser::Browser, session: &AuthSession) {
+async fn validate_session(browser: &Browser, session: &AuthSession) {
     eprintln!("== SESSION VALIDATION ==");
     let page = open_page(
         browser,
@@ -300,7 +306,7 @@ async fn validate_session(browser: &chromiumoxide::browser::Browser, session: &A
 }
 
 /// Test 1: Navigate to each health page and report whether it loaded
-async fn test_health_navigation(browser: &chromiumoxide::browser::Browser, session: &AuthSession) {
+async fn test_health_navigation(browser: &Browser, session: &AuthSession) {
     eprintln!("\n== TEST 1: Health page navigation ==");
     for (name, url) in HEALTH_PAGES {
         let page = open_page(browser, session, url, 5).await;
@@ -331,7 +337,7 @@ async fn test_health_navigation(browser: &chromiumoxide::browser::Browser, sessi
 }
 
 /// Tests 2-4: JS extraction on sleep and daily summary pages
-async fn test_js_extraction(browser: &chromiumoxide::browser::Browser, session: &AuthSession) {
+async fn test_js_extraction(browser: &Browser, session: &AuthSession) {
     eprintln!("\n== TEST 2: Sleep data extraction ==");
     let sleep_page = open_page(browser, session, "https://connect.garmin.com/app/sleep", 6).await;
     eprintln!("  Result: {}", eval_js(&sleep_page, SLEEP_EXTRACT_JS).await);

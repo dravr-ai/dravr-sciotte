@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -28,7 +28,7 @@ struct CacheKey {
 
 impl CacheKey {
     fn new(session: &AuthSession, params: &ActivityParams) -> Self {
-        let mut hasher = std::hash::DefaultHasher::new();
+        let mut hasher = DefaultHasher::new();
         params.limit.hash(&mut hasher);
         params.enrich_details.hash(&mut hasher);
         if let Some(before) = params.before {

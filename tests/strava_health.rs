@@ -1,9 +1,13 @@
 // ABOUTME: Exploration test for Strava wellness pages (Fitness & Freshness, Training Log)
 // ABOUTME: Probes what health/wellness data Strava exposes for extraction
+//
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// Copyright (c) 2026 dravr.ai
 
 use std::env;
 use std::time::Duration;
 
+use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use dravr_sciotte::auth::{load_session, save_session};
@@ -13,6 +17,8 @@ use dravr_sciotte::error::LoginResult;
 use dravr_sciotte::models::AuthSession;
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::{ActivityScraper, ChromeScraper};
+use tokio::fs;
+use tokio::time::sleep;
 
 const STRAVA_LOGIN_URL: &str = "https://www.strava.com/login";
 
@@ -23,7 +29,7 @@ async fn take_screenshot(page: &chromiumoxide::Page, label: &str) {
     match page.screenshot(params).await {
         Ok(data) => {
             let path = format!("/tmp/sciotte-strava-{label}.png");
-            if tokio::fs::write(&path, &data).await.is_ok() {
+            if fs::write(&path, &data).await.is_ok() {
                 eprintln!("  Screenshot: {path} ({} bytes)", data.len());
             }
         }
@@ -32,7 +38,7 @@ async fn take_screenshot(page: &chromiumoxide::Page, label: &str) {
 }
 
 async fn open_page(
-    browser: &chromiumoxide::browser::Browser,
+    browser: &Browser,
     session: &AuthSession,
     url: &str,
     wait_secs: u64,
@@ -41,12 +47,12 @@ async fn open_page(
         .new_page(STRAVA_LOGIN_URL)
         .await
         .expect("open browser tab");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    sleep(Duration::from_millis(500)).await;
     inject_cookies(&page, session)
         .await
         .expect("inject cookies");
     page.goto(url).await.expect("navigate to target URL");
-    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+    sleep(Duration::from_secs(wait_secs)).await;
     page
 }
 
@@ -87,12 +93,7 @@ async fn get_session(scraper: &ChromeScraper) -> AuthSession {
 }
 
 /// Probe a page: navigate, screenshot, dump title/URL/body length
-async fn probe_page(
-    browser: &chromiumoxide::browser::Browser,
-    session: &AuthSession,
-    name: &str,
-    url: &str,
-) {
+async fn probe_page(browser: &Browser, session: &AuthSession, name: &str, url: &str) {
     let page = open_page(browser, session, url, 5).await;
     let landed = eval_js(&page, "window.location.href").await;
     let title = eval_js(&page, "document.title").await;

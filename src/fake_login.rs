@@ -4,13 +4,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::error::Error;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::info;
 
 /// Start a local HTTP server serving the fake login fixtures.
 /// Returns the base URL (e.g., `http://127.0.0.1:12345`).
-pub async fn start_fake_server() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn start_fake_server() -> Result<String, Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let base_url = format!("http://{addr}");
@@ -35,7 +37,7 @@ async fn run_server(listener: TcpListener) {
     }
 }
 
-async fn handle_request(stream: tokio::net::TcpStream) {
+async fn handle_request(stream: TcpStream) {
     let mut buf = vec![0u8; 4096];
     let (mut reader, mut writer) = stream.into_split();
 

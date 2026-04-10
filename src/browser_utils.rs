@@ -4,6 +4,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::input::{
     DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
@@ -18,6 +22,7 @@ use crate::config::ScraperConfig;
 use crate::error::{ScraperError, ScraperResult};
 use crate::js_utils::escape_js_selector;
 use crate::models::{AuthSession, CookieData};
+use crate::script_loader;
 
 /// Launch a Chrome browser with the given configuration
 pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult<Browser> {
@@ -33,11 +38,11 @@ pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperRe
 
     // Use a unique temp profile directory to avoid SingletonLock conflicts
     // when multiple browser instances run concurrently
-    let profile_dir = std::env::temp_dir().join(format!(
+    let profile_dir = env::temp_dir().join(format!(
         "sciotte-chrome-{}",
-        std::process::id()
-            + std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+        process::id()
+            + SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .subsec_nanos()
     ));
@@ -377,9 +382,7 @@ pub async fn click_element(page: &chromiumoxide::Page, selector: &str) -> Scrape
 
 /// Auto-dismiss cookie consent dialogs (`Cookiebot`, `CookieFirst`, generic accept buttons)
 pub async fn dismiss_cookie_dialog(page: &chromiumoxide::Page) {
-    let dismiss_js = crate::script_loader::loader()
-        .load("dismiss_cookie.js")
-        .await;
+    let dismiss_js = script_loader::loader().load("dismiss_cookie.js").await;
     if let Ok(result) = page.evaluate(dismiss_js).await {
         let val = result
             .value()

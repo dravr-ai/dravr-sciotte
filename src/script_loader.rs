@@ -5,10 +5,12 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use tokio::fs;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
@@ -38,7 +40,7 @@ struct CachedScript {
 
 impl ScriptLoader {
     fn new() -> Self {
-        let scripts_dir = std::env::var("DRAVR_SCIOTTE_SCRIPTS_DIR")
+        let scripts_dir = env::var("DRAVR_SCIOTTE_SCRIPTS_DIR")
             .ok()
             .map(PathBuf::from);
 
@@ -68,7 +70,7 @@ impl ScriptLoader {
 
             // Read from filesystem
             let path = dir.join(name);
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Ok(content) = fs::read_to_string(&path).await {
                 debug!(name, path = %path.display(), "Loaded script from override directory");
                 let mut cache = self.cache.write().await;
                 cache.insert(

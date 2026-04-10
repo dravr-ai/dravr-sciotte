@@ -4,10 +4,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
@@ -15,12 +18,15 @@ use chromiumoxide::page::ScreenshotParams;
 use chrono::Utc;
 use embacle::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
 use tokio::sync::Mutex;
+use tokio::time::{self, Instant};
 use tracing::{debug, info, warn};
 
+use crate::browser_utils;
 use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
 use crate::models::{
-    Activity, ActivityParams, AthleteProfile, AuthSession, CookieData, DailySummary, HealthParams,
+    self, Activity, ActivityParams, AthleteProfile, AuthSession, CookieData, DailySummary,
+    HealthParams,
 };
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
@@ -62,7 +68,7 @@ impl VisionScraper {
             return Ok(Arc::clone(browser));
         }
 
-        let browser = crate::browser_utils::launch_browser(&self.config, true).await?;
+        let browser = browser_utils::launch_browser(&self.config, true).await?;
         let browser = Arc::new(browser);
         *guard = Some(Arc::clone(&browser));
 
@@ -84,10 +90,7 @@ impl VisionScraper {
                 reason: format!("Failed to take screenshot: {e}"),
             })?;
 
-        Ok(base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &data,
-        ))
+        Ok(BASE64_STANDARD.encode(&data))
     }
 
     /// Send a screenshot + prompt to the LLM and get a text response
@@ -130,7 +133,7 @@ impl VisionScraper {
 
     /// Load a prompt from a markdown file path
     fn load_prompt(path: &str) -> ScraperResult<String> {
-        std::fs::read_to_string(path).map_err(|e| ScraperError::Config {
+        fs::read_to_string(path).map_err(|e| ScraperError::Config {
             reason: format!("Failed to read vision prompt '{path}': {e}"),
         })
     }
@@ -149,9 +152,7 @@ impl VisionScraper {
             // Try provider config selector first (reliable text matching)
             let clicked =
                 if let Some(selector) = self.provider.provider.login_oauth_buttons.get(method) {
-                    crate::browser_utils::click_element(page, selector)
-                        .await
-                        .is_ok()
+                    browser_utils::click_element(page, selector).await.is_ok()
                 } else {
                     false
                 };
@@ -163,10 +164,10 @@ impl VisionScraper {
                     "Apple"
                 };
                 if let Some(action) = analysis.find_action_by_label(label) {
-                    let _ = crate::browser_utils::cdp_click_at(page, action.x, action.y).await;
+                    let _ = browser_utils::cdp_click_at(page, action.x, action.y).await;
                 }
             }
-            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
         } else {
             info!("Vision: filling email field");
             self.vision_fill_and_submit(page, analysis, email).await?;
@@ -212,20 +213,17 @@ impl VisionScraper {
 
     /// Handle passkey challenge — click "Try another way", then "Enter your password"
     async fn handle_passkey_challenge(&self, page: &chromiumoxide::Page, config: &ScraperConfig) {
-        let _ = crate::browser_utils::click_element(
-            page,
-            "text:Try another way, text:Essayer autrement",
-        )
-        .await;
-        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        let _ = browser_utils::click_element(page, "text:Try another way, text:Essayer autrement")
+            .await;
+        time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
         let pwd_selector = r#"input[type="password"], input[name="Passwd"]"#;
-        if !crate::browser_utils::element_exists(page, pwd_selector).await {
-            let _ = crate::browser_utils::click_element(
+        if !browser_utils::element_exists(page, pwd_selector).await {
+            let _ = browser_utils::click_element(
                 page,
                 "text:Enter your password, text:Saisir votre mot de passe",
             )
             .await;
-            tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
         }
     }
 
@@ -236,11 +234,11 @@ impl VisionScraper {
         analysis: &PageAnalysis,
         config: &ScraperConfig,
     ) {
-        crate::browser_utils::dismiss_cookie_dialog(page).await;
+        browser_utils::dismiss_cookie_dialog(page).await;
         if let Some(action) = analysis.find_click_action() {
-            let _ = crate::browser_utils::cdp_click_at(page, action.x, action.y).await;
+            let _ = browser_utils::cdp_click_at(page, action.x, action.y).await;
         }
-        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
     }
 
     /// Extract a number matching challenge number from the current page via LLM
@@ -264,16 +262,16 @@ impl VisionScraper {
         let submit_selectors = r#"#identifierNext button, #identifierNext, #passwordNext button, #passwordNext, button[type="submit"], text:Next, text:Log In, text:Sign In"#;
 
         // Determine if this is a password or email field
-        let filled = if crate::browser_utils::element_exists(page, password_selectors).await {
-            crate::browser_utils::fill_input_field(page, password_selectors, text)
+        let filled = if browser_utils::element_exists(page, password_selectors).await {
+            browser_utils::fill_input_field(page, password_selectors, text)
                 .await
                 .is_ok()
-        } else if crate::browser_utils::element_exists(page, email_selectors).await {
-            crate::browser_utils::fill_input_field(page, email_selectors, text)
+        } else if browser_utils::element_exists(page, email_selectors).await {
+            browser_utils::fill_input_field(page, email_selectors, text)
                 .await
                 .is_ok()
         } else if let Some(field) = analysis.find_fill_action() {
-            crate::browser_utils::cdp_click_at(page, field.x, field.y).await?;
+            browser_utils::cdp_click_at(page, field.x, field.y).await?;
             page.execute(InsertTextParams::new(text)).await.is_ok()
         } else {
             false
@@ -283,19 +281,19 @@ impl VisionScraper {
             warn!("Vision: could not fill input field");
         }
 
-        tokio::time::sleep(Duration::from_millis(self.config.form_interaction_delay_ms)).await;
+        time::sleep(Duration::from_millis(self.config.form_interaction_delay_ms)).await;
 
         // Click submit — try selectors first, then LLM coordinates
-        let clicked = crate::browser_utils::click_element(page, submit_selectors)
+        let clicked = browser_utils::click_element(page, submit_selectors)
             .await
             .is_ok();
         if !clicked {
             if let Some(button) = analysis.find_click_action() {
-                let _ = crate::browser_utils::cdp_click_at(page, button.x, button.y).await;
+                let _ = browser_utils::cdp_click_at(page, button.x, button.y).await;
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
         Ok(())
     }
 
@@ -421,7 +419,7 @@ impl ActivityScraper for VisionScraper {
             "Starting vision-based credential login"
         );
 
-        let browser = crate::browser_utils::launch_browser(config, false).await?;
+        let browser = browser_utils::launch_browser(config, false).await?;
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
@@ -429,14 +427,14 @@ impl ActivityScraper for VisionScraper {
                 reason: format!("Failed to open login page: {e}"),
             })?;
 
-        tokio::time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
         // Vision-driven login loop: analyze page, take action, repeat
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(config.login_timeout_secs);
+        let deadline = Instant::now() + Duration::from_secs(config.login_timeout_secs);
         let mut cookie_dismiss_attempts = 0u32;
 
         loop {
-            if tokio::time::Instant::now() > deadline {
+            if Instant::now() > deadline {
                 return Err(ScraperError::Auth {
                     reason: "Vision login timed out".to_owned(),
                 });
@@ -479,7 +477,7 @@ impl ActivityScraper for VisionScraper {
                         *self.pending_login.lock().await = Some((browser, page));
                         return Ok(result);
                     }
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    time::sleep(Duration::from_secs(3)).await;
                 }
                 "success" => {
                     info!("Vision: login success detected");
@@ -497,7 +495,7 @@ impl ActivityScraper for VisionScraper {
                         page_type = analysis.page_type,
                         "Vision: unknown page type, waiting"
                     );
-                    tokio::time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+                    time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
                 }
             }
         }
@@ -552,7 +550,7 @@ impl ActivityScraper for VisionScraper {
             .find(|o| o.id == option_id);
 
         if let Some(opt) = option {
-            crate::browser_utils::cdp_click_at(&page, opt.x, opt.y).await?;
+            browser_utils::cdp_click_at(&page, opt.x, opt.y).await?;
         } else {
             *self.pending_login.lock().await = Some((browser, page));
             return Err(ScraperError::Auth {
@@ -566,11 +564,11 @@ impl ActivityScraper for VisionScraper {
             self.config.password_step_timeout_secs
         };
 
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        let deadline = Instant::now() + Duration::from_secs(timeout);
         loop {
-            if tokio::time::Instant::now() > deadline {
+            if Instant::now() > deadline {
                 return Err(ScraperError::Auth {
                     reason: "2FA verification timed out".to_owned(),
                 });
@@ -594,8 +592,7 @@ impl ActivityScraper for VisionScraper {
                     ));
                 }
                 _ => {
-                    tokio::time::sleep(Duration::from_millis(self.config.login_poll_interval_ms))
-                        .await;
+                    time::sleep(Duration::from_millis(self.config.login_poll_interval_ms)).await;
                 }
             }
         }
@@ -632,7 +629,7 @@ impl ActivityScraper for VisionScraper {
                 reason: format!("Failed to navigate to list page: {e}"),
             })?;
 
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
 
         let target = params.limit.unwrap_or(20) as usize;
         let items = self.extract_list_data(&page).await?;
@@ -668,7 +665,7 @@ impl ActivityScraper for VisionScraper {
             reason: format!("Failed to navigate to activity page: {e}"),
         })?;
 
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
 
         let data = self.extract_detail_data(&page).await?;
 
@@ -701,7 +698,7 @@ impl ActivityScraper for VisionScraper {
                 reason: format!("Failed to navigate to profile: {e}"),
             })?;
 
-        tokio::time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+        time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
 
         let screenshot = self.screenshot_base64(&page).await?;
         let prompt = "Extract the athlete's profile from this page. Return JSON with fields: display_name, firstname, lastname, profile_picture_url, city, country. Only include fields that are visible.";
@@ -819,7 +816,7 @@ fn parse_vision_activity(v: &serde_json::Value) -> Option<Activity> {
     Some(Activity {
         id,
         name,
-        sport_type: crate::models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
+        sport_type: models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
         start_date: Utc::now(),
         duration_seconds: 0,
         distance_meters: None,
@@ -865,7 +862,7 @@ fn parse_vision_activity_detail(id: &str, v: &serde_json::Value) -> Activity {
     Activity {
         id: id.to_owned(),
         name: v["name"].as_str().unwrap_or("").to_owned(),
-        sport_type: crate::models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
+        sport_type: models::SportType::from_strava(v["type"].as_str().unwrap_or("")),
         start_date: Utc::now(),
         duration_seconds: 0,
         distance_meters: None,

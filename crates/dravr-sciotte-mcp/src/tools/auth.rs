@@ -5,19 +5,19 @@
 // Copyright (c) 2026 dravr.ai
 
 use async_trait::async_trait;
+use dravr_sciotte::auth;
+use dravr_sciotte::ActivityScraper;
 use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
 use dravr_tronc::McpTool;
 use serde_json::{json, Value};
 
-use crate::state::SharedState;
-
-use dravr_sciotte::ActivityScraper;
+use crate::state::{ServerState, SharedState};
 
 /// Check authentication status
 pub struct AuthStatusTool;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for AuthStatusTool {
+impl McpTool<ServerState> for AuthStatusTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "auth_status".to_owned(),
@@ -57,7 +57,7 @@ impl McpTool<crate::state::ServerState> for AuthStatusTool {
 pub struct BrowserLoginTool;
 
 #[async_trait]
-impl McpTool<crate::state::ServerState> for BrowserLoginTool {
+impl McpTool<ServerState> for BrowserLoginTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "browser_login".to_owned(),
@@ -79,7 +79,7 @@ impl McpTool<crate::state::ServerState> for BrowserLoginTool {
             }
         };
 
-        if let Err(e) = dravr_sciotte::auth::save_session(&session).await {
+        if let Err(e) = auth::save_session(&session).await {
             return CallToolResult::error(format!(
                 "Login succeeded but failed to save session: {e}"
             ));
