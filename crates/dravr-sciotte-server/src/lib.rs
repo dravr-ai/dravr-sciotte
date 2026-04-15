@@ -5,6 +5,7 @@
 // Copyright (c) 2026 dravr.ai
 
 pub mod auth;
+pub mod error_response;
 pub mod health;
 pub mod router;
 pub mod state;

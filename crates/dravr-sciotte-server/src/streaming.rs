@@ -27,8 +27,11 @@ use dravr_sciotte::error::{LoginResult, ScraperResult};
 use dravr_sciotte::js_utils;
 use dravr_sciotte::models::{AuthSession, CookieData};
 use dravr_sciotte::provider::ProviderConfig;
+use dravr_sciotte::queue::ScrapePermit;
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
+
+use crate::error_response::scraper_error_response;
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -135,6 +138,10 @@ pub struct BrowserLoginParams {
 ///
 /// Accepts optional `?token=` query param for authentication since
 /// browser WebSocket API cannot send custom headers.
+///
+/// Acquires a scraper permit before upgrading so the WebSocket session counts
+/// against the concurrency budget for its full lifetime. When the backpressure
+/// queue is saturated this returns 503 + Retry-After without launching Chrome.
 pub async fn browser_login_ws(
     ws: WebSocketUpgrade,
     State(state): State<SharedState>,
@@ -149,16 +156,27 @@ pub async fn browser_login_ws(
         }
     }
 
+    let limiter = state.read().await.limiter().clone();
+    let permit = match limiter.acquire().await {
+        Ok(p) => p,
+        Err(err) => return scraper_error_response(&err.into_scraper_error()),
+    };
+
     let method = params.method.unwrap_or_default();
-    ws.on_upgrade(move |socket| handle_browser_login(socket, state, method))
+    ws.on_upgrade(move |socket| handle_browser_login(socket, state, method, permit))
         .into_response()
 }
 
 /// Core WebSocket handler that manages the Chrome session
-async fn handle_browser_login(socket: WebSocket, state: SharedState, method: String) {
+async fn handle_browser_login(
+    socket: WebSocket,
+    state: SharedState,
+    method: String,
+    permit: ScrapePermit,
+) {
     let provider = {
         let guard = state.read().await;
-        guard.scraper().inner().provider().clone()
+        guard.scraper().inner().inner().provider().clone()
     };
 
     info!(
@@ -170,6 +188,10 @@ async fn handle_browser_login(socket: WebSocket, state: SharedState, method: Str
     if let Err(e) = run_streaming_session(socket, state, &provider, &method).await {
         error!(error = %e, "Browser streaming session failed");
     }
+
+    // Drop the permit only after the streaming session fully terminates so
+    // the backpressure budget tracks the real Chrome lifetime.
+    drop(permit);
 }
 
 /// Run the full streaming session: launch Chrome, stream frames, handle input, detect login
@@ -418,11 +440,7 @@ async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedS
         }
         Err(e) => {
             error!(error = %e, "Login error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "status": "error", "reason": e.to_string() })),
-            )
-                .into_response()
+            scraper_error_response(&e)
         }
     }
 }
@@ -516,14 +534,7 @@ pub async fn submit_otp(
         }
         Err(e) => {
             error!(error = %e, "OTP submission error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "reason": e.to_string(),
-                })),
-            )
-                .into_response()
+            scraper_error_response(&e)
         }
     }
 }
@@ -593,14 +604,7 @@ pub async fn select_two_factor(
         }
         Err(e) => {
             error!(error = %e, "2FA selection error");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "reason": e.to_string(),
-                })),
-            )
-                .into_response()
+            scraper_error_response(&e)
         }
     }
 }

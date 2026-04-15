@@ -62,6 +62,16 @@ pub enum ScraperError {
         /// Detailed failure reason
         reason: String,
     },
+
+    /// Scraper is at capacity and new requests are being shed by the
+    /// backpressure queue. Carries a suggested `Retry-After` hint in seconds.
+    #[error("scraper busy: {reason} (retry after {retry_after_secs}s)")]
+    Busy {
+        /// Human-readable reason (e.g. queue full, permit acquire timeout)
+        reason: String,
+        /// Suggested retry delay in seconds for client `Retry-After` headers
+        retry_after_secs: u64,
+    },
 }
 
 impl ScraperError {
@@ -69,7 +79,10 @@ impl ScraperError {
     pub const fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::Network { .. } | Self::Browser { .. } | Self::SessionExpired { .. }
+            Self::Network { .. }
+                | Self::Browser { .. }
+                | Self::SessionExpired { .. }
+                | Self::Busy { .. }
         )
     }
 }

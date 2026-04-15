@@ -594,7 +594,21 @@ Activities scraped from detail pages include:
 
 ## Environment Variables
 
-All variables are optional. Unset variables use the defaults shown below.
+Some variables are optional and use the defaults shown below. The **backpressure queue** variables are mandatory and have no defaults — the binary refuses to start if any are missing. Production values live in infrastructure-as-code (Terraform / .envrc), not in the crate source.
+
+### Backpressure queue (required)
+
+The scraper wraps every `ActivityScraper` in a FIFO-fair limiter so Chrome spawns cannot OOM the host. All seven variables below are required by `dravr-sciotte-server` and `dravr-sciotte-mcp` at startup.
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `DRAVR_SCIOTTE_MAX_CONCURRENT` | `2` | Hard cap on simultaneously running Chrome scrapes per process. |
+| `DRAVR_SCIOTTE_MAX_QUEUE` | `8` | Combined cap on running + waiting requests. Requests beyond this fast-reject with 503. Must be `>= MAX_CONCURRENT`. |
+| `DRAVR_SCIOTTE_QUEUE_TIMEOUT_SECS` | `10` | Maximum seconds a request waits for a permit before returning 503. |
+| `DRAVR_SCIOTTE_PARKED_PERMIT_TTL_SECS` | `300` | Maximum seconds a permit can stay parked across a multi-step OTP/2FA flow. After this the watchdog drops the permit. |
+| `DRAVR_SCIOTTE_WATCHDOG_INTERVAL_SECS` | `15` | Interval at which the watchdog scans for stale parked permits. Must be `> 0`. |
+| `DRAVR_SCIOTTE_RETRY_AFTER_HINT_SECS` | `5` | `Retry-After` header value emitted on queue-full / timeout rejections. |
+| `DRAVR_SCIOTTE_CLOSED_RETRY_AFTER_SECS` | `60` | `Retry-After` header value emitted when the limiter is closed (shutdown). |
 
 ### Server
 

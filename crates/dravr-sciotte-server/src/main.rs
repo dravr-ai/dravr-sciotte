@@ -5,6 +5,7 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::error::Error;
+use std::io::Error as IoError;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,8 +17,10 @@ use dravr_sciotte::config::LoginMode;
 use dravr_sciotte::config::{CacheConfig, ScraperConfig};
 use dravr_sciotte::models::{Activity, ActivityParams};
 use dravr_sciotte::provider::ProviderConfig;
+use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
+use dravr_sciotte_mcp::state::AppScraper;
 use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 use dravr_sciotte_server::router;
 use dravr_tronc::mcp::transport::stdio;
@@ -136,27 +139,52 @@ fn load_provider_config(
     }
 }
 
-fn create_scraper(provider: ProviderConfig) -> CachedScraper<ChromeScraper> {
+/// Build the shared backpressure limiter from `DRAVR_SCIOTTE_*` environment
+/// variables. The crate ships no numeric defaults — operators must supply
+/// every knob via env (Terraform / .envrc in production). Fail fast on
+/// missing or malformed config so the binary never silently papers over
+/// bad infra.
+fn build_limiter() -> Result<Arc<SciotteLimiter>, Box<dyn Error + Send + Sync>> {
+    let config = QueueConfig::from_env().map_err(|e| -> Box<dyn Error + Send + Sync> {
+        Box::new(IoError::other(format!(
+            "invalid sciotte queue configuration: {e}"
+        )))
+    })?;
+    info!(
+        max_concurrent = config.max_concurrent,
+        max_queue_depth = config.max_queue_depth,
+        acquire_timeout_secs = config.acquire_timeout.as_secs(),
+        parked_permit_ttl_secs = config.parked_permit_ttl.as_secs(),
+        watchdog_interval_secs = config.watchdog_interval.as_secs(),
+        retry_after_hint_secs = config.retry_after_hint.as_secs(),
+        closed_retry_after_secs = config.closed_retry_after.as_secs(),
+        "Sciotte queue configuration loaded from environment"
+    );
+    Ok(SciotteLimiter::new(config))
+}
+
+fn create_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> AppScraper {
     let config = ScraperConfig::default();
-    let scraper = ChromeScraper::new(config, provider);
-    CachedScraper::new(scraper, &CacheConfig::default())
+    let chrome = ChromeScraper::new(config, provider);
+    let queued = QueuedScraper::new(chrome, limiter);
+    CachedScraper::new(queued, &CacheConfig::default())
 }
 
 /// Create a scraper with vision-based login via Copilot Headless LLM
 #[cfg(feature = "vision")]
 async fn create_vision_scraper(
     provider: ProviderConfig,
-) -> Result<CachedScraper<ChromeScraper>, Box<dyn Error + Send + Sync>> {
-    use std::sync::Arc;
-
+    limiter: Arc<SciotteLimiter>,
+) -> Result<AppScraper, Box<dyn Error + Send + Sync>> {
     let headless_config = embacle::CopilotHeadlessConfig::from_env();
     info!("Initializing Copilot Headless LLM for vision login...");
     let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config).await);
 
     let config = ScraperConfig::default();
     info!(login_mode = ?config.login_mode, "Vision scraper ready");
-    let scraper = ChromeScraper::new(config, provider).with_llm(llm);
-    Ok(CachedScraper::new(scraper, &CacheConfig::default()))
+    let chrome = ChromeScraper::new(config, provider).with_llm(llm);
+    let queued = QueuedScraper::new(chrome, limiter);
+    Ok(CachedScraper::new(queued, &CacheConfig::default()))
 }
 
 async fn run_server(
@@ -164,18 +192,21 @@ async fn run_server(
     port: u16,
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let limiter = build_limiter()?;
+    let watchdog = limiter.spawn_watchdog();
+
     #[cfg(feature = "vision")]
     let cached = {
         let config = ScraperConfig::default();
         if matches!(config.login_mode, LoginMode::Vision | LoginMode::Hybrid) {
-            create_vision_scraper(provider).await?
+            create_vision_scraper(provider, Arc::clone(&limiter)).await?
         } else {
-            create_scraper(provider)
+            create_scraper(provider, Arc::clone(&limiter))
         }
     };
     #[cfg(not(feature = "vision"))]
-    let cached = create_scraper(provider);
-    let state = Arc::new(RwLock::new(ServerState::new(cached)));
+    let cached = create_scraper(provider, Arc::clone(&limiter));
+    let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));
 
     if let Ok(Some(session)) = auth::load_session().await {
         info!("Loaded persisted session");
@@ -187,13 +218,18 @@ async fn run_server(
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;
     info!(address = %addr, "Server listening");
-    axum::serve(listener, app).await?;
+    let serve_result = axum::serve(listener, app).await;
+    watchdog.abort();
+    serve_result?;
     Ok(())
 }
 
 async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cached = create_scraper(provider);
-    let state = Arc::new(RwLock::new(ServerState::new(cached)));
+    let limiter = build_limiter()?;
+    let watchdog = limiter.spawn_watchdog();
+
+    let cached = create_scraper(provider, Arc::clone(&limiter));
+    let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));
 
     if let Ok(Some(session)) = auth::load_session().await {
         state.write().await.set_session(session);
@@ -205,11 +241,14 @@ async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + S
         build_tool_registry(),
         state,
     ));
-    stdio::run(server).await
+    let result = stdio::run(server).await;
+    watchdog.abort();
+    result
 }
 
 async fn run_login(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cached = create_scraper(provider);
+    let limiter = build_limiter()?;
+    let cached = create_scraper(provider, limiter);
 
     println!("Opening browser for login...");
     println!("Complete the login in the browser window that opens.");
@@ -233,7 +272,8 @@ async fn run_activities(
     detail: bool,
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cached = create_scraper(provider);
+    let limiter = build_limiter()?;
+    let cached = create_scraper(provider, limiter);
 
     let session = if force_login {
         println!("Opening browser for login...");

@@ -71,12 +71,18 @@ pub mod scraper;
 /// In-memory TTL cache layer
 pub mod cache;
 
+/// FIFO queue and backpressure limiter for concurrent scraping operations
+pub mod queue;
+
 /// Vision-based scraper using LLM screenshot analysis (requires `vision` feature)
 #[cfg(feature = "vision")]
 pub mod vision;
 
 // Re-export primary types for consumers
 pub use cache::CachedScraper;
+pub use queue::{
+    LimiterError, QueueConfig, QueueConfigError, QueuedScraper, SciotteLimiter, ScrapePermit,
+};
 pub use scraper::ChromeScraper;
 pub use types::ActivityScraper;
 

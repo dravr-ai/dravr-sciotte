@@ -24,6 +24,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 use crate::auth::auth_middleware;
+use crate::error_response::scraper_error_response;
 use crate::health::health_handler;
 use crate::streaming;
 
@@ -98,9 +99,7 @@ async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
         let guard = state.read().await;
         match guard.scraper().browser_login().await {
             Ok(s) => s,
-            Err(e) => {
-                return Json(json!({"error": format!("Login failed: {e}")})).into_response();
-            }
+            Err(e) => return scraper_error_response(&e),
         }
     };
 
@@ -191,11 +190,7 @@ async fn athlete_handler(
 
     match guard.scraper().get_athlete(session).await {
         Ok(profile) => Json(json!(profile)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to get athlete profile: {e}")})),
-        )
-            .into_response(),
+        Err(e) => scraper_error_response(&e),
     }
 }
 
@@ -238,11 +233,7 @@ async fn activities_handler(
             "activities": activities,
         }))
         .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Scraping failed: {e}")})),
-        )
-            .into_response(),
+        Err(e) => scraper_error_response(&e),
     }
 }
 
@@ -267,11 +258,7 @@ async fn activity_detail_handler(
 
     match guard.scraper().get_activity(session, &id).await {
         Ok(activity) => Json(json!(activity)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to get activity {id}: {e}")})),
-        )
-            .into_response(),
+        Err(e) => scraper_error_response(&e),
     }
 }
 
@@ -315,10 +302,6 @@ async fn daily_summary_handler(
 
     match guard.scraper().get_daily_summary(session, &params).await {
         Ok(summary) => Json(json!(summary)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to get daily summary: {e}")})),
-        )
-            .into_response(),
+        Err(e) => scraper_error_response(&e),
     }
 }

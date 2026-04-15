@@ -1,4 +1,4 @@
-// ABOUTME: Shared server state holding the cached scraper and multi-session store
+// ABOUTME: Shared server state holding the cached+queued scraper and multi-session store
 // ABOUTME: Thread-safe via Arc<RwLock> for concurrent access from transport handlers
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -9,35 +9,49 @@ use std::sync::Arc;
 
 use dravr_sciotte::cache::CachedScraper;
 use dravr_sciotte::models::AuthSession;
+use dravr_sciotte::queue::{QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use tokio::sync::RwLock;
+
+/// Outer scraper type used by handlers: a TTL cache wrapping the queue-gated
+/// Chrome scraper. Cache hits skip the backpressure limiter entirely; only
+/// cache misses and login flows consume a slot.
+pub type AppScraper = CachedScraper<QueuedScraper<ChromeScraper>>;
 
 /// Type alias for the shared state handle used across the server
 pub type SharedState = Arc<RwLock<ServerState>>;
 
-/// Central server state holding the scraper and multi-session authentication store.
+/// Central server state holding the scraper, the backpressure limiter, and
+/// the multi-session authentication store.
 ///
 /// Sessions are keyed by `session_id`. The `latest_session_id` tracks the most
 /// recently created session for backward compatibility with single-session callers.
 pub struct ServerState {
-    scraper: CachedScraper<ChromeScraper>,
+    scraper: AppScraper,
+    limiter: Arc<SciotteLimiter>,
     sessions: HashMap<String, AuthSession>,
     latest_session_id: Option<String>,
 }
 
 impl ServerState {
-    /// Create server state with the given cached scraper and no sessions
-    pub fn new(scraper: CachedScraper<ChromeScraper>) -> Self {
+    /// Create server state with the given cached+queued scraper and limiter.
+    pub fn new(scraper: AppScraper, limiter: Arc<SciotteLimiter>) -> Self {
         Self {
             scraper,
+            limiter,
             sessions: HashMap::new(),
             latest_session_id: None,
         }
     }
 
     /// Get a reference to the cached scraper
-    pub const fn scraper(&self) -> &CachedScraper<ChromeScraper> {
+    pub const fn scraper(&self) -> &AppScraper {
         &self.scraper
+    }
+
+    /// Get a reference to the shared backpressure limiter
+    pub const fn limiter(&self) -> &Arc<SciotteLimiter> {
+        &self.limiter
     }
 
     /// Look up a session by ID
