@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.8] — 2026-04-15
+
+### Added
+
+- feat(queue): FIFO backpressure limiter for Chrome scraping SciotteLimiter + QueuedScraper wrap any ActivityScraper with a bounded FIFO-fair semaphore, parked permits across multi-step OTP/2FA flows, watchdog eviction, and 503+Retry-After on saturation; QueueConfig::from_env requires all seven DRAVR_SCIOTTE_* vars with no crate defaults, fails fast via QueueConfigError, and LimiterError variants carry the configured Retry-After Duration (NoCapacity split from AcquireTimeout); both binaries init at startup; README documents the required vars.
+
+
+
 ## [0.5.7] — 2026-04-10
 
 ### Other
