@@ -853,6 +853,8 @@ fn parse_vision_activity(v: &serde_json::Value) -> Option<Activity> {
         start_latitude: None,
         start_longitude: None,
         segment_efforts: None,
+        splits: None,
+        laps: None,
         provider: "vision-scraper".to_owned(),
     })
 }
@@ -905,6 +907,8 @@ fn parse_vision_activity_detail(id: &str, v: &serde_json::Value) -> Activity {
         start_latitude: None,
         start_longitude: None,
         segment_efforts: None,
+        splits: None,
+        laps: None,
         provider: "vision-scraper".to_owned(),
     }
 }

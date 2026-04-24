@@ -31,7 +31,8 @@ use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
 use crate::fake_login;
 use crate::models::{
-    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, SportType,
+    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, Lap, Split,
+    SportType,
 };
 use crate::provider::ProviderConfig;
 use crate::script_loader;
@@ -1698,6 +1699,8 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
             Some(sport_type_str.to_owned())
         },
         segment_efforts: None,
+        splits: None,
+        laps: None,
         provider: "scraper".to_owned(),
     }
 }
@@ -1773,8 +1776,109 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
         workout_type: None,
         sport_type_detail: data["type"].as_str().map(String::from),
         segment_efforts: None,
+        splits: parse_splits_from_detail(data),
+        laps: parse_laps_from_detail(data),
         provider: "scraper".to_owned(),
     }
+}
+
+/// Parse a splits array returned by the detail-page JS extraction.
+///
+/// Expected shape (from the extended `js_extract` that looks for the
+/// `splits_metric` array inside Strava's embedded activity JSON):
+/// `[{"distance": f64, "elapsed_time": u64, "moving_time"?: u64,
+/// "elevation_difference"?: f64, "average_speed"?: f64,
+/// "average_heartrate"?: u32, "pace_zone"?: u32}, ...]`.
+///
+/// Missing `distance` or `elapsed_time` on an entry causes that entry
+/// to be skipped — a split without either is unusable for coach reasoning.
+/// Returns `None` when the array is absent or yields zero usable entries.
+fn parse_splits_from_detail(data: &serde_json::Value) -> Option<Vec<Split>> {
+    let arr = data.get("splits")?.as_array()?;
+    let parsed: Vec<Split> = arr
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, v)| {
+            let distance_meters = v.get("distance")?.as_f64()?;
+            let elapsed_time_seconds = v.get("elapsed_time")?.as_u64()?;
+            #[allow(clippy::cast_possible_truncation)]
+            let index = v
+                .get("split")
+                .and_then(serde_json::Value::as_u64)
+                .map_or((pos + 1) as u32, |n| n as u32);
+            Some(Split {
+                index,
+                distance_meters,
+                elapsed_time_seconds,
+                moving_time_seconds: v.get("moving_time").and_then(serde_json::Value::as_u64),
+                elevation_difference_meters: v
+                    .get("elevation_difference")
+                    .and_then(serde_json::Value::as_f64),
+                average_speed_mps: v.get("average_speed").and_then(serde_json::Value::as_f64),
+                #[allow(clippy::cast_possible_truncation)]
+                average_heart_rate: v
+                    .get("average_heartrate")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|n| n as u32),
+                #[allow(clippy::cast_possible_truncation)]
+                pace_zone: v
+                    .get("pace_zone")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|n| n as u32),
+            })
+        })
+        .collect();
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+/// Parse a laps array returned by the detail-page JS extraction.
+///
+/// Expected shape mirrors Strava's embedded laps JSON (same keys as the
+/// REST API's lap endpoint): `id`, `distance`, `elapsed_time`,
+/// `moving_time`, `total_elevation_gain`, `average_speed`, `max_speed`,
+/// `average_heartrate`, `max_heartrate`, `average_cadence`,
+/// `average_watts`. Entries missing `distance` or `elapsed_time` are
+/// skipped.
+fn parse_laps_from_detail(data: &serde_json::Value) -> Option<Vec<Lap>> {
+    let arr = data.get("laps")?.as_array()?;
+    let parsed: Vec<Lap> = arr
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, v)| {
+            let distance_meters = v.get("distance")?.as_f64()?;
+            let elapsed_time_seconds = v.get("elapsed_time")?.as_u64()?;
+            #[allow(clippy::cast_possible_truncation)]
+            let index = (pos + 1) as u32;
+            let id = v.get("id").and_then(|x| {
+                x.as_u64()
+                    .map(|n| n.to_string())
+                    .or_else(|| x.as_str().map(String::from))
+            });
+            #[allow(clippy::cast_possible_truncation)]
+            let cast_u32 = |key: &str| -> Option<u32> {
+                v.get(key)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|n| n as u32)
+            };
+            Some(Lap {
+                id,
+                index,
+                distance_meters,
+                elapsed_time_seconds,
+                moving_time_seconds: v.get("moving_time").and_then(serde_json::Value::as_u64),
+                elevation_gain_meters: v
+                    .get("total_elevation_gain")
+                    .and_then(serde_json::Value::as_f64),
+                average_speed_mps: v.get("average_speed").and_then(serde_json::Value::as_f64),
+                max_speed_mps: v.get("max_speed").and_then(serde_json::Value::as_f64),
+                average_heart_rate: cast_u32("average_heartrate"),
+                max_heart_rate: cast_u32("max_heartrate"),
+                average_cadence: cast_u32("average_cadence"),
+                average_power: cast_u32("average_watts"),
+            })
+        })
+        .collect();
+    (!parsed.is_empty()).then_some(parsed)
 }
 
 /// Merge detail page data into an activity already populated from the list page

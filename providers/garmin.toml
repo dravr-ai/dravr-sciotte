@@ -129,6 +129,84 @@ js_extract = '''
     var devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS)[^\n,]*/i);
     if (devMatch) data.device = devMatch[0].trim();
 
+    // Splits + laps — Garmin Connect hydrates its React app from
+    // embedded `<script>` bootstrap blocks. The keys vary by page
+    // version ("lapDTOs", "activityLaps", "activitySplits", "splits")
+    // so we try each known variant per script. Bracket walker handles
+    // arrays nested inside larger JSON objects. Parse errors per script
+    // are swallowed — the next script may carry the data.
+    function extractJsonArrayForKey(haystack, key) {
+        var needle = '"' + key + '"';
+        var k = haystack.indexOf(needle);
+        if (k < 0) return null;
+        var bracket = haystack.indexOf('[', k);
+        if (bracket < 0) return null;
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (var i = bracket; i < haystack.length; i++) {
+            var ch = haystack[i];
+            if (escaped) { escaped = false; continue; }
+            if (ch === '\\\\') { escaped = true; continue; }
+            if (ch === '"') { inString = !inString; continue; }
+            if (inString) continue;
+            if (ch === '[') depth++;
+            else if (ch === ']') { depth--; if (depth === 0) {
+                try { return JSON.parse(haystack.substring(bracket, i + 1)); }
+                catch (e) { return null; }
+            } }
+        }
+        return null;
+    }
+    var scripts = document.querySelectorAll('script');
+    for (var si = 0; si < scripts.length; si++) {
+        var body = scripts[si].textContent || '';
+        if (!data.splits) {
+            var sp = extractJsonArrayForKey(body, 'activitySplits');
+            if (!Array.isArray(sp)) sp = extractJsonArrayForKey(body, 'splits');
+            if (Array.isArray(sp) && sp.length > 0) data.splits = sp;
+        }
+        if (!data.laps) {
+            var lp = extractJsonArrayForKey(body, 'lapDTOs');
+            if (!Array.isArray(lp)) lp = extractJsonArrayForKey(body, 'activityLaps');
+            if (!Array.isArray(lp)) lp = extractJsonArrayForKey(body, 'laps');
+            if (Array.isArray(lp) && lp.length > 0) data.laps = lp;
+        }
+        if (data.splits && data.laps) break;
+    }
+
+    // Normalize Garmin field names to Strava-style keys so the Rust
+    // parser (shared across providers) can deserialize either.
+    // Garmin DTOs use camelCase + different names: duration vs
+    // elapsed_time, averageHR vs average_heartrate, etc.
+    function normalizeLap(l) {
+        return {
+            distance: l.distance != null ? l.distance : null,
+            elapsed_time: l.duration != null ? Math.round(l.duration) : l.elapsed_time,
+            moving_time: l.movingDuration != null ? Math.round(l.movingDuration) : l.moving_time,
+            total_elevation_gain: l.elevationGain != null ? l.elevationGain : l.total_elevation_gain,
+            average_speed: l.averageSpeed != null ? l.averageSpeed : l.average_speed,
+            max_speed: l.maxSpeed != null ? l.maxSpeed : l.max_speed,
+            average_heartrate: l.averageHR != null ? l.averageHR : (l.averageHeartRate != null ? l.averageHeartRate : l.average_heartrate),
+            max_heartrate: l.maxHR != null ? l.maxHR : (l.maxHeartRate != null ? l.maxHeartRate : l.max_heartrate),
+            average_cadence: l.averageRunningCadenceInStepsPerMinute != null ? l.averageRunningCadenceInStepsPerMinute : (l.averageCadence != null ? l.averageCadence : l.average_cadence),
+            average_watts: l.averagePower != null ? l.averagePower : l.average_watts,
+            id: l.lapIndex != null ? l.lapIndex : l.id
+        };
+    }
+    function normalizeSplit(s) {
+        return {
+            distance: s.distance != null ? s.distance : null,
+            elapsed_time: s.duration != null ? Math.round(s.duration) : s.elapsed_time,
+            moving_time: s.movingDuration != null ? Math.round(s.movingDuration) : s.moving_time,
+            elevation_difference: s.elevationGain != null ? s.elevationGain : s.elevation_difference,
+            average_speed: s.averageSpeed != null ? s.averageSpeed : s.average_speed,
+            average_heartrate: s.averageHR != null ? s.averageHR : s.average_heartrate
+        };
+    }
+    if (Array.isArray(data.splits)) data.splits = data.splits.map(normalizeSplit);
+    if (Array.isArray(data.laps)) data.laps = data.laps.map(normalizeLap);
+
     return JSON.stringify(data);
 })()
 '''

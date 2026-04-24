@@ -194,6 +194,78 @@ pub struct SegmentEffort {
 }
 
 // ============================================================================
+// Split and Lap
+// ============================================================================
+
+/// Per-distance split from a detailed-page extraction (typically 1 km / 1 mi).
+///
+/// Mirrors cageux's [`Split`](https://github.com/dravr-ai/dravr-cageux) — the
+/// adapter in `pierre_mcp_server` converts one to the other. Populated only
+/// when the provider's detail page exposes splits; `None` otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Split {
+    /// 1-based split index
+    pub index: u32,
+    /// Distance covered in this split (meters)
+    pub distance_meters: f64,
+    /// Elapsed time for the split (seconds)
+    pub elapsed_time_seconds: u64,
+    /// Moving time (seconds) — excludes stopped time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moving_time_seconds: Option<u64>,
+    /// Elevation delta (meters) — negative on descents
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elevation_difference_meters: Option<f64>,
+    /// Average speed (meters/second)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_speed_mps: Option<f64>,
+    /// Average heart rate during the split (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_heart_rate: Option<u32>,
+    /// Provider-defined pace zone (0-5 for running)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pace_zone: Option<u32>,
+}
+
+/// Provider-defined lap — athlete-triggered (watch button) or auto-detected interval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Lap {
+    /// Provider-specific lap identifier (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 1-based lap index
+    pub index: u32,
+    /// Distance covered in this lap (meters)
+    pub distance_meters: f64,
+    /// Elapsed time for the lap (seconds)
+    pub elapsed_time_seconds: u64,
+    /// Moving time (seconds)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moving_time_seconds: Option<u64>,
+    /// Total elevation gain for the lap (meters)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elevation_gain_meters: Option<f64>,
+    /// Average speed (meters/second)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_speed_mps: Option<f64>,
+    /// Max speed reached (meters/second)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_speed_mps: Option<f64>,
+    /// Average heart rate during the lap (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_heart_rate: Option<u32>,
+    /// Max heart rate during the lap (BPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_heart_rate: Option<u32>,
+    /// Average cadence (rpm for cycling, spm for running)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_cadence: Option<u32>,
+    /// Average power output (watts)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_power: Option<u32>,
+}
+
+// ============================================================================
 // Activity
 // ============================================================================
 
@@ -339,6 +411,14 @@ pub struct Activity {
     /// Segment efforts within this activity
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment_efforts: Option<Vec<SegmentEffort>>,
+
+    /// Per-distance splits (typically 1 km / 1 mi) from the detail page
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub splits: Option<Vec<Split>>,
+
+    /// Provider-defined laps (athlete-triggered watch button, or auto-interval)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub laps: Option<Vec<Lap>>,
 
     /// Source provider (always "strava-scraper")
     pub provider: String,
@@ -681,6 +761,8 @@ mod tests {
             workout_type: None,
             sport_type_detail: None,
             segment_efforts: None,
+            splits: None,
+            laps: None,
             provider: "strava-scraper".to_owned(),
         };
         let json = serde_json::to_string(&activity).expect("serialize"); // Safe: test with serializable struct

@@ -176,6 +176,50 @@ js_extract = '''
         }
     }
 
+    // Splits + laps — Strava embeds these as JSON arrays inside a page
+    // bootstrap block keyed by "splits_metric" or "laps". Scripts can
+    // carry the arrays in several shapes across page variants; walk
+    // every <script> tag and extract the first occurrence of each key
+    // that parses cleanly. Arrays at top level, arrays wrapped in
+    // "splits_metric":[…] strings, and arrays embedded in a larger
+    // JSON object are all handled. Parse failures on any one script
+    // are swallowed — the next script may contain the data.
+    function extractJsonArrayForKey(haystack, key) {
+        var needle = '"' + key + '"';
+        var k = haystack.indexOf(needle);
+        if (k < 0) return null;
+        var bracket = haystack.indexOf('[', k);
+        if (bracket < 0) return null;
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        for (var i = bracket; i < haystack.length; i++) {
+            var ch = haystack[i];
+            if (escaped) { escaped = false; continue; }
+            if (ch === '\\\\') { escaped = true; continue; }
+            if (ch === '"') { inString = !inString; continue; }
+            if (inString) continue;
+            if (ch === '[') depth++;
+            else if (ch === ']') { depth--; if (depth === 0) {
+                try { return JSON.parse(haystack.substring(bracket, i + 1)); }
+                catch (e) { return null; }
+            } }
+        }
+        return null;
+    }
+    for (var si = 0; si < scripts.length; si++) {
+        var body = scripts[si].textContent || '';
+        if (!data.splits) {
+            var sp = extractJsonArrayForKey(body, 'splits_metric');
+            if (Array.isArray(sp) && sp.length > 0) data.splits = sp;
+        }
+        if (!data.laps) {
+            var lp = extractJsonArrayForKey(body, 'laps');
+            if (Array.isArray(lp) && lp.length > 0) data.laps = lp;
+        }
+        if (data.splits && data.laps) break;
+    }
+
     // Fallback: search page text for HR/cadence if not found in JSON
     if (!data.avg_hr) {
         var hrMatch = allText.match(/(\d+)\s*bpm/i);
