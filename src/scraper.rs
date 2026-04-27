@@ -36,6 +36,7 @@ use crate::models::{
 };
 use crate::provider::ProviderConfig;
 use crate::script_loader;
+use crate::stealth::apply_minimal_stealth;
 use crate::types::ActivityScraper;
 #[cfg(feature = "vision")]
 use crate::vision::VisionScraper;
@@ -228,7 +229,7 @@ impl ChromeScraper {
                 reason: format!("Failed to open page: {e}"),
             })?;
 
-        crate::stealth::apply_minimal_stealth(&page).await?;
+        apply_minimal_stealth(&page).await?;
 
         time::sleep(Duration::from_millis(self.config.interaction_delay_ms)).await;
 

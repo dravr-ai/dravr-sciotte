@@ -5,6 +5,8 @@
 // Copyright (c) 2026 dravr.ai
 
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,18 +25,19 @@ use crate::error::{ScraperError, ScraperResult};
 use crate::js_utils::escape_js_selector;
 use crate::models::{AuthSession, CookieData};
 use crate::script_loader;
+use crate::stealth::apply_minimal_stealth;
 
 /// Launch a Chrome browser with the given configuration.
 ///
 /// `profile_id` selects the on-disk profile directory:
-/// - `Some(id)` — reuses `{config.profile_base_dir}/{id}`. Cookies, localStorage,
-///   IndexedDB persist across launches so `cf_clearance` (Cloudflare's challenge
+/// - `Some(id)` — reuses `{config.profile_base_dir}/{id}`. Cookies, `localStorage`,
+///   `IndexedDB` persist across launches so `cf_clearance` (Cloudflare's challenge
 ///   clearance cookie) and provider bearers (Garmin's `JetLagToken`) survive,
 ///   eliminating Turnstile re-solves between scrapes for the same authenticated
 ///   user. Caller is responsible for serializing concurrent launches against
 ///   the same id (Chrome locks the profile dir).
 /// - `None` — ephemeral temp profile (legacy behavior). Used by login flows
-///   where no session_id exists yet.
+///   where no `session_id` exists yet.
 pub async fn launch_browser(
     config: &ScraperConfig,
     headless: bool,
@@ -50,44 +53,28 @@ pub async fn launch_browser(
             .arg("--disable-features=WebAuthentication");
     }
 
-    let profile_dir = match profile_id {
-        Some(id) => {
-            // Sanitize the id for filesystem safety — session_ids are typically
-            // hex-uuid hyphens which are fine, but be defensive.
-            let safe_id: String = id
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
-            let dir = config.profile_base_dir.join(&safe_id);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
+    let profile_dir = profile_id.map_or_else(ephemeral_profile_dir, |id| {
+        // Sanitize the id for filesystem safety — session_ids are typically
+        // hex-uuid hyphens which are fine, but be defensive.
+        let safe_id: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let dir = config.profile_base_dir.join(&safe_id);
+        match fs::create_dir_all(&dir) {
+            Ok(()) => dir,
+            Err(e) => {
                 debug!(error = %e, dir = %dir.display(), "Failed to create persistent profile dir, falling back to ephemeral");
-                env::temp_dir().join(format!(
-                    "sciotte-chrome-{}",
-                    process::id()
-                        + SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .subsec_nanos()
-                ))
-            } else {
-                dir
+                ephemeral_profile_dir()
             }
         }
-        None => env::temp_dir().join(format!(
-            "sciotte-chrome-{}",
-            process::id()
-                + SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos()
-        )),
-    };
+    });
 
     // `--disable-blink-features=AutomationControlled` is intentionally absent.
     // It hides `navigator.webdriver` on older Chrome but leaks more
@@ -120,18 +107,17 @@ pub async fn launch_browser(
     // cf_clearance valid across a Cloud Run restart (datacenter IPs trigger
     // Turnstile escalation; residential IPs don't).
     if let Some(proxy_url) = config.proxy_url.as_ref() {
-        let resolved = if let Some(id) = profile_id {
-            // Bright Data sticky-session URL convention: prefix the username
-            // with `session-{id}`. If your provider uses a different
-            // convention, set DRAVR_SCIOTTE_PROXY_URL with the full sticky
-            // template already substituted upstream (the env-var value is
-            // passed verbatim to Chrome).
-            proxy_url.replace("{session_id}", id)
-        } else {
-            proxy_url.clone()
-        };
+        // Bright Data sticky-session URL convention substitutes a literal
+        // `{session_id}` placeholder in the URL with the caller's profile_id.
+        // If the env-var value already has the sticky template substituted
+        // upstream, the placeholder is absent and replace() is a no-op.
+        let resolved =
+            profile_id.map_or_else(|| proxy_url.clone(), |id| proxy_url.replace("{session_id}", id));
         builder = builder.arg(format!("--proxy-server={resolved}"));
-        debug!(proxy_id = %profile_id.unwrap_or("(ephemeral)"), "Routing browser through residential proxy");
+        debug!(
+            proxy_id = %profile_id.unwrap_or("(ephemeral)"),
+            "Routing browser through residential proxy"
+        );
     }
 
     if let Some(ref path) = config.chrome_path {
@@ -176,13 +162,27 @@ pub async fn open_page_with_stealth(
             reason: format!("Failed to open blank page: {e}"),
         })?;
 
-    crate::stealth::apply_minimal_stealth(&page).await?;
+    apply_minimal_stealth(&page).await?;
 
     page.goto(url).await.map_err(|e| ScraperError::Browser {
         reason: format!("Failed to navigate to {url}: {e}"),
     })?;
 
     Ok(page)
+}
+
+/// Build an ephemeral profile path under `env::temp_dir()` with a process-id
+/// plus nanosecond suffix to avoid `SingletonLock` conflicts when multiple
+/// browser instances run concurrently in the same process.
+fn ephemeral_profile_dir() -> PathBuf {
+    env::temp_dir().join(format!(
+        "sciotte-chrome-{}",
+        process::id()
+            + SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+    ))
 }
 
 /// Inject session cookies into a browser page

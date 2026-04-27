@@ -464,7 +464,7 @@ async fn explore_garmin_health_pages() {
     let session = get_session(&scraper).await;
     eprintln!("Session: {} cookies\n", session.cookies.len());
 
-    let browser = launch_browser(&config, true)
+    let browser = launch_browser(&config, true, None)
         .await
         .expect("launch headless browser");
 

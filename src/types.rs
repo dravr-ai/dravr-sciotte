@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 
-use crate::error::{LoginResult, ScraperResult};
+use crate::error::{LoginResult, ScraperError, ScraperResult};
 use crate::models::{
     Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams,
 };
@@ -85,7 +85,7 @@ pub trait ActivityScraper: Send + Sync {
         activity_id: &str,
     ) -> ScraperResult<serde_json::Value> {
         let activity = self.get_activity(session, activity_id).await?;
-        serde_json::to_value(activity).map_err(|e| crate::error::ScraperError::Scraping {
+        serde_json::to_value(activity).map_err(|e| ScraperError::Scraping {
             reason: format!("Failed to serialize activity to JSON: {e}"),
         })
     }
