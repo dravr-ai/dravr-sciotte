@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.10] — 2026-04-27
+
+### Fixed
+
+- fix(clippy): import use paths, map_or_else, raw-string + doc backticks Pre-push clippy gate caught absolute_paths, map().unwrap_or_else, doc-comment style; fixed inline. Test sites bumped to 3-arg launch_browser(..., None).
+
+### Other
+
+- style: cargo fmt --all Second fmt pass after the clippy fixes.
+- style: cargo fmt --all Pre-push fmt gate caught reformats in browser_utils, config, vision after the stealth + persistence patch landed.
+
+
+
 ## [0.5.9] — 2026-04-24
 
 
