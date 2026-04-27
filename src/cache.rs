@@ -176,6 +176,16 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
         Ok(activity)
     }
 
+    async fn get_activity_raw(
+        &self,
+        session: &AuthSession,
+        activity_id: &str,
+    ) -> ScraperResult<serde_json::Value> {
+        // Raw mode is a debug passthrough — skip the cache so callers
+        // always see fresh JS-extraction output.
+        self.inner.get_activity_raw(session, activity_id).await
+    }
+
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
         self.inner.get_athlete(session).await
     }

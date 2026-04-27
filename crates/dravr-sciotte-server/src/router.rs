@@ -237,11 +237,22 @@ async fn activities_handler(
     }
 }
 
+#[derive(Deserialize, Default)]
+struct ActivityDetailQuery {
+    /// When `true`, return the unparsed JSON the provider's `js_extract`
+    /// produced — bypasses the typed `SciotteActivity` deserialization so
+    /// callers see the provider's raw DTO shape (e.g. Garmin Connect's
+    /// `lapDTOs` / `activitySplits` camelCase arrays). Debug use.
+    #[serde(default)]
+    raw: bool,
+}
+
 /// GET /api/activities/:id — get single activity detail (supports `X-Session-Id` header)
 async fn activity_detail_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<ActivityDetailQuery>,
 ) -> impl IntoResponse {
     let guard = state.read().await;
 
@@ -255,6 +266,13 @@ async fn activity_detail_handler(
         )
             .into_response();
     };
+
+    if query.raw {
+        return match guard.scraper().get_activity_raw(session, &id).await {
+            Ok(value) => Json(value).into_response(),
+            Err(e) => scraper_error_response(&e),
+        };
+    }
 
     match guard.scraper().get_activity(session, &id).await {
         Ok(activity) => Json(json!(activity)).into_response(),

@@ -626,6 +626,21 @@ impl<S: ActivityScraper> ActivityScraper for QueuedScraper<S> {
         outcome
     }
 
+    async fn get_activity_raw(
+        &self,
+        session: &AuthSession,
+        activity_id: &str,
+    ) -> ScraperResult<serde_json::Value> {
+        let permit = self
+            .limiter
+            .acquire()
+            .await
+            .map_err(LimiterError::into_scraper_error)?;
+        let outcome = self.inner.get_activity_raw(session, activity_id).await;
+        drop(permit);
+        outcome
+    }
+
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
         let permit = self
             .limiter

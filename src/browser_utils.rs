@@ -24,8 +24,22 @@ use crate::js_utils::escape_js_selector;
 use crate::models::{AuthSession, CookieData};
 use crate::script_loader;
 
-/// Launch a Chrome browser with the given configuration
-pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperResult<Browser> {
+/// Launch a Chrome browser with the given configuration.
+///
+/// `profile_id` selects the on-disk profile directory:
+/// - `Some(id)` — reuses `{config.profile_base_dir}/{id}`. Cookies, localStorage,
+///   IndexedDB persist across launches so `cf_clearance` (Cloudflare's challenge
+///   clearance cookie) and provider bearers (Garmin's `JetLagToken`) survive,
+///   eliminating Turnstile re-solves between scrapes for the same authenticated
+///   user. Caller is responsible for serializing concurrent launches against
+///   the same id (Chrome locks the profile dir).
+/// - `None` — ephemeral temp profile (legacy behavior). Used by login flows
+///   where no session_id exists yet.
+pub async fn launch_browser(
+    config: &ScraperConfig,
+    headless: bool,
+    profile_id: Option<&str>,
+) -> ScraperResult<Browser> {
     let mut builder = BrowserConfig::builder();
 
     if headless {
@@ -36,24 +50,83 @@ pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperRe
             .arg("--disable-features=WebAuthentication");
     }
 
-    // Use a unique temp profile directory to avoid SingletonLock conflicts
-    // when multiple browser instances run concurrently
-    let profile_dir = env::temp_dir().join(format!(
-        "sciotte-chrome-{}",
-        process::id()
-            + SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
-    ));
+    let profile_dir = match profile_id {
+        Some(id) => {
+            // Sanitize the id for filesystem safety — session_ids are typically
+            // hex-uuid hyphens which are fine, but be defensive.
+            let safe_id: String = id
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .collect();
+            let dir = config.profile_base_dir.join(&safe_id);
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                debug!(error = %e, dir = %dir.display(), "Failed to create persistent profile dir, falling back to ephemeral");
+                env::temp_dir().join(format!(
+                    "sciotte-chrome-{}",
+                    process::id()
+                        + SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos()
+                ))
+            } else {
+                dir
+            }
+        }
+        None => env::temp_dir().join(format!(
+            "sciotte-chrome-{}",
+            process::id()
+                + SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos()
+        )),
+    };
+
+    // `--disable-blink-features=AutomationControlled` is intentionally absent.
+    // It hides `navigator.webdriver` on older Chrome but leaks more
+    // automation tells than it hides on newer Chrome (147+). The stealth
+    // module's `apply_minimal_stealth` overrides `navigator.webdriver`
+    // directly via `Page.addScriptToEvaluateOnNewDocument` instead — that
+    // path survives Chrome upgrades and handles the same signal cleanly.
+    let user_agent = if cfg!(target_os = "linux") {
+        // Cloud Run egress: pin to a Linux Chrome UA to match real users
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    } else {
+        // Local dev (macOS): match the host platform
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+         (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    };
 
     builder = builder
         .arg("--disable-gpu")
         .arg("--no-sandbox")
         .arg("--disable-dev-shm-usage")
-        .arg("--disable-blink-features=AutomationControlled")
+        .arg(format!("--user-agent={user_agent}"))
         .user_data_dir(profile_dir)
         .window_size(1920, 1080);
+
+    // Layer 2 — residential proxy. Feature-flagged via env var; absent in dev.
+    // Production deployments set DRAVR_SCIOTTE_PROXY_URL to a Bright Data or
+    // similar residential proxy with sticky-session-per-AuthSession routing
+    // so each user maps to a stable residential IP. This is what keeps
+    // cf_clearance valid across a Cloud Run restart (datacenter IPs trigger
+    // Turnstile escalation; residential IPs don't).
+    if let Some(proxy_url) = config.proxy_url.as_ref() {
+        let resolved = if let Some(id) = profile_id {
+            // Bright Data sticky-session URL convention: prefix the username
+            // with `session-{id}`. If your provider uses a different
+            // convention, set DRAVR_SCIOTTE_PROXY_URL with the full sticky
+            // template already substituted upstream (the env-var value is
+            // passed verbatim to Chrome).
+            proxy_url.replace("{session_id}", id)
+        } else {
+            proxy_url.clone()
+        };
+        builder = builder.arg(format!("--proxy-server={resolved}"));
+        debug!(proxy_id = %profile_id.unwrap_or("(ephemeral)"), "Routing browser through residential proxy");
+    }
 
     if let Some(ref path) = config.chrome_path {
         builder = builder.chrome_executable(path);
@@ -77,6 +150,33 @@ pub async fn launch_browser(config: &ScraperConfig, headless: bool) -> ScraperRe
     });
 
     Ok(browser)
+}
+
+/// Open a new browser page with stealth applied before any provider JS runs.
+///
+/// This is the canonical way to open pages for scraping: open `about:blank`
+/// first, register the stealth payload via `Page.addScriptToEvaluateOnNewDocument`
+/// (which fires on every subsequent frame creation), then navigate to the
+/// target URL. Cloudflare's silent JS challenge runs on the target's load
+/// event, so by then `navigator.webdriver` already returns `undefined`.
+pub async fn open_page_with_stealth(
+    browser: &chromiumoxide::Browser,
+    url: &str,
+) -> ScraperResult<chromiumoxide::Page> {
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .map_err(|e| ScraperError::Browser {
+            reason: format!("Failed to open blank page: {e}"),
+        })?;
+
+    crate::stealth::apply_minimal_stealth(&page).await?;
+
+    page.goto(url).await.map_err(|e| ScraperError::Browser {
+        reason: format!("Failed to navigate to {url}: {e}"),
+    })?;
+
+    Ok(page)
 }
 
 /// Inject session cookies into a browser page

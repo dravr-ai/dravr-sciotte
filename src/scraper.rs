@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::browser_utils::{
     capture_session, cdp_click_at, click_element, dismiss_cookie_dialog, element_exists,
-    fill_input_field, inject_cookies, launch_browser, read_visible_text,
+    fill_input_field, inject_cookies, launch_browser, open_page_with_stealth, read_visible_text,
 };
 #[cfg(feature = "vision")]
 use crate::config::LoginMode;
@@ -156,19 +156,24 @@ impl ChromeScraper {
         &self.provider
     }
 
-    /// Get or create a headless browser instance for scraping
-    async fn get_headless_browser(&self) -> ScraperResult<Arc<Browser>> {
+    /// Get or create a headless browser instance for scraping.
+    ///
+    /// `profile_id` (typically `AuthSession.session_id`) selects the on-disk
+    /// Chrome profile so cookies + localStorage persist across launches —
+    /// crucial for keeping `cf_clearance` valid between scrape calls and
+    /// avoiding Turnstile re-solves.
+    async fn get_headless_browser(&self, profile_id: &str) -> ScraperResult<Arc<Browser>> {
         let mut guard = self.browser.lock().await;
 
         if let Some(browser) = guard.as_ref() {
             return Ok(Arc::clone(browser));
         }
 
-        let browser = launch_browser(&self.config, true).await?;
+        let browser = launch_browser(&self.config, true, Some(profile_id)).await?;
         let browser = Arc::new(browser);
         *guard = Some(Arc::clone(&browser));
 
-        info!("Headless browser launched for scraping");
+        info!(profile_id, "Headless browser launched for scraping");
         Ok(browser)
     }
 
@@ -210,10 +215,12 @@ impl ChromeScraper {
         session: &AuthSession,
         url: &str,
     ) -> ScraperResult<chromiumoxide::Page> {
-        let browser = self.get_headless_browser().await?;
+        let browser = self.get_headless_browser(&session.session_id).await?;
 
-        // Each call creates a new page (tab) with isolated cookies via CDP Network.setCookie.
-        // Navigate to the provider's login page first so cookies are set on the right domain
+        // Authenticated paths inject session cookies — CDP rejects cookies on
+        // about:blank ("Blank page can not have cookie"), so navigate to the
+        // login domain first (no challenge for cookie-authenticated sessions),
+        // then register stealth so it's active for the final goto.
         let page = browser
             .new_page(&self.provider.provider.login_url)
             .await
@@ -221,16 +228,49 @@ impl ChromeScraper {
                 reason: format!("Failed to open page: {e}"),
             })?;
 
+        crate::stealth::apply_minimal_stealth(&page).await?;
+
         time::sleep(Duration::from_millis(self.config.interaction_delay_ms)).await;
 
         inject_cookies(&page, session).await?;
 
-        // Navigate to the actual target URL with cookies set
-        page.goto(url).await.map_err(|e| ScraperError::Browser {
-            reason: format!("Failed to navigate to {url}: {e}"),
-        })?;
+        // Navigate to the actual target URL with cookies set.
+        //
+        // Heavy SPAs (Garmin /app/) hold open WebSockets / lazy-load resources
+        // long after the initial XHRs resolve, so the underlying CDP
+        // `Page.navigate` response can be delayed past chromiumoxide's
+        // default request timeout. We wrap with `tokio::time::timeout` and
+        // tolerate timeouts: by 6s the page has dispatched its hydration
+        // XHRs into the stealth capture map, which is all we need.
+        let goto_outcome = time::timeout(Duration::from_secs(15), page.goto(url)).await;
+        match goto_outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                return Err(ScraperError::Browser {
+                    reason: format!("Failed to navigate to {url}: {e}"),
+                });
+            }
+            Err(_elapsed) => {
+                debug!(
+                    url,
+                    "page.goto timed out at 15s — continuing; capture interceptor \
+                     does not require the load event"
+                );
+            }
+        }
 
-        time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 2)).await;
+        // Modern provider apps (Garmin /app/) bounce through SSO on first
+        // navigation to obtain a JetLagToken before allowing /gc-api/ calls.
+        // This dance takes 5-8 seconds. Subsequent in-tab navigations within
+        // /app/* reuse the localStorage'd token and are fast. 5s covers the
+        // first-load case; older pre-rendered pages (Strava /training) waste
+        // the time but are otherwise unaffected.
+        time::sleep(Duration::from_secs(5)).await;
+
+        if let Ok(Some(landed)) = page.url().await {
+            info!(target = url, landed = %landed, "Page navigation settled");
+        }
+
         Ok(page)
     }
 
@@ -413,13 +453,8 @@ impl ActivityScraper for ChromeScraper {
             "Launching visible browser for login"
         );
 
-        let browser = launch_browser(&self.config, false).await?;
-        let page = browser
-            .new_page(&self.provider.provider.login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open login page: {e}"),
-            })?;
+        let browser = launch_browser(&self.config, false, None).await?;
+        let page = open_page_with_stealth(&browser, &self.provider.provider.login_url).await?;
 
         info!("Waiting for user to log in...");
         wait_for_login(&page, &self.provider, &self.config).await?;
@@ -472,14 +507,10 @@ impl ActivityScraper for ChromeScraper {
         let browser = launch_browser(
             config,
             config.fake_login || config.credential_login_headless,
+            None,
         )
         .await?;
-        let page = browser
-            .new_page(&login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open login page: {e}"),
-            })?;
+        let page = open_page_with_stealth(&browser, &login_url).await?;
 
         debug!(
             wait_secs = config.page_load_wait_secs,
@@ -853,6 +884,30 @@ impl ActivityScraper for ChromeScraper {
         drop(page);
         self.close_browsers().await;
         Ok(activity)
+    }
+
+    async fn get_activity_raw(
+        &self,
+        session: &AuthSession,
+        activity_id: &str,
+    ) -> ScraperResult<serde_json::Value> {
+        let url = self.provider.detail_url(activity_id);
+        info!(url = %url, "Navigating to activity detail page (raw mode)");
+
+        let page = self.open_authenticated_page(session, &url).await?;
+
+        // The /app/ Garmin Connect is a fully client-rendered React app — its
+        // initial XHRs to /gc-api/activity-service/* fire after hydration,
+        // typically 2-4 seconds after page load. Wait long enough for the
+        // stealth script's API capture map to be populated before extracting.
+        time::sleep(Duration::from_secs(5)).await;
+
+        let data = extract_detail_via_js(&page, &self.provider).await?;
+
+        info!(id = activity_id, "Raw activity detail JSON extracted");
+        drop(page);
+        self.close_browsers().await;
+        Ok(data)
     }
 
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile> {
@@ -1633,10 +1688,49 @@ fn parse_js_activity_items(items: &[serde_json::Value]) -> Vec<Activity> {
         .collect()
 }
 
+/// Read a numeric-or-string JSON field as `f64`. Display-style strings
+/// (e.g. "4.92 km", "150 bpm", "1,234 kcal") are parsed by stripping
+/// thousand-separators / unit suffixes; raw `Number` values pass through.
+fn json_field_f64(v: &serde_json::Value) -> Option<f64> {
+    if let Some(n) = v.as_f64() {
+        return Some(n);
+    }
+    if let Some(s) = v.as_str() {
+        let cleaned: String = s
+            .chars()
+            .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        if !cleaned.is_empty() {
+            if let Ok(parsed) = cleaned.parse::<f64>() {
+                return Some(parsed);
+            }
+        }
+    }
+    None
+}
+
 /// Build a single Activity from a JS-extracted list page row.
 /// The list page provides: type, date, name, time, distance, elevation, suffer score.
 fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
     let sport_type_str = item["type"].as_str().unwrap_or("");
+    let date_field = &item["date"];
+    let start_date = date_field
+        .as_str()
+        .and_then(parse_strava_date)
+        .or_else(|| {
+            date_field
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+        })
+        .unwrap_or_else(Utc::now);
+
+    let duration_seconds = item["time"]
+        .as_str()
+        .and_then(parse_duration_string)
+        .or_else(|| json_field_f64(&item["time"]).map(|v| v.round() as u64))
+        .unwrap_or(0);
+
     Activity {
         id: id.to_owned(),
         name: item["name"].as_str().unwrap_or("Untitled").to_owned(),
@@ -1645,36 +1739,25 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
         } else {
             SportType::from_strava(sport_type_str)
         },
-        start_date: item["date"]
+        start_date,
+        duration_seconds,
+        distance_meters: item["distance"]
             .as_str()
-            .and_then(parse_strava_date)
-            .unwrap_or_else(Utc::now),
-        duration_seconds: item["time"]
-            .as_str()
-            .and_then(parse_duration_string)
-            .unwrap_or(0),
-        distance_meters: item["distance"].as_str().and_then(parse_distance_string),
-        elevation_gain: item["elevation"]
-            .as_str()
-            .and_then(|e| e.replace([',', 'm'], "").trim().parse().ok()),
-        average_heart_rate: item["avg_hr"]
-            .as_str()
-            .and_then(|h| h.replace("bpm", "").trim().parse().ok()),
-        max_heart_rate: None,
+            .and_then(parse_distance_string)
+            .or_else(|| json_field_f64(&item["distance"])),
+        elevation_gain: json_field_f64(&item["elevation"]),
+        average_heart_rate: json_field_f64(&item["avg_hr"]).map(|v| v.round() as u32),
+        max_heart_rate: json_field_f64(&item["max_hr"]).map(|v| v.round() as u32),
         average_speed: None,
         max_speed: None,
-        calories: item["calories"]
-            .as_str()
-            .and_then(|c| c.replace(',', "").trim().parse().ok()),
+        calories: json_field_f64(&item["calories"]).map(|v| v.round() as u32),
         average_power: None,
         max_power: None,
         normalized_power: None,
         average_cadence: None,
         training_stress_score: None,
         intensity_factor: None,
-        suffer_score: item["suffer_score"]
-            .as_str()
-            .and_then(|s| s.trim().parse().ok()),
+        suffer_score: json_field_f64(&item["suffer_score"]).map(|v| v.round() as u32),
         start_latitude: None,
         start_longitude: None,
         city: None,

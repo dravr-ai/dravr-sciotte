@@ -24,52 +24,91 @@ profile_js_extract = '''
 '''
 
 [list_page]
-url = "https://connect.garmin.com/modern/activities"
+url = "https://connect.garmin.com/app/activities"
 row_selector = '[class*="ActivityListItem_tabletListItem"]'
 link_selector = 'a[href*="/activity/"]'
 id_regex = '/\/activity\/(\d+)/'
-# Custom JS for list extraction — Garmin uses metric label/value pairs, not table columns
+# Garmin /app/ is a client-rendered React app — read activity rows from the
+# capture map (window.__sciotteApiCaptures, installed by the stealth payload)
+# instead of DOM scraping. The list endpoint is captured during hydration.
 js_extract = '''
 (function() {
-    var items = document.querySelectorAll('[class*="ActivityListItem_tabletListItem"]');
-    var activities = [];
-    var seen = {};
-    for (var i = 0; i < items.length; i++) {
-        var item = items[i];
-        var link = item.querySelector('a[href*="/activity/"]');
-        if (!link) continue;
-        var href = link.getAttribute("href") || "";
-        var idMatch = href.match(/\/activity\/(\d+)/);
-        if (!idMatch || seen[idMatch[1]]) continue;
-        seen[idMatch[1]] = true;
+    var captures = window.__sciotteApiCaptures || {};
 
-        var a = { id: idMatch[1], name: link.textContent.trim() };
-
-        var typeEl = item.querySelector('[class*="activityTypeText"]');
-        a.type = typeEl ? typeEl.textContent.trim() : "";
-
-        var dateEl = item.querySelector('[class*="activityDate__"]');
-        var yearEl = item.querySelector('[class*="activityDateYear"]');
-        a.date = (dateEl ? dateEl.textContent.trim() : "") + " " + (yearEl ? yearEl.textContent.trim() : "");
-
-        var metrics = item.querySelectorAll('[class*="metricItem"]');
-        for (var m = 0; m < metrics.length; m++) {
-            var label = metrics[m].querySelector('[class*="Label"]');
-            var value = metrics[m].querySelector('[class*="Value"]');
-            if (!label || !value) continue;
-            var key = label.textContent.trim().toLowerCase();
-            var val = value.textContent.trim();
-
-            if (key.includes("distance")) a.distance = val;
-            else if (key.includes("dur") || key.includes("time") || key.includes("temps")) a.time = val;
-            else if (key.includes("allure") || key.includes("pace")) a.pace = val;
-            else if (key.includes("ascension") || key.includes("elevation")) a.elevation = val;
-            else if (key.includes("cardiaque") || key.includes("heart")) a.avg_hr = val;
-            else if (key.includes("calories")) a.calories = val;
+    // Find the activity-search endpoint — we look for the canonical list call
+    // and pick the most recent (highest entry index in the captures map).
+    var listKey = null;
+    var listEntry = null;
+    for (var k in captures) {
+        if (/\/activitylist-service\/activities\/search\/activities/.test(k) ||
+            /\/activitylist-service\/.*activities/.test(k)) {
+            listKey = k;
+            listEntry = captures[k];
         }
-
-        activities.push(a);
     }
+
+    if (!listEntry) {
+        // Fall back to listing what we did capture so we can iterate
+        return JSON.stringify([{
+            __debug: "no activity-list capture",
+            seen_urls: Object.keys(captures).slice(0, 30)
+        }]);
+    }
+
+    if (listEntry.status !== 200) {
+        return JSON.stringify([{
+            __debug: "list capture non-2xx",
+            status: listEntry.status,
+            url: listKey
+        }]);
+    }
+
+    var rows;
+    try { rows = JSON.parse(listEntry.body); }
+    catch (e) { return JSON.stringify([{__debug: "list parse failed", message: String(e)}]); }
+
+    // Garmin returns either an array directly or {activityList: [...]}.
+    if (!Array.isArray(rows) && rows && Array.isArray(rows.activityList)) {
+        rows = rows.activityList;
+    }
+    if (!Array.isArray(rows)) {
+        return JSON.stringify([{__debug: "list body not array", shape: typeof rows}]);
+    }
+
+    // Garmin emits SQL-style timestamps ("2026-04-27 14:25:46.0") on
+    // startTimeLocal/startTimeGMT — convert to RFC3339 so sciotte's parser
+    // handles it without provider-specific casing.
+    function toRfc3339(s, isGmt) {
+        if (!s) return null;
+        var rfc = s.replace(" ", "T");
+        // strip trailing fractional second if shaped like ".0"
+        rfc = rfc.replace(/\.\d+$/, "");
+        return isGmt ? rfc + "Z" : rfc;
+    }
+
+    // Project to sciotte's expected list-row shape.
+    var activities = rows.map(function(r) {
+        return {
+            id: String(r.activityId != null ? r.activityId : (r.id || "")),
+            name: r.activityName || "Untitled",
+            type: r.activityType ? (r.activityType.typeKey || r.activityType.parentTypeKey) : null,
+            sport_type_detail: r.activityType ? (r.activityType.typeKey || null) : null,
+            date: toRfc3339(r.startTimeGMT, true) || toRfc3339(r.startTimeLocal, false),
+            distance: r.distance,
+            time: r.duration,
+            elevation: r.elevationGain,
+            avg_hr: r.averageHR,
+            max_hr: r.maxHR,
+            calories: r.calories,
+            cadence: r.averageRunningCadenceInStepsPerMinute || r.averageBikingCadenceInRevPerMinute || null,
+            avg_speed: r.averageSpeed,
+            max_speed: r.maxSpeed,
+            avg_power: r.avgPower || r.averagePower,
+            suffer_score: r.aerobicTrainingEffect,
+            device: r.deviceId
+        };
+    });
+
     return JSON.stringify(activities);
 })()
 '''
@@ -84,101 +123,98 @@ distance = '[class*="metricValue"]'
 elevation = '[class*="metricValue"]'
 
 [detail_page]
-url_template = "https://connect.garmin.com/modern/activity/{id}"
+url_template = "https://connect.garmin.com/app/activity/{id}"
+# The new /app/ Garmin Connect is a fully client-rendered React app — no
+# embedded JSON blobs in script tags. Instead we hit `/activity-service/activity/{id}`
+# directly from the authenticated page context via synchronous XHR (same-origin,
+# cookies attached automatically). The response IS the raw Garmin DTO shape we
+# want, so we expose it under `api_raw` and project a few normalized fields for
+# SciotteActivity deserialization.
 js_extract = '''
 (function() {
-    var data = {};
+    var m = location.pathname.match(/activity\/(\d+)/);
+    if (!m) return JSON.stringify({error: "no activity id in url", url: location.href});
+    var id = m[1];
 
-    // Activity name
-    var nameEl = document.querySelector('h1, [class*="activityName"], [class*="activity-name"]');
-    if (nameEl) data.name = nameEl.textContent.trim();
+    // Discover which API path the page actually fetched while hydrating —
+    // Garmin's /app/ redesign moved endpoints around; introspect rather than guess.
+    var loadedUrls = (performance.getEntries() || [])
+        .filter(function(e) { return e.entryType === "resource"; })
+        .map(function(e) { return e.name; })
+        .filter(function(u) { return /activity|workout|gateway|connectapi/.test(u); });
 
-    // Activity type
-    var typeEl = document.querySelector('[class*="activityType"], [class*="activity-type"]');
-    if (typeEl) data.type = typeEl.textContent.trim();
+    // Garmin Connect /app/ stores its API bearer under localStorage["JetLagToken"]
+    // as JSON { access_token, refresh_token, expires_in, ... }. The /gc-api/
+    // endpoints reject requests without an Authorization: Bearer header.
+    // The stealth payload installs window.__sciotteApiCaptures, which records
+    // every /activity-service/, /workout-service/, /gc-api/ response the page
+    // fetches during hydration. Sciotte's Rust scraper waits long enough
+    // before invoking this script that the captures are already in place —
+    // a busy-loop here would block the JS event loop and prevent fetches
+    // from resolving in the first place.
+    var captures = window.__sciotteApiCaptures || {};
 
-    // Extract all metric key-value pairs from the page
-    var metrics = document.querySelectorAll('[class*="metricItem"], [class*="metric-item"], [class*="stat"]');
-    metrics.forEach(function(m) {
-        var label = m.querySelector('[class*="Label"], [class*="label"]');
-        var value = m.querySelector('[class*="Value"], [class*="value"]');
-        if (!label || !value) return;
-        var key = label.textContent.trim().toLowerCase();
-        var val = value.textContent.trim();
+    // Garmin's /app/ split the activity detail across multiple endpoints —
+    // collect the main one (no path suffix after the ID) plus splits/laps
+    // from sibling endpoints.
+    var captureKey = null;
+    var captureEntry = null;
+    var splitsCapture = null;
+    var lapsCapture = null;
+    var typedSplitsCapture = null;
+    var idMarker = "/activity-service/activity/" + id;
 
-        if (key.includes('distance')) data.distance = val;
-        else if (key.includes('dur') || key.includes('time') || key.includes('temps')) data.moving_time = val;
-        else if (key.includes('allure') || key.includes('pace')) data.pace = val;
-        else if (key.includes('ascension') || key.includes('elevation') || key.includes('elev')) data.elevation = val;
-        else if (key.includes('fr') || key.includes('heart') || key.includes('cardiaque')) {
-            if (key.includes('max')) data.max_hr = val;
-            else data.avg_hr = val;
+    function bodyOk(c) { return c && c.status === 200 && c.body; }
+
+    for (var k in captures) {
+        if (k.indexOf(idMarker) < 0) continue;
+        var tail = k.substring(k.indexOf(idMarker) + idMarker.length).split("?")[0];
+        if (tail === "" || tail === "/") {
+            captureKey = k;
+            captureEntry = captures[k];
+        } else if (tail === "/splits") {
+            splitsCapture = captures[k];
+        } else if (tail === "/typedSplits") {
+            typedSplitsCapture = captures[k];
+        } else if (tail === "/laps" || tail === "/lapDTOs") {
+            lapsCapture = captures[k];
         }
-        else if (key.includes('calories')) data.calories = val;
-        else if (key.includes('cadence')) data.cadence = val;
-        else if (key.includes('vitesse') || key.includes('speed')) {
-            if (key.includes('max')) data.max_speed = val;
-            else data.avg_speed = val;
-        }
-        else if (key.includes('puissance') || key.includes('power')) data.avg_power = val;
-        else if (key.includes('temp')) data.temperature = val;
-    });
-
-    // Device
-    var allText = document.body.textContent;
-    var devMatch = allText.match(/(?:Garmin|Apple Watch|Wahoo|Polar|Suunto|COROS)[^\n,]*/i);
-    if (devMatch) data.device = devMatch[0].trim();
-
-    // Splits + laps — Garmin Connect hydrates its React app from
-    // embedded `<script>` bootstrap blocks. The keys vary by page
-    // version ("lapDTOs", "activityLaps", "activitySplits", "splits")
-    // so we try each known variant per script. Bracket walker handles
-    // arrays nested inside larger JSON objects. Parse errors per script
-    // are swallowed — the next script may carry the data.
-    function extractJsonArrayForKey(haystack, key) {
-        var needle = '"' + key + '"';
-        var k = haystack.indexOf(needle);
-        if (k < 0) return null;
-        var bracket = haystack.indexOf('[', k);
-        if (bracket < 0) return null;
-        var depth = 0;
-        var inString = false;
-        var escaped = false;
-        for (var i = bracket; i < haystack.length; i++) {
-            var ch = haystack[i];
-            if (escaped) { escaped = false; continue; }
-            if (ch === '\\\\') { escaped = true; continue; }
-            if (ch === '"') { inString = !inString; continue; }
-            if (inString) continue;
-            if (ch === '[') depth++;
-            else if (ch === ']') { depth--; if (depth === 0) {
-                try { return JSON.parse(haystack.substring(bracket, i + 1)); }
-                catch (e) { return null; }
-            } }
-        }
-        return null;
-    }
-    var scripts = document.querySelectorAll('script');
-    for (var si = 0; si < scripts.length; si++) {
-        var body = scripts[si].textContent || '';
-        if (!data.splits) {
-            var sp = extractJsonArrayForKey(body, 'activitySplits');
-            if (!Array.isArray(sp)) sp = extractJsonArrayForKey(body, 'splits');
-            if (Array.isArray(sp) && sp.length > 0) data.splits = sp;
-        }
-        if (!data.laps) {
-            var lp = extractJsonArrayForKey(body, 'lapDTOs');
-            if (!Array.isArray(lp)) lp = extractJsonArrayForKey(body, 'activityLaps');
-            if (!Array.isArray(lp)) lp = extractJsonArrayForKey(body, 'laps');
-            if (Array.isArray(lp) && lp.length > 0) data.laps = lp;
-        }
-        if (data.splits && data.laps) break;
     }
 
-    // Normalize Garmin field names to Strava-style keys so the Rust
-    // parser (shared across providers) can deserialize either.
-    // Garmin DTOs use camelCase + different names: duration vs
-    // elapsed_time, averageHR vs average_heartrate, etc.
+    if (!captureEntry) {
+        return JSON.stringify({
+            error: "no main capture for activity " + id,
+            seen_urls: Object.keys(captures)
+        });
+    }
+    if (captureEntry.status !== 200) {
+        return JSON.stringify({
+            error: "main capture non-2xx",
+            status: captureEntry.status,
+            url: captureKey,
+            body: (captureEntry.body || "").slice(0, 300)
+        });
+    }
+
+    var api;
+    try { api = JSON.parse(captureEntry.body); }
+    catch (e) { return JSON.stringify({error: "parse failed", message: String(e)}); }
+
+    // Fold splits/laps captures into api_raw so the OAuth deserializer sees
+    // the full provider DTO surface from a single response.
+    if (bodyOk(splitsCapture)) {
+        try { api.splits_response = JSON.parse(splitsCapture.body); } catch (e) {}
+    }
+    if (bodyOk(typedSplitsCapture)) {
+        try { api.typed_splits_response = JSON.parse(typedSplitsCapture.body); } catch (e) {}
+    }
+    if (bodyOk(lapsCapture)) {
+        try { api.laps_response = JSON.parse(lapsCapture.body); } catch (e) {}
+    }
+
+    // Normalize Garmin camelCase DTOs to Strava-style snake_case so the
+    // shared Rust parser (used by sciotte for both Strava + Garmin) can
+    // deserialize either provider's output.
     function normalizeLap(l) {
         return {
             distance: l.distance != null ? l.distance : null,
@@ -204,10 +240,46 @@ js_extract = '''
             average_heartrate: s.averageHR != null ? s.averageHR : s.average_heartrate
         };
     }
-    if (Array.isArray(data.splits)) data.splits = data.splits.map(normalizeSplit);
-    if (Array.isArray(data.laps)) data.laps = data.laps.map(normalizeLap);
 
-    return JSON.stringify(data);
+    // /app/ Garmin Connect splits these endpoints out — laps live under
+    // `/laps` and contain `lapDTOs`; splits under `/splits` or `/typedSplits`.
+    var rawLaps = api.activityLaps || api.lapDTOs || api.laps ||
+                  (api.laps_response && (api.laps_response.lapDTOs || api.laps_response.laps)) ||
+                  null;
+    var rawSplits = api.activitySplits || api.splits ||
+                    (api.splits_response && (api.splits_response.splits || api.splits_response.activitySplits)) ||
+                    (api.typed_splits_response && api.typed_splits_response.splits) ||
+                    null;
+
+    var summary = api.summaryDTO || {};
+
+    return JSON.stringify({
+        // The full unmolested Garmin API response — what `?raw=true` exposes for
+        // OAuth deserializer scaffolding work.
+        api_raw: api,
+
+        // Pre-normalized arrays preserved for raw consumers
+        raw_laps: rawLaps,
+        raw_splits: rawSplits,
+
+        // Normalized projection for SciotteActivity deserialization
+        name: api.activityName || "Untitled",
+        type: api.activityTypeDTO ? api.activityTypeDTO.typeKey : null,
+        distance: summary.distance != null ? summary.distance : null,
+        moving_time: summary.movingDuration != null ? Math.round(summary.movingDuration) : null,
+        elapsed_time: summary.duration != null ? Math.round(summary.duration) : null,
+        elevation: summary.elevationGain != null ? summary.elevationGain : null,
+        avg_hr: summary.averageHR != null ? summary.averageHR : null,
+        max_hr: summary.maxHR != null ? summary.maxHR : null,
+        calories: summary.calories != null ? summary.calories : null,
+        cadence: summary.averageRunCadence != null ? summary.averageRunCadence : (summary.averageBikeCadence != null ? summary.averageBikeCadence : null),
+        avg_speed: summary.averageSpeed != null ? summary.averageSpeed : null,
+        max_speed: summary.maxSpeed != null ? summary.maxSpeed : null,
+        avg_power: summary.averagePower != null ? summary.averagePower : null,
+        device: api.deviceName || (api.metadataDTO ? api.metadataDTO.deviceMetaDataDTO && api.metadataDTO.deviceMetaDataDTO.deviceName : null),
+        laps: Array.isArray(rawLaps) ? rawLaps.map(normalizeLap) : null,
+        splits: Array.isArray(rawSplits) ? rawSplits.map(normalizeSplit) : null
+    });
 })()
 '''
 

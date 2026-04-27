@@ -111,6 +111,19 @@ pub struct ScraperConfig {
     pub credential_login_headless: bool,
     /// Use fake HTML login pages for testing (no real provider interaction)
     pub fake_login: bool,
+    /// Base directory for persistent per-session Chrome profiles. When a
+    /// scraper call provides a profile_id, the actual profile lives at
+    /// `{profile_base_dir}/{session_id}` so cookies (`cf_clearance`,
+    /// provider bearers) survive across browser launches. Falls back to
+    /// `env::temp_dir()/sciotte-profiles` if the env var is unset.
+    pub profile_base_dir: PathBuf,
+    /// Optional residential proxy URL (Layer 2 anti-bot egress). When set,
+    /// `--proxy-server={url}` is passed to Chrome at launch. The literal
+    /// `{session_id}` placeholder in the URL is replaced with the caller's
+    /// profile_id at launch time so each user maps to a sticky residential
+    /// IP — required for sustained Garmin/Strava scraping from datacenter
+    /// egress (GCP) where Cloudflare Turnstile would otherwise escalate.
+    pub proxy_url: Option<String>,
 }
 
 impl Default for ScraperConfig {
@@ -136,6 +149,10 @@ impl Default for ScraperConfig {
             fake_login: env::var("DRAVR_SCIOTTE_FAKE_LOGIN")
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
+            profile_base_dir: env::var("DRAVR_SCIOTTE_PROFILE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| env::temp_dir().join("sciotte-profiles")),
+            proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL").ok().filter(|s| !s.is_empty()),
         }
     }
 }

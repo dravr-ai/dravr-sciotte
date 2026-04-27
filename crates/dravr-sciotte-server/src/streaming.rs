@@ -23,6 +23,7 @@ use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
 use dravr_sciotte::auth;
+use dravr_sciotte::browser_utils;
 use dravr_sciotte::error::{LoginResult, ScraperResult};
 use dravr_sciotte::js_utils;
 use dravr_sciotte::models::{AuthSession, CookieData};
@@ -206,8 +207,7 @@ async fn run_streaming_session(
     send_status(&mut ws_sender, "launching", "Starting browser...").await;
 
     let browser = launch_streaming_browser().await?;
-    let page = browser
-        .new_page(&provider.provider.login_url)
+    let page = browser_utils::open_page_with_stealth(&browser, &provider.provider.login_url)
         .await
         .map_err(|e| format!("Failed to open login page: {e}"))?;
 

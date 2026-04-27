@@ -53,6 +53,9 @@ pub mod auth;
 /// Shared browser automation utilities (launch, cookies, CDP input)
 pub mod browser_utils;
 
+/// Anti-bot stealth: CDP-injected JS that hides automation tells (`navigator.webdriver` etc.)
+pub mod stealth;
+
 /// Runtime-loadable JS scripts with compiled-in defaults
 pub mod script_loader;
 

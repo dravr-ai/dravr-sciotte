@@ -68,7 +68,10 @@ impl VisionScraper {
             return Ok(Arc::clone(browser));
         }
 
-        let browser = browser_utils::launch_browser(&self.config, true).await?;
+        // Vision scraper does not yet thread session_id through — pass None
+        // (ephemeral profile). When VisionScraper gets per-session profile
+        // support, swap to Some(session_id).
+        let browser = browser_utils::launch_browser(&self.config, true, None).await?;
         let browser = Arc::new(browser);
         *guard = Some(Arc::clone(&browser));
 
@@ -419,13 +422,12 @@ impl ActivityScraper for VisionScraper {
             "Starting vision-based credential login"
         );
 
-        let browser = browser_utils::launch_browser(config, false).await?;
-        let page = browser
-            .new_page(&self.provider.provider.login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open login page: {e}"),
-            })?;
+        let browser = browser_utils::launch_browser(config, false, None).await?;
+        let page = browser_utils::open_page_with_stealth(
+            &browser,
+            &self.provider.provider.login_url,
+        )
+        .await?;
 
         time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
@@ -614,12 +616,11 @@ impl ActivityScraper for VisionScraper {
     ) -> ScraperResult<Vec<Activity>> {
         let browser = self.get_browser().await?;
 
-        let page = browser
-            .new_page(&self.provider.provider.login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open page: {e}"),
-            })?;
+        let page = browser_utils::open_page_with_stealth(
+            &browser,
+            &self.provider.provider.login_url,
+        )
+        .await?;
 
         self.inject_cookies(&page, session).await?;
 
@@ -652,12 +653,11 @@ impl ActivityScraper for VisionScraper {
         let browser = self.get_browser().await?;
         let url = self.provider.detail_url(activity_id);
 
-        let page = browser
-            .new_page(&self.provider.provider.login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open page: {e}"),
-            })?;
+        let page = browser_utils::open_page_with_stealth(
+            &browser,
+            &self.provider.provider.login_url,
+        )
+        .await?;
 
         self.inject_cookies(&page, session).await?;
 
@@ -683,12 +683,11 @@ impl ActivityScraper for VisionScraper {
             })?;
 
         let browser = self.get_browser().await?;
-        let page = browser
-            .new_page(&self.provider.provider.login_url)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to open page: {e}"),
-            })?;
+        let page = browser_utils::open_page_with_stealth(
+            &browser,
+            &self.provider.provider.login_url,
+        )
+        .await?;
 
         self.inject_cookies(&page, session).await?;
 

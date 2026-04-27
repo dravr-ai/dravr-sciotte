@@ -70,6 +70,26 @@ pub trait ActivityScraper: Send + Sync {
         activity_id: &str,
     ) -> ScraperResult<Activity>;
 
+    /// Scrape a single activity's detail page and return the raw JSON the
+    /// provider's `js_extract` produced — bypassing the typed `Activity`
+    /// deserialization step. Used by debug callers that need the unmolested
+    /// provider DTO shape (e.g. capturing Garmin Connect `lapDTOs` /
+    /// `activitySplits` to seed an OAuth-side deserializer).
+    ///
+    /// Default impl falls back to typed `get_activity` then serializes —
+    /// fine for screenshot scrapers that have no richer raw form. Browser
+    /// scrapers should override to return the actual JS-extraction output.
+    async fn get_activity_raw(
+        &self,
+        session: &AuthSession,
+        activity_id: &str,
+    ) -> ScraperResult<serde_json::Value> {
+        let activity = self.get_activity(session, activity_id).await?;
+        serde_json::to_value(activity).map_err(|e| crate::error::ScraperError::Scraping {
+            reason: format!("Failed to serialize activity to JSON: {e}"),
+        })
+    }
+
     /// Scrape the authenticated user's profile from the provider
     async fn get_athlete(&self, session: &AuthSession) -> ScraperResult<AthleteProfile>;
 
