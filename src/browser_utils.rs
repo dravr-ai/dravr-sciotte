@@ -111,8 +111,10 @@ pub async fn launch_browser(
         // `{session_id}` placeholder in the URL with the caller's profile_id.
         // If the env-var value already has the sticky template substituted
         // upstream, the placeholder is absent and replace() is a no-op.
-        let resolved =
-            profile_id.map_or_else(|| proxy_url.clone(), |id| proxy_url.replace("{session_id}", id));
+        let resolved = profile_id.map_or_else(
+            || proxy_url.clone(),
+            |id| proxy_url.replace("{session_id}", id),
+        );
         builder = builder.arg(format!("--proxy-server={resolved}"));
         debug!(
             proxy_id = %profile_id.unwrap_or("(ephemeral)"),
