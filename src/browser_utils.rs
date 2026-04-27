@@ -56,7 +56,13 @@ pub async fn launch_browser(
             // hex-uuid hyphens which are fine, but be defensive.
             let safe_id: String = id
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let dir = config.profile_base_dir.join(&safe_id);
             if let Err(e) = std::fs::create_dir_all(&dir) {

@@ -152,7 +152,9 @@ impl Default for ScraperConfig {
             profile_base_dir: env::var("DRAVR_SCIOTTE_PROFILE_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| env::temp_dir().join("sciotte-profiles")),
-            proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL").ok().filter(|s| !s.is_empty()),
+            proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }

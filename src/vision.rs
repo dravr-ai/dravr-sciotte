@@ -423,11 +423,9 @@ impl ActivityScraper for VisionScraper {
         );
 
         let browser = browser_utils::launch_browser(config, false, None).await?;
-        let page = browser_utils::open_page_with_stealth(
-            &browser,
-            &self.provider.provider.login_url,
-        )
-        .await?;
+        let page =
+            browser_utils::open_page_with_stealth(&browser, &self.provider.provider.login_url)
+                .await?;
 
         time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
 
@@ -616,11 +614,9 @@ impl ActivityScraper for VisionScraper {
     ) -> ScraperResult<Vec<Activity>> {
         let browser = self.get_browser().await?;
 
-        let page = browser_utils::open_page_with_stealth(
-            &browser,
-            &self.provider.provider.login_url,
-        )
-        .await?;
+        let page =
+            browser_utils::open_page_with_stealth(&browser, &self.provider.provider.login_url)
+                .await?;
 
         self.inject_cookies(&page, session).await?;
 
@@ -653,11 +649,9 @@ impl ActivityScraper for VisionScraper {
         let browser = self.get_browser().await?;
         let url = self.provider.detail_url(activity_id);
 
-        let page = browser_utils::open_page_with_stealth(
-            &browser,
-            &self.provider.provider.login_url,
-        )
-        .await?;
+        let page =
+            browser_utils::open_page_with_stealth(&browser, &self.provider.provider.login_url)
+                .await?;
 
         self.inject_cookies(&page, session).await?;
 
@@ -683,11 +677,9 @@ impl ActivityScraper for VisionScraper {
             })?;
 
         let browser = self.get_browser().await?;
-        let page = browser_utils::open_page_with_stealth(
-            &browser,
-            &self.provider.provider.login_url,
-        )
-        .await?;
+        let page =
+            browser_utils::open_page_with_stealth(&browser, &self.provider.provider.login_url)
+                .await?;
 
         self.inject_cookies(&page, session).await?;
 
