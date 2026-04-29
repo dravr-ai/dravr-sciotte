@@ -34,6 +34,7 @@ use crate::models::{
     Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, Lap, Split,
     SportType,
 };
+use crate::pending_login::PendingLogin;
 use crate::provider::ProviderConfig;
 use crate::script_loader;
 use crate::stealth::apply_minimal_stealth;
@@ -113,7 +114,10 @@ pub struct ChromeScraper {
     browser: Mutex<Option<Arc<Browser>>>,
     /// Browser + page kept alive during OTP/2FA flow for follow-up calls.
     /// Stores both so Chrome isn't killed when `credential_login` returns.
-    pending_login: Mutex<Option<(Browser, chromiumoxide::Page)>>,
+    /// Wrapped in `PendingLogin` so abandoned 2FA flows are evicted after
+    /// `ScraperConfig::pending_login_ttl_secs` instead of pinning Chrome
+    /// for the lifetime of the scraper.
+    pending_login: Mutex<Option<PendingLogin<(Browser, chromiumoxide::Page)>>>,
     /// Optional LLM provider for vision-based login (requires `vision` feature)
     #[cfg(feature = "vision")]
     llm: Option<Arc<dyn LlmProvider>>,
@@ -203,11 +207,41 @@ impl ChromeScraper {
             }
         }
         let pending = self.pending_login.lock().await.take();
-        if let Some((mut browser, _page)) = pending {
-            if let Err(e) = browser.close().await {
-                debug!(error = %e, "Pending login browser close returned error");
+        if let Some(pending) = pending {
+            // TTL doesn't matter at shutdown — close whatever's parked.
+            if let Some((mut browser, _page)) =
+                pending.into_inner_if_fresh(Duration::from_secs(u64::MAX))
+            {
+                if let Err(e) = browser.close().await {
+                    debug!(error = %e, "Pending login browser close returned error");
+                }
             }
         }
+    }
+
+    /// Park an in-flight 2FA/OTP login so a follow-up `submit_otp` /
+    /// `select_two_factor` call can resume the same Chrome page. Drops any
+    /// previously parked session first — both as a sanity sweep (abandoned
+    /// flows from the same scraper) and to keep the field a single-slot
+    /// queue.
+    async fn store_pending_login(&self, browser: Browser, page: chromiumoxide::Page) {
+        *self.pending_login.lock().await = Some(PendingLogin::new((browser, page)));
+    }
+
+    /// Take the parked 2FA/OTP login if it was stored less than
+    /// `config.pending_login_ttl_secs` ago. Expired entries are dropped on
+    /// access — chromiumoxide's `kill_on_drop` reaps the held Chrome.
+    async fn take_pending_login(&self) -> Option<(Browser, chromiumoxide::Page)> {
+        let parked = self.pending_login.lock().await.take()?;
+        let ttl = Duration::from_secs(self.config.pending_login_ttl_secs);
+        let result = parked.into_inner_if_fresh(ttl);
+        if result.is_none() {
+            debug!(
+                ttl_secs = self.config.pending_login_ttl_secs,
+                "Evicted expired pending login (Chrome will be reaped on drop)"
+            );
+        }
+        result
     }
 
     /// Open a new page with session cookies and navigate to the given URL
@@ -550,7 +584,7 @@ impl ActivityScraper for ChromeScraper {
                 | LoginResult::TwoFactorChoice(_)
                 | LoginResult::NumberMatch(_)
         ) {
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
         }
 
         Ok(result)
@@ -564,10 +598,8 @@ impl ActivityScraper for ChromeScraper {
         }
 
         let (browser, page) =
-            self.pending_login
-                .lock()
+            self.take_pending_login()
                 .await
-                .take()
                 .ok_or_else(|| ScraperError::Auth {
                     reason: "No pending OTP session — call credential_login first".to_owned(),
                 })?;
@@ -639,7 +671,7 @@ impl ActivityScraper for ChromeScraper {
                 | LoginResult::NumberMatch(_)
                 | LoginResult::Failed(_)
         ) {
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
         }
 
         Ok(result)
@@ -653,10 +685,8 @@ impl ActivityScraper for ChromeScraper {
         }
 
         let (browser, page) =
-            self.pending_login
-                .lock()
+            self.take_pending_login()
                 .await
-                .take()
                 .ok_or_else(|| ScraperError::Auth {
                     reason: "No pending 2FA session — call credential_login first".to_owned(),
                 })?;
@@ -675,14 +705,14 @@ impl ActivityScraper for ChromeScraper {
             )
             .await?;
             if !matches!(result, LoginResult::Success(_)) {
-                *self.pending_login.lock().await = Some((browser, page));
+                self.store_pending_login(browser, page).await;
             }
             return Ok(result);
         }
 
         info!(option_id, "Selecting 2FA method");
         if !cdp_click_two_fa_option(&page, option_id).await {
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
             return Err(ScraperError::Auth {
                 reason: format!("2FA option '{option_id}' not found on page"),
             });
@@ -694,7 +724,7 @@ impl ActivityScraper for ChromeScraper {
         let current_url = page.url().await.ok().flatten().unwrap_or_default();
         if path_contains_any(&current_url, OTP_URL_PATTERNS) {
             info!(url = %current_url, "Already on OTP page after selecting 2FA method");
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
             return Ok(LoginResult::OtpRequired);
         }
 
@@ -702,7 +732,7 @@ impl ActivityScraper for ChromeScraper {
         if option_id == "app" {
             if let Some(number) = extract_number_from_page(&page).await {
                 info!(number = %number, "Number matching challenge detected");
-                *self.pending_login.lock().await = Some((browser, page));
+                self.store_pending_login(browser, page).await;
                 return Ok(LoginResult::NumberMatch(number));
             }
             // Debug: dump what's visible on the page so we can improve extraction
@@ -752,7 +782,7 @@ impl ActivityScraper for ChromeScraper {
             poll_credential_login_result(&page, &self.provider, config, timeout, None).await?;
 
         if !matches!(result, LoginResult::Success(_)) {
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
         }
 
         Ok(result)

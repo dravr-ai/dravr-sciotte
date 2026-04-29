@@ -28,6 +28,7 @@ use crate::models::{
     self, Activity, ActivityParams, AthleteProfile, AuthSession, CookieData, DailySummary,
     HealthParams,
 };
+use crate::pending_login::PendingLogin;
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 
@@ -45,7 +46,10 @@ pub struct VisionScraper {
     provider: ProviderConfig,
     llm: Arc<dyn LlmProvider>,
     browser: Mutex<Option<Arc<Browser>>>,
-    pending_login: Mutex<Option<(Browser, chromiumoxide::Page)>>,
+    /// Browser + page parked between vision-driven `credential_login` and a
+    /// follow-up 2FA call. Wrapped in `PendingLogin` so abandoned flows are
+    /// evicted after `ScraperConfig::pending_login_ttl_secs`.
+    pending_login: Mutex<Option<PendingLogin<(Browser, chromiumoxide::Page)>>>,
 }
 
 impl VisionScraper {
@@ -58,6 +62,29 @@ impl VisionScraper {
             browser: Mutex::new(None),
             pending_login: Mutex::new(None),
         }
+    }
+
+    /// Park an in-flight 2FA login so a follow-up `submit_otp` /
+    /// `select_two_factor` can resume the same Chrome page. Drops any
+    /// previously parked session so the field stays a single-slot queue.
+    async fn store_pending_login(&self, browser: Browser, page: chromiumoxide::Page) {
+        *self.pending_login.lock().await = Some(PendingLogin::new((browser, page)));
+    }
+
+    /// Take the parked 2FA login if it was stored less than
+    /// `config.pending_login_ttl_secs` ago. Expired entries are dropped on
+    /// access — chromiumoxide's `kill_on_drop` reaps the held Chrome.
+    async fn take_pending_login(&self) -> Option<(Browser, chromiumoxide::Page)> {
+        let parked = self.pending_login.lock().await.take()?;
+        let ttl = Duration::from_secs(self.config.pending_login_ttl_secs);
+        let result = parked.into_inner_if_fresh(ttl);
+        if result.is_none() {
+            debug!(
+                ttl_secs = self.config.pending_login_ttl_secs,
+                "Evicted expired vision pending login (Chrome will be reaped on drop)"
+            );
+        }
+        result
     }
 
     /// Get or create a headless browser instance for scraping
@@ -474,7 +501,7 @@ impl ActivityScraper for VisionScraper {
                 }
                 "two_factor_selection" | "otp_entry" | "phone_approval" | "number_match" => {
                     if let Some(result) = Self::handle_2fa_page(&analysis) {
-                        *self.pending_login.lock().await = Some((browser, page));
+                        self.store_pending_login(browser, page).await;
                         return Ok(result);
                     }
                     time::sleep(Duration::from_secs(3)).await;
@@ -503,10 +530,8 @@ impl ActivityScraper for VisionScraper {
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
         let (browser, page) =
-            self.pending_login
-                .lock()
+            self.take_pending_login()
                 .await
-                .take()
                 .ok_or_else(|| ScraperError::Auth {
                     reason: "No pending OTP session".to_owned(),
                 })?;
@@ -527,7 +552,7 @@ impl ActivityScraper for VisionScraper {
                     .unwrap_or_else(|| "OTP verification failed".to_owned()),
             )),
             _ => {
-                *self.pending_login.lock().await = Some((browser, page));
+                self.store_pending_login(browser, page).await;
                 Ok(LoginResult::OtpRequired)
             }
         }
@@ -535,10 +560,8 @@ impl ActivityScraper for VisionScraper {
 
     async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
         let (browser, page) =
-            self.pending_login
-                .lock()
+            self.take_pending_login()
                 .await
-                .take()
                 .ok_or_else(|| ScraperError::Auth {
                     reason: "No pending 2FA session".to_owned(),
                 })?;
@@ -552,7 +575,7 @@ impl ActivityScraper for VisionScraper {
         if let Some(opt) = option {
             browser_utils::cdp_click_at(&page, opt.x, opt.y).await?;
         } else {
-            *self.pending_login.lock().await = Some((browser, page));
+            self.store_pending_login(browser, page).await;
             return Err(ScraperError::Auth {
                 reason: format!("2FA option '{option_id}' not found"),
             });
@@ -577,7 +600,7 @@ impl ActivityScraper for VisionScraper {
             let result_analysis = self.analyze_page(&page).await?;
             match result_analysis.page_type.as_str() {
                 "otp_entry" => {
-                    *self.pending_login.lock().await = Some((browser, page));
+                    self.store_pending_login(browser, page).await;
                     return Ok(LoginResult::OtpRequired);
                 }
                 "success" => {

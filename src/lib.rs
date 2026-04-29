@@ -77,6 +77,9 @@ pub mod cache;
 /// FIFO queue and backpressure limiter for concurrent scraping operations
 pub mod queue;
 
+/// TTL-bounded slot for in-flight 2FA/OTP browser sessions
+pub mod pending_login;
+
 /// Vision-based scraper using LLM screenshot analysis (requires `vision` feature)
 #[cfg(feature = "vision")]
 pub mod vision;

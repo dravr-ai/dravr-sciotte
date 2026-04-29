@@ -124,6 +124,12 @@ pub struct ScraperConfig {
     /// IP — required for sustained Garmin/Strava scraping from datacenter
     /// egress (GCP) where Cloudflare Turnstile would otherwise escalate.
     pub proxy_url: Option<String>,
+    /// Maximum age (seconds) for an in-flight 2FA/OTP login held between
+    /// `credential_login` and the follow-up `submit_otp` /
+    /// `select_two_factor` call. Sessions older than this are evicted on
+    /// the next access — the held Chrome process is closed via
+    /// chromiumoxide's `kill_on_drop`, freeing memory for abandoned flows.
+    pub pending_login_ttl_secs: u64,
 }
 
 impl Default for ScraperConfig {
@@ -151,6 +157,7 @@ impl Default for ScraperConfig {
             proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            pending_login_ttl_secs: env_u64("DRAVR_SCIOTTE_PENDING_LOGIN_TTL", 300),
         }
     }
 }
@@ -218,6 +225,7 @@ mod tests {
         assert_eq!(config.email_step_timeout_secs, 10);
         assert_eq!(config.password_step_timeout_secs, 30);
         assert_eq!(config.phone_tap_timeout_secs, 60);
+        assert_eq!(config.pending_login_ttl_secs, 300);
     }
 
     #[test]
