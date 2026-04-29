@@ -144,11 +144,8 @@ impl Default for ScraperConfig {
                 .map(|v| LoginMode::from_str_value(&v))
                 .unwrap_or_default(),
             credential_login_headless: env::var("DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
-            fake_login: env::var("DRAVR_SCIOTTE_FAKE_LOGIN")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false),
+                .is_ok_and(|v| v == "true" || v == "1"),
+            fake_login: env::var("DRAVR_SCIOTTE_FAKE_LOGIN").is_ok_and(|v| v == "true" || v == "1"),
             profile_base_dir: env::var("DRAVR_SCIOTTE_PROFILE_DIR")
                 .map_or_else(|_| env::temp_dir().join("sciotte-profiles"), PathBuf::from),
             proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL")
