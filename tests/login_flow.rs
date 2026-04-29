@@ -467,7 +467,7 @@ async fn close_browser_after_get_activities() {
     drop(result);
 
     // Give a moment for any background tasks to settle
-    sleep(Duration::from_millis(1000)).await;
+    sleep(Duration::from_secs(1)).await;
 
     // If Arc::into_inner failed, we'll see "Browser was not closed manually" or
     // "Arc::into_inner returned None" in stderr. The test verifies the path runs.
