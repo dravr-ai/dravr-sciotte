@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn fresh_slot_returns_inner() {
         let slot = PendingLogin::new(42i32);
-        assert_eq!(slot.into_inner_if_fresh(Duration::from_secs(60)), Some(42));
+        assert_eq!(slot.into_inner_if_fresh(Duration::from_secs(5)), Some(42));
     }
 
     #[test]
