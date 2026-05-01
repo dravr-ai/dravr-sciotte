@@ -1868,8 +1868,12 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
         suffer_score: data["relative_effort"]
             .as_str()
             .and_then(|s| s.trim().parse().ok()),
-        start_latitude: None,
-        start_longitude: None,
+        start_latitude: data["start_latitude"]
+            .as_str()
+            .and_then(|s| s.trim().parse().ok()),
+        start_longitude: data["start_longitude"]
+            .as_str()
+            .and_then(|s| s.trim().parse().ok()),
         city: None,
         region: None,
         country: None,
@@ -2067,6 +2071,17 @@ fn merge_detail_into_activity(activity: &mut Activity, detail: &serde_json::Valu
     );
     merge_optional_f32(&mut activity.humidity, detail, "humidity", &["%"]);
     merge_optional_f32(&mut activity.wind_speed, detail, "wind_speed", &["km/h"]);
+
+    if activity.start_latitude.is_none() {
+        activity.start_latitude = detail["start_latitude"]
+            .as_str()
+            .and_then(|s| s.trim().parse().ok());
+    }
+    if activity.start_longitude.is_none() {
+        activity.start_longitude = detail["start_longitude"]
+            .as_str()
+            .and_then(|s| s.trim().parse().ok());
+    }
 
     if activity.elapsed_time_seconds.is_none() {
         activity.elapsed_time_seconds = detail["elapsed_time"]
@@ -2269,6 +2284,61 @@ mod tests {
         assert_eq!(parse_duration_string("45:30"), Some(2730));
         assert_eq!(parse_duration_string("3600"), Some(3600));
         assert_eq!(parse_duration_string(""), None);
+    }
+
+    #[test]
+    fn build_detail_extracts_start_lat_lng_from_string_fields() {
+        // The JS extractor emits start_latitude/start_longitude as strings
+        // (every other field uses string-of-number for parser symmetry).
+        let raw = serde_json::json!({
+            "name": "Cold ski",
+            "type": "NordicSki",
+            "date": "2025-12-15",
+            "moving_time": "1:30:00",
+            "distance": "10.0 km",
+            "start_latitude": "45.5017",
+            "start_longitude": "-73.5673",
+        });
+        let activity = build_activity_from_detail("12345", &raw);
+        let lat = activity.start_latitude.unwrap(); // Safe: test fed string-of-number
+        let lng = activity.start_longitude.unwrap(); // Safe: test fed string-of-number
+        assert!((lat - 45.5017).abs() < 1e-4, "expected ~45.5017, got {lat}");
+        assert!(
+            (lng - -73.5673).abs() < 1e-4,
+            "expected ~-73.5673, got {lng}"
+        );
+    }
+
+    #[test]
+    fn merge_detail_fills_start_lat_lng_when_list_was_empty() {
+        // List page doesn't surface coords; detail page should fill them in.
+        let mut activity = build_activity_from_js_item(
+            "9999",
+            &serde_json::json!({
+                "name": "Cold ski",
+                "type": "NordicSki",
+                "date": "2025-12-15",
+                "time": "1:30:00",
+                "distance": "10.0 km",
+            }),
+        );
+        assert!(
+            activity.start_latitude.is_none(),
+            "list page must not preempt"
+        );
+
+        merge_detail_into_activity(
+            &mut activity,
+            &serde_json::json!({
+                "start_latitude": "45.5017",
+                "start_longitude": "-73.5673",
+            }),
+        );
+
+        let lat = activity.start_latitude.unwrap(); // Safe: merged from test JSON
+        let lng = activity.start_longitude.unwrap(); // Safe: merged from test JSON
+        assert!((lat - 45.5017).abs() < 1e-4);
+        assert!((lng - -73.5673).abs() < 1e-4);
     }
 
     #[test]

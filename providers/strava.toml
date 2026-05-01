@@ -176,6 +176,64 @@ js_extract = '''
         }
     }
 
+    // GPS coordinates — Strava embeds the start lat/lng in several places.
+    // Tries (in order): pageView.activity() global, "start_latlng":[lat,lng]
+    // pattern in any <script>, then the Mapbox static-map URL on the activity
+    // map image (`...,/<lng>,<lat>,zoom...`). Skips [0,0] which Strava emits
+    // for indoor activities.
+    function isPlausibleLatLng(lat, lng) {
+        if (typeof lat !== 'number' || typeof lng !== 'number') return false;
+        if (!isFinite(lat) || !isFinite(lng)) return false;
+        if (Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) return false;
+        return Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+    }
+    try {
+        if (typeof pageView !== 'undefined' && pageView && typeof pageView.activity === 'function') {
+            var act = pageView.activity();
+            var attrs = (act && (act.attributes || (typeof act.toJSON === 'function' ? act.toJSON() : null))) || act;
+            if (attrs && Array.isArray(attrs.start_latlng) && attrs.start_latlng.length >= 2) {
+                var lat = Number(attrs.start_latlng[0]);
+                var lng = Number(attrs.start_latlng[1]);
+                if (isPlausibleLatLng(lat, lng)) {
+                    data.start_latitude = String(lat);
+                    data.start_longitude = String(lng);
+                }
+            }
+        }
+    } catch(e) {}
+    if (!data.start_latitude) {
+        for (var gs = 0; gs < scripts.length; gs++) {
+            var gbody = scripts[gs].textContent || '';
+            var llMatch = gbody.match(/"start_latlng"\s*:\s*\[\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\]/);
+            if (llMatch) {
+                var glat = Number(llMatch[1]);
+                var glng = Number(llMatch[2]);
+                if (isPlausibleLatLng(glat, glng)) {
+                    data.start_latitude = String(glat);
+                    data.start_longitude = String(glng);
+                    break;
+                }
+            }
+        }
+    }
+    if (!data.start_latitude) {
+        // Mapbox static map URL: …/static/<style>/<lng>,<lat>,<zoom>/…
+        var mapImgs = document.querySelectorAll('img[src*="api.mapbox.com/styles"]');
+        for (var mi = 0; mi < mapImgs.length; mi++) {
+            var msrc = mapImgs[mi].getAttribute('src') || '';
+            var mboxMatch = msrc.match(/\/static\/[^\/]+\/(-?\d+\.\d+),(-?\d+\.\d+),/);
+            if (mboxMatch) {
+                var mlng = Number(mboxMatch[1]);
+                var mlat = Number(mboxMatch[2]);
+                if (isPlausibleLatLng(mlat, mlng)) {
+                    data.start_latitude = String(mlat);
+                    data.start_longitude = String(mlng);
+                    break;
+                }
+            }
+        }
+    }
+
     // Splits + laps — Strava embeds these as JSON arrays inside a page
     // bootstrap block keyed by "splits_metric" or "laps". Scripts can
     // carry the arrays in several shapes across page variants; walk
