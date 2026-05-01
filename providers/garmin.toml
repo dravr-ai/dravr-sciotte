@@ -253,6 +253,26 @@ js_extract = '''
 
     var summary = api.summaryDTO || {};
 
+    // Garmin exposes the start coordinate on the summary DTO. The field
+    // name varies across endpoints — `startLatitude`/`startLongitude` is
+    // the modern Connect /app/ shape; older /modern/proxy responses used
+    // `startLatitudeDecimal`/`startLongitudeDecimal`. Skip [0,0] which
+    // Garmin emits for indoor activities recorded without GPS.
+    function pickCoord() {
+        var lat = summary.startLatitude;
+        var lng = summary.startLongitude;
+        if (lat == null) lat = summary.startLatitudeDecimal;
+        if (lng == null) lng = summary.startLongitudeDecimal;
+        if (lat == null || lng == null) return null;
+        if (typeof lat !== "number") lat = Number(lat);
+        if (typeof lng !== "number") lng = Number(lng);
+        if (!isFinite(lat) || !isFinite(lng)) return null;
+        if (Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        return { lat: String(lat), lng: String(lng) };
+    }
+    var coord = pickCoord();
+
     return JSON.stringify({
         // The full unmolested Garmin API response — what `?raw=true` exposes for
         // OAuth deserializer scaffolding work.
@@ -277,6 +297,8 @@ js_extract = '''
         max_speed: summary.maxSpeed != null ? summary.maxSpeed : null,
         avg_power: summary.averagePower != null ? summary.averagePower : null,
         device: api.deviceName || (api.metadataDTO ? api.metadataDTO.deviceMetaDataDTO && api.metadataDTO.deviceMetaDataDTO.deviceName : null),
+        start_latitude: coord ? coord.lat : null,
+        start_longitude: coord ? coord.lng : null,
         laps: Array.isArray(rawLaps) ? rawLaps.map(normalizeLap) : null,
         splits: Array.isArray(rawSplits) ? rawSplits.map(normalizeSplit) : null
     });
