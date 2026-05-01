@@ -1,11 +1,5 @@
 # Changelog
 
-## [0.5.11] — 2026-05-01
-
-### Added
-
-- feat(strava): scrape `start_latitude` / `start_longitude` from Strava activity detail pages. The detail-page JS extractor now reads the start lat/lng from `pageView.activity()`, falls back to `"start_latlng":[lat,lng]` patterns in any embedded `<script>`, and finally tries the Mapbox static-map URL. Plumbed into both `build_activity_from_detail` and `merge_detail_into_activity` so scraper-Strava activities now carry GPS coords — unblocks the platform-side weather backfill (sciotte/Strava Mirror users were filtered out because every row had `start_latitude: None`).
-
 ## [0.5.10] — 2026-04-27
 
 ### Fixed
