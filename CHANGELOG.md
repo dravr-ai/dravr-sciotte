@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.11] — 2026-05-01
+
+### Added
+
+- feat(garmin): project start_latitude/start_longitude from summaryDTO Garmin Connect's /activity-service/activity/{id} response carries the start coord on summaryDTO.startLatitude/startLongitude (older endpoints used …Decimal suffix). Project both into the same start_latitude/start_longitude string keys the shared Rust parser already reads, with [0,0] / out-of-range / non-numeric guards so indoor activities don't get bogus coords. Same parser path as Strava — no scraper.rs changes needed.
+- feat(strava): scrape start_latitude/start_longitude from activity detail page Detail-page JS reads pageView.activity().start_latlng with embedded-script regex + Mapbox static-map URL as fallbacks; build_activity_from_detail and merge_detail_into_activity now plumb GPS coords. Unblocks the dravr-platform weather backfill which had been filtering out every sciotte row because start_latitude was always None. v0.5.11.
+
+### Fixed
+
+- fix(tests): unsuboptimal Duration units for clippy 1.95 queue_test: from_secs(60) -> from_mins(1); login_flow: from_millis(1000) -> from_secs(1). Pedantic clippy::duration_suboptimal_units flagged both literals.
+- fix(pending_login): drop multiple-of-60 in Duration::from_secs literal clippy 1.95 duration_suboptimal_units flagged Duration::from_secs(60); test only needs a non-zero ttl, switch to 5.
+- fix(scraper): TTL-bounded pending_login eviction PendingLogin<T> wrapper records park-time; abandoned 2FA flows older than ScraperConfig::pending_login_ttl_secs (default 300s, env DRAVR_SCIOTTE_PENDING_LOGIN_TTL) are dropped on next access so chromiumoxide's kill_on_drop reaps the held Chrome — replaces the prior unbounded Mutex<Option<(Browser, Page)>> in both ChromeScraper and VisionScraper.
+- fix(config): is_ok_and replaces map().unwrap_or for env booleans Clippy 1.95 promoted clippy::map_unwrap_or to deny under workspace pedantic; CI was red on credential_login_headless and fake_login since 2026-04-27.
+
+
+
 ## [0.5.10] — 2026-04-27
 
 ### Fixed
