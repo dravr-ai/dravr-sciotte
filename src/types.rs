@@ -110,4 +110,23 @@ pub trait ActivityScraper: Send + Sync {
     /// WebSocket handler task terminates without error-looping. Implementations
     /// that don't manage a browser can use the default no-op.
     async fn close_browser(&self) {}
+
+    /// Debug probe that opens the training-list and dashboard-feed pages,
+    /// dumps where activity GPS coordinates are embedded, and returns the
+    /// raw JSON shape (rows + scripts + globals + mapbox image URLs).
+    ///
+    /// Surfaces the cheapest list-page extraction path for `start_latlng`
+    /// without a per-activity detail fetch — the platform's weather
+    /// backfill currently filters out every list-page row because GPS is
+    /// only populated on the detail page.
+    ///
+    /// Default impl returns an empty object — only browser scrapers that
+    /// can run JavaScript against an authenticated page provide a real
+    /// implementation.
+    async fn probe_list_page_for_gps(
+        &self,
+        _session: &AuthSession,
+    ) -> ScraperResult<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
 }

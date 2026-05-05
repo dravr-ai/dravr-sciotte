@@ -58,6 +58,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/activities", get(activities_handler))
         .route("/api/activities/{id}", get(activity_detail_handler))
         .route("/api/daily-summary", get(daily_summary_handler))
+        .route("/debug/list-page-probe", get(list_page_probe_handler))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state.clone());
 
@@ -320,6 +321,36 @@ async fn daily_summary_handler(
 
     match guard.scraper().get_daily_summary(session, &params).await {
         Ok(summary) => Json(json!(summary)).into_response(),
+        Err(e) => scraper_error_response(&e),
+    }
+}
+
+// ============================================================================
+// Debug — list-page GPS probe
+// ============================================================================
+
+/// GET /debug/list-page-probe — dump where Strava embeds activity GPS
+/// coordinates on the training-list and dashboard-feed pages, for the
+/// session resolved from `X-Session-Id` (or the latest session).
+async fn list_page_probe_handler(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let guard = state.read().await;
+
+    let session =
+        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+
+    let Some(session) = session else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "session_not_found"})),
+        )
+            .into_response();
+    };
+
+    match guard.scraper().probe_list_page_for_gps(session).await {
+        Ok(report) => Json(report).into_response(),
         Err(e) => scraper_error_response(&e),
     }
 }

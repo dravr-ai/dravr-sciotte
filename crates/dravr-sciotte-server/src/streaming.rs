@@ -860,15 +860,20 @@ async fn send_status(ws: &mut SplitSink<WebSocket, Message>, state_name: &str, d
 
 /// Launch a Chrome browser configured for streaming (headless with rendering)
 async fn launch_streaming_browser() -> Result<Browser, Box<dyn Error + Send + Sync>> {
+    // `.no_sandbox()` covers both `--no-sandbox` and `--disable-setuid-sandbox`.
+    // `.hide()` emits `--disable-blink-features=AutomationControlled`.
+    // `disable-popup-blocking` and `disable-dev-shm-usage` are already in
+    // chromiumoxide's DEFAULT_ARGS; we don't need to re-emit them.
     let config = BrowserConfig::builder()
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--disable-dev-shm-usage")
-        .arg("--disable-setuid-sandbox")
-        .arg("--disable-blink-features=AutomationControlled")
-        .arg("--disable-popup-blocking")
-        .arg("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        .new_headless_mode()
+        .arg("disable-gpu")
+        .no_sandbox()
+        .hide()
+        .arg((
+            "user-agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        ))
         .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
         .build()
         .map_err(|e| format!("Failed to configure browser: {e}"))?;

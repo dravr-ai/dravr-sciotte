@@ -60,6 +60,12 @@ jobs:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install Chrome
+        # automation_canary.rs launches a real headless Chrome via chromiumoxide
+        # to assert that future bumps don't reintroduce the bot-detection signals
+        # Google's loader rejects on. Without Chrome on the runner the launch
+        # hangs, so install it here.
+        uses: browser-actions/setup-chrome@latest
       - run: cargo test --workspace -- --test-threads=1
 
 

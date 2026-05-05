@@ -215,6 +215,13 @@ impl<S: ActivityScraper> ActivityScraper for CachedScraper<S> {
     async fn close_browser(&self) {
         self.inner.close_browser().await;
     }
+
+    async fn probe_list_page_for_gps(
+        &self,
+        session: &AuthSession,
+    ) -> ScraperResult<serde_json::Value> {
+        self.inner.probe_list_page_for_gps(session).await
+    }
 }
 
 /// Cache hit/miss statistics

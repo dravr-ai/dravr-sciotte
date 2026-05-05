@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<!--
+  Automation-detection canary. Mirrors the signals that Google Sign-In's
+  `accounts.google.com/v3/signin/identifier` loader uses to decide whether
+  a browser is "secure" (real user) or "may not be secure" (automation).
+
+  Each signal writes a result into `window.__signals[name]` (true means
+  "automation tell detected"). The Rust test reads the map via
+  page.evaluate after a short settle window.
+
+  Sources for each canary:
+  - Castle.io (May 2025): "How to detect Headless Chrome bots instrumented
+    with Playwright" — the Error.stack getter trick that fires whenever
+    Runtime.consoleAPICalled is enabled (i.e. CDP is attached).
+  - Antoine Vastel (Feb 2023): navigator.webdriver, navigator.plugins,
+    navigator.languages, window.chrome.runtime, WebGL renderer.
+  - DataDome threat-research (2025): permissions API "notifications"
+    granted-vs-denied mismatch that headless mode reports.
+-->
+<html>
+<head><meta charset="utf-8"><title>Canary</title></head>
+<body>
+<script>
+(function() {
+    window.__signals = {};
+
+    // 1. CDP Runtime.Enable side-channel (Castle.io trick).
+    //    When a CDP client has called Runtime.enable, console.log(error)
+    //    causes the browser to serialize the error's stack getter, which
+    //    we observe by setting a flag from inside the getter.
+    try {
+        var probe = new Error('canary');
+        var fired = { value: false };
+        Object.defineProperty(probe, 'stack', { get: function() { fired.value = true; return ''; } });
+        // Suppress the visible console output in tests but still trigger
+        // the CDP serialization path.
+        var orig = console.debug;
+        console.debug = function() {};
+        console.debug(probe);
+        console.debug = orig;
+        // Give CDP a microtask to serialize.
+        Promise.resolve().then(function() {
+            window.__signals['cdp_runtime_enable'] = fired.value;
+        });
+    } catch (e) {
+        window.__signals['cdp_runtime_enable_error'] = String(e);
+    }
+
+    // 2. navigator.webdriver — should be undefined or false on real browsers.
+    window.__signals['webdriver_set'] = navigator.webdriver === true;
+
+    // 3. navigator.plugins — empty PluginArray is the headless tell.
+    window.__signals['plugins_empty'] = !navigator.plugins || navigator.plugins.length === 0;
+
+    // 4. navigator.languages — empty array is the headless tell.
+    window.__signals['languages_empty'] = !navigator.languages || navigator.languages.length === 0;
+
+    // 5. window.chrome.runtime — missing is the headless tell.
+    window.__signals['chrome_runtime_missing'] = !window.chrome || !window.chrome.runtime;
+
+    // 6. WebGL renderer — 'SwiftShader' / 'Mesa OffScreen' / 'Google SwiftShader' is the headless tell.
+    try {
+        var canvas = document.createElement('canvas');
+        var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (gl) {
+            var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+            if (dbg) {
+                var renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) || '';
+                window.__signals['webgl_renderer'] = String(renderer);
+                window.__signals['webgl_swiftshader'] = /SwiftShader|Mesa OffScreen|llvmpipe/i.test(renderer);
+            } else {
+                window.__signals['webgl_no_debug_ext'] = true;
+            }
+        } else {
+            window.__signals['webgl_unavailable'] = true;
+        }
+    } catch (e) {
+        window.__signals['webgl_error'] = String(e);
+    }
+
+    // 7. Permissions API "notifications" mismatch — headless reports
+    //    'granted' from query() while Notification.permission is 'denied'.
+    try {
+        if (navigator.permissions && navigator.permissions.query) {
+            navigator.permissions.query({ name: 'notifications' }).then(function(p) {
+                window.__signals['notif_state_query'] = p.state;
+                window.__signals['notif_state_global'] = (typeof Notification !== 'undefined') ? Notification.permission : 'no-Notification';
+                window.__signals['notif_mismatch'] =
+                    (typeof Notification !== 'undefined') &&
+                    p.state === 'granted' &&
+                    Notification.permission === 'denied';
+            }).catch(function(e) {
+                window.__signals['notif_query_error'] = String(e);
+            });
+        } else {
+            window.__signals['notif_api_missing'] = true;
+        }
+    } catch (e) {
+        window.__signals['notif_error'] = String(e);
+    }
+
+    // 8. User agent string — 'HeadlessChrome' substring leaks the launch mode.
+    window.__signals['ua_headless_substring'] = /HeadlessChrome/i.test(navigator.userAgent || '');
+
+    // 9. window.outerWidth/Height of zero is the headless tell on some launches.
+    window.__signals['outer_dims_zero'] =
+        (window.outerWidth === 0 && window.outerHeight === 0);
+
+    // 10. document.documentElement client width — headless without --window-size
+    //     defaults to 800x600, which leaks. Real browsers vary widely.
+    window.__signals['client_dims'] = {
+        outerWidth: window.outerWidth,
+        outerHeight: window.outerHeight,
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight
+    };
+
+    // Mark the canary as ready so the test can poll for completion.
+    setTimeout(function() { window.__canary_ready = true; }, 200);
+})();
+</script>
+<h1>Automation Canary</h1>
+<p>Read <code>window.__signals</code>.</p>
+</body>
+</html>

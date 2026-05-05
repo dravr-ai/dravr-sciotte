@@ -868,6 +868,24 @@ impl ActivityScraper for ChromeScraper {
             "Activities extracted from list page"
         );
 
+        // Augment activities with `city` / `region` from Strava's dashboard
+        // feed JSON. The feed exposes `timeAndLocation.location` ("City,
+        // Region") per activity — Strava strips precise GPS from the list
+        // endpoints, so this is the cheapest path to a coarse start
+        // location, and the platform's weather backfill can geocode the
+        // string into a lat/lng for ambient temperature lookup.
+        // Fetched in-page via same-origin XHR so cookies travel for free.
+        // Best-effort: if the feed is unreachable or the activity isn't in
+        // its window, the activity stays without city — extractor stays
+        // intact, no failure.
+        if !activities.is_empty() && self.provider.list_page.url.contains("strava.com") {
+            if let Err(e) =
+                enrich_activities_with_dashboard_feed(&page, &mut activities, target_count).await
+            {
+                debug!(error = %e, "Dashboard feed enrichment skipped");
+            }
+        }
+
         // Optionally enrich each activity by navigating to its detail page
         if params.enrich_details {
             info!(
@@ -1034,7 +1052,148 @@ impl ActivityScraper for ChromeScraper {
     async fn close_browser(&self) {
         self.close_browsers().await;
     }
+
+    async fn probe_list_page_for_gps(
+        &self,
+        session: &AuthSession,
+    ) -> ScraperResult<serde_json::Value> {
+        let pages = [
+            ("training-table", "https://www.strava.com/athlete/training"),
+            ("dashboard-feed", "https://www.strava.com/dashboard"),
+        ];
+
+        let mut report = serde_json::Map::new();
+        for (name, url) in pages {
+            let page = self.open_authenticated_page(session, url).await?;
+
+            let landed = page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "<unknown>".to_owned());
+
+            let dump_str = match page.evaluate(LIST_GPS_PROBE_JS).await {
+                Ok(r) => r
+                    .value()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                Err(e) => format!("__probe_eval_error: {e}"),
+            };
+
+            let dump: serde_json::Value =
+                serde_json::from_str(&dump_str).unwrap_or(serde_json::Value::String(dump_str));
+
+            report.insert(
+                name.to_owned(),
+                serde_json::json!({
+                    "requested_url": url,
+                    "landed_url": landed,
+                    "dump": dump,
+                }),
+            );
+        }
+
+        self.close_browsers().await;
+        Ok(serde_json::Value::Object(report))
+    }
 }
+
+/// Page-context JavaScript that walks the rendered list/feed pages and
+/// reports every place an activity start-coordinate could be hiding so
+/// we can pick the cheapest extraction path. Returns a JSON string
+/// (Strava CSP forbids returning structured objects directly).
+const LIST_GPS_PROBE_JS: &str = r#"(function() {
+    const out = {
+        url: window.location.href,
+        rows: [],
+        scripts: [],
+        globals: {},
+        mapbox_imgs: [],
+    };
+
+    const rows = document.querySelectorAll('tr.training-activity-row, tr[data-activity-id], a[data-cy="activity-card"], a[href*="/activities/"]');
+    for (let i = 0; i < rows.length && out.rows.length < 5; i++) {
+        const r = rows[i];
+        const dataAttrs = {};
+        for (let j = 0; j < r.attributes.length; j++) {
+            const a = r.attributes[j];
+            if (a.name.startsWith('data-')) dataAttrs[a.name] = a.value;
+        }
+        out.rows.push({
+            tag: r.tagName,
+            class: (r.className || '').toString().substring(0, 200),
+            data: dataAttrs,
+            href: r.getAttribute('href') || '',
+            outerHTML: r.outerHTML.substring(0, 600),
+        });
+    }
+
+    const scripts = document.querySelectorAll('script');
+    for (let s = 0; s < scripts.length; s++) {
+        const body = scripts[s].textContent || '';
+        const latlngMatches = body.match(/"start_latlng"\s*:\s*\[[^\]]*\]/g) || [];
+        const polyMatches = body.match(/"summary_polyline"\s*:\s*"[^"]{1,40}"/g) || [];
+        if (latlngMatches.length > 0 || polyMatches.length > 0) {
+            out.scripts.push({
+                idx: s,
+                size: body.length,
+                start_latlng_hits: latlngMatches.slice(0, 5),
+                summary_polyline_hits: polyMatches.slice(0, 5),
+            });
+            if (out.scripts.length >= 5) break;
+        }
+    }
+
+    try {
+        if (typeof pageView !== 'undefined' && pageView) {
+            out.globals.pageView = {
+                has_activity_fn: typeof pageView.activity === 'function',
+                keys: Object.keys(pageView).slice(0, 30),
+            };
+        }
+    } catch(e) {}
+    try {
+        if (window.__INITIAL_STATE__) {
+            out.globals.__INITIAL_STATE__ = {
+                top_keys: Object.keys(window.__INITIAL_STATE__).slice(0, 30),
+            };
+        }
+    } catch(e) {}
+    try {
+        if (window.__NEXT_DATA__) {
+            const nd = window.__NEXT_DATA__;
+            out.globals.__NEXT_DATA__ = {
+                top_keys: Object.keys(nd).slice(0, 30),
+                props_top_keys: nd.props ? Object.keys(nd.props).slice(0, 30) : [],
+                page: nd.page || null,
+            };
+            try {
+                const ndStr = JSON.stringify(nd);
+                const ndLatlng = ndStr.match(/"start_latlng"\s*:\s*\[[^\]]*\]/g) || [];
+                const ndPoly = ndStr.match(/"summary_polyline"\s*:\s*"[^"]{1,40}"/g) || [];
+                out.globals.__NEXT_DATA__.start_latlng_hits = ndLatlng.slice(0, 5);
+                out.globals.__NEXT_DATA__.summary_polyline_hits = ndPoly.slice(0, 5);
+                out.globals.__NEXT_DATA__.size_bytes = ndStr.length;
+            } catch(e) {
+                out.globals.__NEXT_DATA__.stringify_error = String(e);
+            }
+        }
+    } catch(e) {}
+
+    const mapImgs = document.querySelectorAll('img[src*="api.mapbox.com/styles"]');
+    for (let i = 0; i < mapImgs.length && out.mapbox_imgs.length < 5; i++) {
+        const src = mapImgs[i].getAttribute('src') || '';
+        const m = src.match(/\/static\/[^\/]+\/(-?\d+\.\d+),(-?\d+\.\d+),/);
+        out.mapbox_imgs.push({
+            src_truncated: src.substring(0, 200),
+            parsed_lng: m ? m[1] : null,
+            parsed_lat: m ? m[2] : null,
+        });
+    }
+
+    return JSON.stringify(out, null, 2);
+})()"#;
 
 // ============================================================================
 // Login flow types and helpers
@@ -1106,6 +1265,21 @@ impl<'a> LoginSelectors<'a> {
     }
 }
 
+/// Return `true` when the rendered document body contains the given
+/// substring. Used to fingerprint Google's automation-rejection page,
+/// which has no stable URL pattern but ships consistent error copy.
+async fn page_contains_text(page: &chromiumoxide::Page, needle: &str) -> bool {
+    let js = format!(
+        "((document.body && document.body.textContent) || '').indexOf({}) >= 0",
+        serde_json::to_string(needle).unwrap_or_else(|_| "''".to_owned())
+    );
+    page.evaluate(js)
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// Outcome of waiting for the next login step
 enum StepOutcome {
     /// The expected field appeared in the DOM
@@ -1146,6 +1320,23 @@ async fn poll_for_next_step(
                 reason: format!("Failed to get page URL: {e}"),
             })?
             .unwrap_or_default();
+
+        // Google "browser may not be secure" interstitial — automation
+        // detection fired before we could fill the password field. The page
+        // has no recoverable button; return a clear error so callers know to
+        // fix stealth instead of bumping the timeout.
+        if url.contains("/v3/signin/rejected")
+            || url.contains("BrowserNotSupported")
+            || page_contains_text(page, "browser or app may not be secure").await
+        {
+            save_timeout_screenshot(page, "google-browser-rejected").await;
+            return Err(ScraperError::Auth {
+                reason: "Google rejected the browser as insecure (automation detected). \
+                         Run with DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS=false, or \
+                         use the email/password login flow on Strava directly."
+                    .to_owned(),
+            });
+        }
 
         // Passkey challenge — click "Try another way" then "Enter your password"
         if url.contains(PASSKEY_CHALLENGE_PATTERN) {
@@ -1707,6 +1898,98 @@ async fn navigate_and_extract_detail(
 // ============================================================================
 // Activity construction from scraped data
 // ============================================================================
+
+/// Augment activities with `city` / `region` from Strava's dashboard feed
+/// JSON. Same-origin XHR carries cookies for free; we issue a single
+/// request and merge results by activity id.
+///
+/// Strava strips precise GPS from list endpoints, but the dashboard feed
+/// exposes `timeAndLocation.location` (e.g. "Prévost, Quebec") per recent
+/// activity — enough for downstream weather geocoding. Best-effort:
+/// activities outside the feed's window stay without city.
+async fn enrich_activities_with_dashboard_feed(
+    page: &chromiumoxide::Page,
+    activities: &mut [Activity],
+    target_count: usize,
+) -> ScraperResult<()> {
+    // Ask for at least as many feed entries as the caller wanted from the
+    // training table; Strava clamps internally if we overshoot.
+    let n = target_count.max(activities.len()).max(20);
+    let js = format!(
+        r"(async function() {{
+            try {{
+                const resp = await fetch('/dashboard/feed?feed_type=my_activity&athlete_id=current&num_entries={n}', {{
+                    headers: {{ 'Accept': 'application/json,text/javascript,*/*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' }},
+                    credentials: 'same-origin',
+                }});
+                if (!resp.ok) return JSON.stringify({{ __error: 'http ' + resp.status }});
+                const data = await resp.json();
+                const out = {{}};
+                (data.entries || []).forEach(function(e) {{
+                    if (e.entity === 'Activity' && e.activity && e.activity.id) {{
+                        const tl = e.activity.timeAndLocation || {{}};
+                        if (tl.location) out[String(e.activity.id)] = tl.location;
+                    }}
+                }});
+                return JSON.stringify(out);
+            }} catch (err) {{
+                return JSON.stringify({{ __error: String(err) }});
+            }}
+        }})()"
+    );
+
+    let result = page
+        .evaluate(js)
+        .await
+        .map_err(|e| ScraperError::Scraping {
+            reason: format!("dashboard feed evaluate failed: {e}"),
+        })?;
+
+    let body = result
+        .value()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default();
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| ScraperError::Scraping {
+            reason: format!("dashboard feed JSON parse failed: {e}"),
+        })?;
+
+    if let Some(err) = parsed.get("__error").and_then(|v| v.as_str()) {
+        return Err(ScraperError::Scraping {
+            reason: format!("dashboard feed XHR error: {err}"),
+        });
+    }
+
+    let Some(map) = parsed.as_object() else {
+        return Ok(());
+    };
+
+    let mut filled = 0usize;
+    for activity in activities.iter_mut() {
+        if let Some(loc) = map.get(&activity.id).and_then(|v| v.as_str()) {
+            // "City, Region" — split on the first comma. Strava's location
+            // string is Mapbox-formatted; everything before the first comma
+            // is the city, everything after is the higher-level admin area.
+            if let Some((city, region)) = loc.split_once(',') {
+                activity.city = Some(city.trim().to_owned());
+                activity.region = Some(region.trim().to_owned());
+            } else {
+                activity.city = Some(loc.trim().to_owned());
+            }
+            filled += 1;
+        }
+    }
+
+    debug!(
+        feed_entries = map.len(),
+        activities_total = activities.len(),
+        activities_filled = filled,
+        "Dashboard feed location enrichment complete"
+    );
+
+    Ok(())
+}
 
 /// Build Activity structs from JS-extracted item list
 fn parse_js_activity_items(items: &[serde_json::Value]) -> Vec<Activity> {

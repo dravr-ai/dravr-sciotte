@@ -670,4 +670,18 @@ impl<S: ActivityScraper> ActivityScraper for QueuedScraper<S> {
     async fn close_browser(&self) {
         self.inner.close_browser().await;
     }
+
+    async fn probe_list_page_for_gps(
+        &self,
+        session: &AuthSession,
+    ) -> ScraperResult<serde_json::Value> {
+        let permit = self
+            .limiter
+            .acquire()
+            .await
+            .map_err(LimiterError::into_scraper_error)?;
+        let outcome = self.inner.probe_list_page_for_gps(session).await;
+        drop(permit);
+        outcome
+    }
 }

@@ -18,7 +18,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
 use chromiumoxide::cdp::browser_protocol::network::CookieParam;
 use chrono::Utc;
 use futures::StreamExt;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::config::ScraperConfig;
 use crate::error::{ScraperError, ScraperResult};
@@ -43,14 +43,29 @@ pub async fn launch_browser(
     headless: bool,
     profile_id: Option<&str>,
 ) -> ScraperResult<Browser> {
+    // Attach to an externally-launched Chrome via CDP if the operator
+    // pointed us at one. Use this when the local Chrome is already logged
+    // into the provider via UI (sidesteps automation-detection on the
+    // login page entirely — the scraper inherits the existing cookies).
+    //
+    // Set the env var to the WebSocket debugger URL printed by Chrome
+    // when launched with `--remote-debugging-port=PORT`, e.g.:
+    //   ws://127.0.0.1:9222/devtools/browser/<id>
+    // Read it from `http://127.0.0.1:9222/json/version` (`webSocketDebuggerUrl`).
+    if let Ok(connect_url) = env::var("DRAVR_SCIOTTE_CONNECT_URL") {
+        if !connect_url.is_empty() {
+            return connect_to_existing_browser(&connect_url).await;
+        }
+    }
+
     let mut builder = BrowserConfig::builder();
 
     if headless {
-        builder = builder.arg("--headless=new");
+        builder = builder.new_headless_mode();
     } else {
         builder = builder
             .with_head()
-            .arg("--disable-features=WebAuthentication");
+            .arg(("disable-features", "WebAuthentication"));
     }
 
     let profile_dir = profile_id.map_or_else(ephemeral_profile_dir, |id| {
@@ -76,12 +91,18 @@ pub async fn launch_browser(
         }
     });
 
-    // `--disable-blink-features=AutomationControlled` is intentionally absent.
-    // It hides `navigator.webdriver` on older Chrome but leaks more
-    // automation tells than it hides on newer Chrome (147+). The stealth
-    // module's `apply_minimal_stealth` overrides `navigator.webdriver`
-    // directly via `Page.addScriptToEvaluateOnNewDocument` instead — that
-    // path survives Chrome upgrades and handles the same signal cleanly.
+    // `.hide()` removes the native `navigator.webdriver=true` Blink injects
+    // under headless+CDP (it emits `--disable-blink-features=AutomationControlled`)
+    // and suppresses the "Chrome is being controlled by automated test
+    // software" infobar — without it, Google Sign-In's `/v3/signin/rejected`
+    // page fires before the JS-level webdriver stealth runs.
+    // `disable-extensions` and `disable-dev-shm-usage` are emitted by
+    // chromiumoxide's DEFAULT_ARGS path; we don't re-emit them here.
+    builder = builder.hide().arg("no-default-browser-check").arg((
+        "disable-features",
+        "Translate,IsolateOrigins,site-per-process",
+    ));
+
     let user_agent = if cfg!(target_os = "linux") {
         // Cloud Run egress: pin to a Linux Chrome UA to match real users
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
@@ -93,10 +114,9 @@ pub async fn launch_browser(
     };
 
     builder = builder
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--disable-dev-shm-usage")
-        .arg(format!("--user-agent={user_agent}"))
+        .arg("disable-gpu")
+        .no_sandbox()
+        .arg(("user-agent", user_agent))
         .user_data_dir(profile_dir)
         .window_size(1920, 1080);
 
@@ -115,7 +135,7 @@ pub async fn launch_browser(
             || proxy_url.clone(),
             |id| proxy_url.replace("{session_id}", id),
         );
-        builder = builder.arg(format!("--proxy-server={resolved}"));
+        builder = builder.arg(("proxy-server", resolved.as_str()));
         debug!(
             proxy_id = %profile_id.unwrap_or("(ephemeral)"),
             "Routing browser through residential proxy"
@@ -143,6 +163,31 @@ pub async fn launch_browser(
         }
     });
 
+    Ok(browser)
+}
+
+/// Connect to an externally-launched Chrome via its CDP WebSocket URL.
+///
+/// `ws_url` is the `webSocketDebuggerUrl` returned by
+/// `http://127.0.0.1:PORT/json/version` when Chrome was launched with
+/// `--remote-debugging-port=PORT`. The remote Chrome's existing pages
+/// and cookies remain — sciotte just opens new tabs against the same
+/// browser process. Stealth is still injected per-page via
+/// `open_page_with_stealth`, so any new navigations sciotte performs
+/// look the same as ones the user would make.
+async fn connect_to_existing_browser(ws_url: &str) -> ScraperResult<Browser> {
+    info!(ws_url, "Connecting to externally-launched Chrome via CDP");
+    let (browser, mut handler) =
+        Browser::connect(ws_url.to_owned())
+            .await
+            .map_err(|e| ScraperError::Browser {
+                reason: format!("Failed to connect to Chrome at {ws_url}: {e}"),
+            })?;
+    tokio::spawn(async move {
+        while let Some(event) = handler.next().await {
+            debug!(?event, "Browser event");
+        }
+    });
     Ok(browser)
 }
 
