@@ -884,6 +884,14 @@ impl ActivityScraper for ChromeScraper {
             {
                 debug!(error = %e, "Dashboard feed enrichment skipped");
             }
+
+            fill_missing_locations_from_detail_pages(
+                &page,
+                &mut activities,
+                &self.provider,
+                &self.config,
+            )
+            .await;
         }
 
         // Optionally enrich each activity by navigating to its detail page
@@ -1898,6 +1906,54 @@ async fn navigate_and_extract_detail(
 // ============================================================================
 // Activity construction from scraped data
 // ============================================================================
+
+/// Detail-page fallback for activities the dashboard feed didn't cover.
+///
+/// The dashboard feed only returns the most recent ~N entries Strava
+/// decides to expose; older activities (or some that simply don't carry
+/// `timeAndLocation.location`) come back without city/region after the
+/// feed pass. Each missing activity's detail page DOES expose location,
+/// so we walk the still-empty subset and merge in city/region.
+///
+/// Bounded by `SCIOTTE_DETAIL_FALLBACK_MAX` (default 30) to cap worst-case
+/// latency: a 200-activity scrape hitting 100 missing entries would
+/// otherwise add 100 extra navigations. The cap covers what an
+/// interactive coach query actually needs (recent ~30 activities) while
+/// leaving older items for slower offline jobs to fill.
+async fn fill_missing_locations_from_detail_pages(
+    page: &chromiumoxide::Page,
+    activities: &mut [Activity],
+    provider: &ProviderConfig,
+    config: &ScraperConfig,
+) {
+    let cap: usize = env::var("SCIOTTE_DETAIL_FALLBACK_MAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let missing: Vec<usize> = activities
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.city.is_none())
+        .map(|(i, _)| i)
+        .take(cap)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    info!(
+        missing = missing.len(),
+        cap, "Detail-page location fallback for activities missing city after feed"
+    );
+    for idx in missing {
+        let detail_url = provider.detail_url(&activities[idx].id);
+        match navigate_and_extract_detail(page, &detail_url, provider, config).await {
+            Ok(detail) => merge_detail_into_activity(&mut activities[idx], &detail),
+            Err(e) => {
+                debug!(id = %activities[idx].id, error = %e, "detail-page fallback skipped for activity");
+            }
+        }
+    }
+}
 
 /// Augment activities with `city` / `region` from Strava's dashboard feed
 /// JSON. Same-origin XHR carries cookies for free; we issue a single
