@@ -80,6 +80,12 @@ pub mod queue;
 /// TTL-bounded slot for in-flight 2FA/OTP browser sessions
 pub mod pending_login;
 
+/// Process-wide signal advertising in-flight browser teardowns so the
+/// platform's tracing layer can suppress chromiumoxide's expected
+/// post-close WS-reset error events without losing visibility into
+/// real chromiumoxide failures outside that window.
+pub mod teardown_signal;
+
 /// Vision-based scraper using LLM screenshot analysis (requires `vision` feature)
 #[cfg(feature = "vision")]
 pub mod vision;
@@ -90,6 +96,7 @@ pub use queue::{
     LimiterError, QueueConfig, QueueConfigError, QueuedScraper, SciotteLimiter, ScrapePermit,
 };
 pub use scraper::ChromeScraper;
+pub use teardown_signal::{is_in_progress as is_browser_teardown_in_progress, TeardownGuard};
 pub use types::ActivityScraper;
 
 #[cfg(feature = "vision")]

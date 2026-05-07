@@ -188,6 +188,14 @@ impl ChromeScraper {
     /// WebSocket handler task exits without error-looping. Safe to call multiple
     /// times — subsequent calls are no-ops.
     async fn close_browsers(&self) {
+        // Open the teardown grace window before any close() call.
+        // chromiumoxide's handler task emits its WS-reset `error!` log
+        // *after* close().await resolves — the guard's Drop schedules
+        // a delayed decrement so the platform's tracing layer keeps
+        // suppressing those expected post-close events for a few
+        // hundred milliseconds, then resumes normal error visibility.
+        let _teardown = crate::teardown_signal::TeardownGuard::new();
+
         let headless = self.browser.lock().await.take();
         if let Some(browser) = headless {
             let strong_count = Arc::strong_count(&browser);
