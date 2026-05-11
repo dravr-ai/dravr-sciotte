@@ -42,6 +42,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use tokio::time::sleep;
+
 /// Grace window held open after a guard is dropped so the chromiumoxide
 /// handler task can emit its post-close WS-reset error inside the
 /// suppression window. 500 ms is long enough to absorb scheduling jitter
@@ -105,7 +107,7 @@ impl Drop for TeardownGuard {
         // sees the WS reset *after* our close().await resolves — still
         // sees TEARDOWN_DEPTH > 0 and gets its error suppressed.
         tokio::spawn(async {
-            tokio::time::sleep(TEARDOWN_GRACE).await;
+            sleep(TEARDOWN_GRACE).await;
             TEARDOWN_DEPTH.fetch_sub(1, Ordering::Relaxed);
         });
     }

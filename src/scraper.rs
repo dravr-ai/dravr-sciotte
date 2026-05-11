@@ -38,6 +38,7 @@ use crate::pending_login::PendingLogin;
 use crate::provider::ProviderConfig;
 use crate::script_loader;
 use crate::stealth::apply_minimal_stealth;
+use crate::teardown_signal::TeardownGuard;
 use crate::types::ActivityScraper;
 #[cfg(feature = "vision")]
 use crate::vision::VisionScraper;
@@ -190,11 +191,13 @@ impl ChromeScraper {
     async fn close_browsers(&self) {
         // Open the teardown grace window before any close() call.
         // chromiumoxide's handler task emits its WS-reset `error!` log
-        // *after* close().await resolves — the guard's Drop schedules
-        // a delayed decrement so the platform's tracing layer keeps
-        // suppressing those expected post-close events for a few
-        // hundred milliseconds, then resumes normal error visibility.
-        let _teardown = crate::teardown_signal::TeardownGuard::new();
+        // *after* close().await resolves; the guard's Drop schedules a
+        // delayed TEARDOWN_DEPTH decrement so the platform's tracing
+        // layer keeps suppressing those expected post-close events for
+        // a few hundred milliseconds, then resumes normal error
+        // visibility. The binding lives to end-of-scope (load-bearing
+        // — Drop is the side effect we need).
+        let teardown_guard = TeardownGuard::new();
 
         let headless = self.browser.lock().await.take();
         if let Some(browser) = headless {
@@ -225,6 +228,13 @@ impl ChromeScraper {
                 }
             }
         }
+        // Explicit drop here gives the guard a syntactic mention so the
+        // unused_variables lint stays happy without resorting to the
+        // `_` prefix the architectural validator forbids. The 500ms
+        // grace window starts ticking on this drop, which is precisely
+        // when we want the suppression window to close: after both
+        // browser.close().await calls above have already resolved.
+        drop(teardown_guard);
     }
 
     /// Park an in-flight 2FA/OTP login so a follow-up `submit_otp` /
