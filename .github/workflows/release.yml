@@ -181,6 +181,7 @@ jobs:
         with:
           name: dravr-sciotte-${{ matrix.target }}
           path: dravr-sciotte-v*.tar.gz
+          retention-days: 7
 
   docker:
     name: Docker Image
