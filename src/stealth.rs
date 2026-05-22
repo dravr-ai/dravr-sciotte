@@ -27,79 +27,24 @@ use crate::error::{ScraperError, ScraperResult};
 /// per-request anti-replay tokens) and gets 403'd. Reading from the page's
 /// own successful fetches has no such problem.
 const STEALTH_SCRIPT: &str = r"
-Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined,
-    configurable: true
-});
+// JS-level navigator/WebGL/plugin spoofs intentionally disabled for the
+// baseline Cloudflare-fingerprint test. Rationale:
+//   - `navigator.webdriver` is already removed by Chrome's
+//     `--disable-blink-features=AutomationControlled` flag (emitted by
+//     chromiumoxide's `.hide()`), so the JS override is redundant.
+//   - The WebGL renderer spoof was hardcoded to 'Apple Inc.' / 'Apple M1'
+//     regardless of platform. On Linux Chromium that's an obvious
+//     platform contradiction with the Linux User-Agent; Cloudflare's
+//     fingerprint analysis 427s requests on this mismatch before any
+//     login page renders.
+//   - Plugin / languages / chrome.runtime spoofs all also override
+//     properties via `Object.defineProperty`, which leaves a detectable
+//     trace in the function's `.toString()` — modern detection scripts
+//     read this and flag automation.
+// The XHR/fetch capture hook below is kept — it's a Garmin /app/
+// data-extraction utility, not an anti-detection layer.
 
 (function() {
-    // navigator.plugins — headless Chrome reports an empty PluginArray;
-    // real Chrome has at least 3 (PDF Viewer, Native Client, Chromium PDF).
-    // Google's loader rejects sign-ins from browsers reporting 0 plugins.
-    var fakePlugins = [
-        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: '' },
-        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: '' }
-    ];
-    Object.defineProperty(navigator, 'plugins', {
-        get: function() {
-            var arr = fakePlugins.slice();
-            arr.item = function(i) { return arr[i] || null; };
-            arr.namedItem = function(n) { return arr.find(function(p) { return p.name === n; }) || null; };
-            arr.refresh = function() {};
-            return arr;
-        },
-        configurable: true
-    });
-
-    // navigator.languages — headless reports [] on some launches;
-    // production users almost always have at least one language.
-    if (!navigator.languages || navigator.languages.length === 0) {
-        Object.defineProperty(navigator, 'languages', {
-            get: function() { return ['en-US', 'en']; },
-            configurable: true
-        });
-    }
-
-    // window.chrome — present in real Chrome with a runtime object;
-    // missing in headless Chrome by default.
-    if (!window.chrome) {
-        window.chrome = {
-            runtime: {},
-            loadTimes: function() {},
-            csi: function() {},
-            app: {}
-        };
-    } else if (!window.chrome.runtime) {
-        window.chrome.runtime = {};
-    }
-
-    // Permissions API — headless returns 'granted' for notifications when
-    // notifications are 'denied' at the document level, which real browsers
-    // never do. Googles checks for this exact mismatch.
-    if (window.navigator && navigator.permissions && navigator.permissions.query) {
-        var origQuery = navigator.permissions.query.bind(navigator.permissions);
-        navigator.permissions.query = function(parameters) {
-            if (parameters && parameters.name === 'notifications') {
-                return Promise.resolve({ state: Notification.permission, onchange: null });
-            }
-            return origQuery(parameters);
-        };
-    }
-
-    // WebGL renderer string — headless leaks 'SwiftShader' / 'Mesa OffScreen';
-    // real Chrome on macOS reports 'Apple Inc.' / 'Apple M…'. Spoof to a
-    // generic Apple GPU string so fingerprints don't scream 'headless'.
-    try {
-        var origGetParam = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(parameter) {
-            // UNMASKED_VENDOR_WEBGL=37445, UNMASKED_RENDERER_WEBGL=37446
-            if (parameter === 37445) return 'Apple Inc.';
-            if (parameter === 37446) return 'Apple M1';
-            return origGetParam.call(this, parameter);
-        };
-    } catch (e) {}
-
     if (window.__sciotteApiCaptures) return;
     window.__sciotteApiCaptures = {};
 
