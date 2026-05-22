@@ -1323,6 +1323,7 @@ async fn poll_for_next_step(
     timeout_secs: u64,
 ) -> ScraperResult<StepOutcome> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut tried_another_way = false;
 
     loop {
         if Instant::now() > deadline {
@@ -1378,16 +1379,28 @@ async fn poll_for_next_step(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google already pushed a tap-Yes
-        // (or number-match) notification to the user's phone on landing
-        // here. Scrape the digit if present, otherwise return an empty
-        // string. Return to the caller immediately — the script/modal
-        // prompts the user ("Tap your phone, press Enter when done")
-        // and polls. Do NOT click anything autonomously here.
+        // Device prompt (/challenge/dp) — pre-538b7a5 behavior: click
+        // "Try another way" to reach `/challenge/selection`, which exposes
+        // the real 2FA chooser (`app` / `otp` / `sms`) so the user can
+        // pick. If a number-match digit is shown on the desktop, scrape
+        // it instead — the user matches the digit on their phone. The
+        // `tried_another_way` guard prevents firing the click on every
+        // polling iteration (duplicate clicks generated duplicate phone
+        // notifications in earlier flows).
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            let number = extract_number_from_page(page).await.unwrap_or_default();
-            info!(number = %number, "Device prompt detected — returning to caller (user will tap phone)");
-            return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
+            if let Some(number) = extract_number_from_page(page).await {
+                info!(number = %number, "Number-match digit scraped from /challenge/dp");
+                return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
+            }
+            if !tried_another_way {
+                info!("Device prompt detected — clicking 'Try another way' once to surface 2FA chooser");
+                let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+                tried_another_way = true;
+                time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            } else {
+                time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            }
+            continue;
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
@@ -1516,6 +1529,7 @@ async fn poll_credential_login_result(
     password: Option<&str>,
 ) -> ScraperResult<LoginResult> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut tried_another_way = false;
 
     // Capture the initial URL so we can detect when the page actually changes
     let initial_url = page.url().await.ok().flatten().unwrap_or_default();
@@ -1570,15 +1584,27 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google already pushed a tap-Yes
-        // (or number-match) notification to the user's phone on landing
-        // here. Scrape the digit if present, otherwise return an empty
-        // string. Return to the caller immediately — the script/modal
-        // prompts the user and polls. Do NOT click anything autonomously.
+        // Device prompt (/challenge/dp) — same approach as pre-538b7a5:
+        // click "Try another way" to reach `/challenge/selection`, which
+        // exposes the 2FA chooser (`app`/`otp`/`sms`) for the user to
+        // pick. If a number-match digit is on the desktop, scrape it
+        // instead. The `tried_another_way` guard prevents firing the
+        // click on every polling iteration — duplicate clicks generated
+        // duplicate phone notifications in earlier flows.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            let number = extract_number_from_page(page).await.unwrap_or_default();
-            info!(number = %number, "Device prompt detected post-password — returning to caller (user will tap phone)");
-            return Ok(LoginResult::NumberMatch(number));
+            if let Some(number) = extract_number_from_page(page).await {
+                info!(number = %number, "Number-match digit scraped from /challenge/dp");
+                return Ok(LoginResult::NumberMatch(number));
+            }
+            if !tried_another_way {
+                info!("Device prompt detected post-password — clicking 'Try another way' once to surface 2FA chooser");
+                let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+                tried_another_way = true;
+                time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            } else {
+                time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+            }
+            continue;
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
