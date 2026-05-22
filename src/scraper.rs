@@ -1378,14 +1378,22 @@ async fn poll_for_next_step(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — notification already sent to phone.
-        // Don't click "Try another way" — it kills the existing notification.
-        // Return to caller so user can approve on their phone.
+        // Device prompt (/challenge/dp) — Google's number-match flow shows
+        // the digit on the desktop; user taps the matching one on their
+        // phone notification. Scrape the page for the digit so the modal
+        // can render it; if no digit is on the page (older simple-approval
+        // flow), click "Try another way" to surface the standard 2FA
+        // chooser instead of stranding the user with no signal.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected — user has phone notification");
-            return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(
-                "Check your phone".to_owned(),
-            )));
+            info!("Device prompt detected — checking for number-match digit");
+            if let Some(number) = extract_number_from_page(page).await {
+                info!(number = %number, "Number-match digit scraped from /challenge/dp");
+                return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
+            }
+            info!("No number-match digit on /challenge/dp — falling back to 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            continue;
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
@@ -1568,11 +1576,21 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — notification already sent to phone.
-        // Don't click "Try another way" — return so user can approve on phone.
+        // Device prompt (/challenge/dp) — Google's number-match flow shows
+        // the digit on the desktop. Scrape it for the modal; if no digit
+        // (older simple-approval flow), fall back to clicking "Try another
+        // way" so the user lands on the standard 2FA chooser instead of
+        // being stranded with no signal.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected post-password — user has phone notification");
-            return Ok(LoginResult::NumberMatch("Check your phone".to_owned()));
+            info!("Device prompt detected post-password — checking for number-match digit");
+            if let Some(number) = extract_number_from_page(page).await {
+                info!(number = %number, "Number-match digit scraped from /challenge/dp");
+                return Ok(LoginResult::NumberMatch(number));
+            }
+            info!("No number-match digit on /challenge/dp — falling back to 'Try another way'");
+            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+            continue;
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
