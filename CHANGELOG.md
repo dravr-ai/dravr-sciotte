@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.15] — 2026-05-22
+
+### Fixed
+
+- fix(scraper): debounce Try Another Way click at /challenge/dp Earlier flow clicked 'Try another way' on every polling iteration while /challenge/dp was still rendering, generating duplicate phone notifications. The tried_another_way guard fires the click exactly once so Google's chooser at /challenge/selection surfaces cleanly and the user sees the [app]/[otp] options with one notification.
+- fix(scraper): /challenge/dp returns NumberMatch immediately, drop autonomous 'Try another way' click The script/modal already prompts the user via the number_match handler; clicking Try Another Way autonomously generated duplicate phone notifications and stripped the user's choice. Behavior matches the pre-538b7a5 baseline now.
+- fix(stealth): remove WebGL/plugins/languages JS spoofs that 427'd headless on Cloudflare Hardcoded WebGL renderer 'Apple Inc.'/'Apple M1' contradicted the Linux UA on Docker/Cloud Run causing Cloudflare to 427 the request before the login form rendered. .hide() already covers navigator.webdriver via --disable-blink-features=AutomationControlled, making the JS overrides redundant. Garmin headless login restored to March 30 working baseline.
+- fix(scraper): scrape real digit from /challenge/dp, fall back to 'Try another way' Replaces the 'Check your phone' placeholder NumberMatch that the platform modal rendered as a garbled number; uses extract_number_from_page() and falls back to the 2FA chooser when no digit is present.
+
+### Other
+
+- ci(release): cap upload-artifact retention at 7d
+
+
+
 ## [0.5.14] — 2026-05-07
 
 
