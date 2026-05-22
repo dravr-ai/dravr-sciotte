@@ -1378,22 +1378,16 @@ async fn poll_for_next_step(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google's number-match flow shows
-        // the digit on the desktop; user taps the matching one on their
-        // phone notification. Scrape the page for the digit so the modal
-        // can render it; if no digit is on the page (older simple-approval
-        // flow), click "Try another way" to surface the standard 2FA
-        // chooser instead of stranding the user with no signal.
+        // Device prompt (/challenge/dp) — Google already pushed a tap-Yes
+        // (or number-match) notification to the user's phone on landing
+        // here. Scrape the digit if present, otherwise return an empty
+        // string. Return to the caller immediately — the script/modal
+        // prompts the user ("Tap your phone, press Enter when done")
+        // and polls. Do NOT click anything autonomously here.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected — checking for number-match digit");
-            if let Some(number) = extract_number_from_page(page).await {
-                info!(number = %number, "Number-match digit scraped from /challenge/dp");
-                return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
-            }
-            info!("No number-match digit on /challenge/dp — falling back to 'Try another way'");
-            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            continue;
+            let number = extract_number_from_page(page).await.unwrap_or_default();
+            info!(number = %number, "Device prompt detected — returning to caller (user will tap phone)");
+            return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
@@ -1576,21 +1570,15 @@ async fn poll_credential_login_result(
             continue;
         }
 
-        // Device prompt (/challenge/dp) — Google's number-match flow shows
-        // the digit on the desktop. Scrape it for the modal; if no digit
-        // (older simple-approval flow), fall back to clicking "Try another
-        // way" so the user lands on the standard 2FA chooser instead of
-        // being stranded with no signal.
+        // Device prompt (/challenge/dp) — Google already pushed a tap-Yes
+        // (or number-match) notification to the user's phone on landing
+        // here. Scrape the digit if present, otherwise return an empty
+        // string. Return to the caller immediately — the script/modal
+        // prompts the user and polls. Do NOT click anything autonomously.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            info!("Device prompt detected post-password — checking for number-match digit");
-            if let Some(number) = extract_number_from_page(page).await {
-                info!(number = %number, "Number-match digit scraped from /challenge/dp");
-                return Ok(LoginResult::NumberMatch(number));
-            }
-            info!("No number-match digit on /challenge/dp — falling back to 'Try another way'");
-            let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            continue;
+            let number = extract_number_from_page(page).await.unwrap_or_default();
+            info!(number = %number, "Device prompt detected post-password — returning to caller (user will tap phone)");
+            return Ok(LoginResult::NumberMatch(number));
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
