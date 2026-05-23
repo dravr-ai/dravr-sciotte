@@ -22,7 +22,6 @@
 //!   and/or our stealth payload.
 //! - `plugins_empty` — empty `PluginArray` (headless tell).
 //! - `languages_empty` — empty `navigator.languages` array (headless tell).
-//! - `chrome_runtime_missing` — `window.chrome.runtime` absent.
 //! - `webgl_swiftshader` — software-rendered WebGL is the headless tell.
 //! - `notif_mismatch` — Permissions API `notifications` returns 'granted'
 //!   while `Notification.permission` returns 'denied'.
@@ -199,11 +198,13 @@ async fn no_automation_signals_leak() {
         "languages_empty",
         "Stealth payload must populate navigator.languages.",
     );
-    assert_signal_clean(
-        &signals,
-        "chrome_runtime_missing",
-        "Stealth payload must install a window.chrome.runtime stub.",
-    );
+    // `chrome_runtime_missing` is intentionally not asserted. Commit 0db1717
+    // removed the `window.chrome.runtime` stub because the `Object.defineProperty`
+    // it relied on left a detectable `.toString()` trace, and the WebGL spoof
+    // shipped alongside it tripped Cloudflare 427s in production. The stealth
+    // payload now leans on Chrome launch flags rather than JS-level overrides;
+    // re-introducing this assertion without re-introducing the regression is
+    // not possible with the current strategy.
     assert_signal_clean(
         &signals,
         "webgl_swiftshader",
