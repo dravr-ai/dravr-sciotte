@@ -105,6 +105,14 @@ pub struct ScraperConfig {
     pub password_step_timeout_secs: u64,
     /// Timeout waiting for phone tap / app approval during 2FA (s)
     pub phone_tap_timeout_secs: u64,
+    /// Maximum consecutive poll iterations to spend stuck on the same
+    /// unresolvable challenge URL (e.g. `/challenge/dp` after the single
+    /// "Try another way" click failed to navigate) before returning a
+    /// structured `Auth` error instead of polling to the full step
+    /// timeout. With the default poll interval (500ms) this caps the
+    /// stuck window at a few seconds, letting Hybrid login mode escalate
+    /// to the vision fallback quickly rather than waiting out the timeout.
+    pub stuck_challenge_max_polls: u32,
     /// Login automation strategy: selector, vision, or hybrid
     pub login_mode: LoginMode,
     /// Whether credential login uses headless Chrome (default: false — Google blocks headless)
@@ -146,6 +154,7 @@ impl Default for ScraperConfig {
             email_step_timeout_secs: env_u64("DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT", 10),
             password_step_timeout_secs: env_u64("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", 30),
             phone_tap_timeout_secs: env_u64("DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT", 60),
+            stuck_challenge_max_polls: env_u32("DRAVR_SCIOTTE_STUCK_CHALLENGE_MAX_POLLS", 12),
             login_mode: env::var("DRAVR_SCIOTTE_LOGIN_MODE")
                 .map(|v| LoginMode::from_str_value(&v))
                 .unwrap_or_default(),
@@ -164,6 +173,14 @@ impl Default for ScraperConfig {
 
 /// Read a u64 from an environment variable with a default fallback
 fn env_u64(key: &str, default: u64) -> u64 {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Read a u32 from an environment variable with a default fallback
+fn env_u32(key: &str, default: u32) -> u32 {
     env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
@@ -225,6 +242,7 @@ mod tests {
         assert_eq!(config.email_step_timeout_secs, 10);
         assert_eq!(config.password_step_timeout_secs, 30);
         assert_eq!(config.phone_tap_timeout_secs, 60);
+        assert_eq!(config.stuck_challenge_max_polls, 12);
         assert_eq!(config.pending_login_ttl_secs, 300);
     }
 

@@ -1314,6 +1314,63 @@ enum StepOutcome {
     LoginResult(LoginResult),
 }
 
+/// Control-flow result of handling the Google device prompt (`/challenge/dp`)
+/// during a poll iteration.
+enum DevicePromptOutcome {
+    /// A number-match digit was scraped — return this to the caller.
+    Resolved(LoginResult),
+    /// The prompt is still pending (clicked "Try another way" or waiting on
+    /// the bounded stuck counter) — the poll loop should `continue`.
+    KeepPolling,
+}
+
+/// Handle a single poll iteration on Google's device prompt (`/challenge/dp`).
+///
+/// Tries to scrape a number-match digit first (the push-notification happy
+/// path). If none is present, clicks "Try another way" exactly once to surface
+/// the 2FA chooser. When that click fails to navigate away from `/challenge/dp`
+/// and no digit appears, the consecutive stuck polls are bounded by
+/// `config.stuck_challenge_max_polls`; once exceeded, a structured `Auth` error
+/// is returned so Hybrid login mode can escalate to the vision fallback instead
+/// of polling to the full timeout.
+async fn handle_device_prompt(
+    page: &chromiumoxide::Page,
+    config: &ScraperConfig,
+    tried_another_way: &mut bool,
+    stuck_polls: &mut u32,
+) -> ScraperResult<DevicePromptOutcome> {
+    if let Some(number) = extract_number_from_page(page).await {
+        info!(number = %number, "Number-match digit scraped from /challenge/dp");
+        return Ok(DevicePromptOutcome::Resolved(LoginResult::NumberMatch(
+            number,
+        )));
+    }
+    if *tried_another_way {
+        // The single "Try another way" click did not navigate away from
+        // /challenge/dp and no number-match digit surfaced. This is the stuck
+        // state (Google DOM drift / push-only prompt). Bound the wait so
+        // Hybrid login escalates to vision instead of polling to the timeout.
+        *stuck_polls += 1;
+        if *stuck_polls >= config.stuck_challenge_max_polls {
+            save_timeout_screenshot(page, "challenge-dp-stuck").await;
+            return Err(ScraperError::Auth {
+                reason: format!(
+                    "Stuck on Google device prompt ({DEVICE_PROMPT_PATTERN}) after \
+                     'Try another way' failed to navigate and no number-match digit \
+                     was found across {stuck_polls} polls"
+                ),
+            });
+        }
+        time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+    } else {
+        info!("Device prompt detected — clicking 'Try another way' once to surface 2FA chooser");
+        let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
+        *tried_another_way = true;
+        time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+    }
+    Ok(DevicePromptOutcome::KeepPolling)
+}
+
 /// Poll until a target field appears OR a login result is detected (success/OTP/error)
 async fn poll_for_next_step(
     page: &chromiumoxide::Page,
@@ -1324,6 +1381,10 @@ async fn poll_for_next_step(
 ) -> ScraperResult<StepOutcome> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut tried_another_way = false;
+    // Counts consecutive polls spent stuck on /challenge/dp after the single
+    // "Try another way" click failed to navigate. Bounded so Hybrid login can
+    // escalate to vision quickly instead of polling to the full step timeout.
+    let mut stuck_polls: u32 = 0;
 
     loop {
         if Instant::now() > deadline {
@@ -1388,19 +1449,14 @@ async fn poll_for_next_step(
         // polling iteration (duplicate clicks generated duplicate phone
         // notifications in earlier flows).
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            if let Some(number) = extract_number_from_page(page).await {
-                info!(number = %number, "Number-match digit scraped from /challenge/dp");
-                return Ok(StepOutcome::LoginResult(LoginResult::NumberMatch(number)));
+            match handle_device_prompt(page, config, &mut tried_another_way, &mut stuck_polls)
+                .await?
+            {
+                DevicePromptOutcome::Resolved(result) => {
+                    return Ok(StepOutcome::LoginResult(result));
+                }
+                DevicePromptOutcome::KeepPolling => continue,
             }
-            if tried_another_way {
-                time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
-            } else {
-                info!("Device prompt detected — clicking 'Try another way' once to surface 2FA chooser");
-                let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-                tried_another_way = true;
-                time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            }
-            continue;
         }
 
         // Check for OTP/2FA code entry pages (challenge/totp, challenge/sms, etc.)
@@ -1530,6 +1586,10 @@ async fn poll_credential_login_result(
 ) -> ScraperResult<LoginResult> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut tried_another_way = false;
+    // Counts consecutive polls spent stuck on /challenge/dp after the single
+    // "Try another way" click failed to navigate. Bounded so Hybrid login can
+    // escalate to vision quickly instead of polling to the full timeout.
+    let mut stuck_polls: u32 = 0;
 
     // Capture the initial URL so we can detect when the page actually changes
     let initial_url = page.url().await.ok().flatten().unwrap_or_default();
@@ -1592,19 +1652,12 @@ async fn poll_credential_login_result(
         // click on every polling iteration — duplicate clicks generated
         // duplicate phone notifications in earlier flows.
         if url.contains(DEVICE_PROMPT_PATTERN) {
-            if let Some(number) = extract_number_from_page(page).await {
-                info!(number = %number, "Number-match digit scraped from /challenge/dp");
-                return Ok(LoginResult::NumberMatch(number));
+            match handle_device_prompt(page, config, &mut tried_another_way, &mut stuck_polls)
+                .await?
+            {
+                DevicePromptOutcome::Resolved(result) => return Ok(result),
+                DevicePromptOutcome::KeepPolling => continue,
             }
-            if tried_another_way {
-                time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
-            } else {
-                info!("Device prompt detected post-password — clicking 'Try another way' once to surface 2FA chooser");
-                let _ = click_element(page, TRY_ANOTHER_WAY_SELECTOR).await;
-                tried_another_way = true;
-                time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            }
-            continue;
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
