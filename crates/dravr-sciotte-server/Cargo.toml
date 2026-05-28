@@ -32,7 +32,7 @@ vision = ["dravr-sciotte/vision", "dep:embacle"]
 dravr-sciotte = { path = "../..", version = "0.5.16" }
 dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.5.16" }
 dravr-tronc = { version = "0.2", features = ["notifications"] }
-embacle = { version = "0.13", features = ["copilot-headless"], optional = true }
+embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", tag = "v0.15.8", features = ["copilot-headless"], optional = true }
 axum = { version = "0.8", features = ["ws"] }
 chromiumoxide = "0.9"
 clap = { version = "4", features = ["derive"] }

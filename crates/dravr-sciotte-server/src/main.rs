@@ -172,19 +172,16 @@ fn create_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> App
 
 /// Create a scraper with vision-based login via Copilot Headless LLM
 #[cfg(feature = "vision")]
-async fn create_vision_scraper(
-    provider: ProviderConfig,
-    limiter: Arc<SciotteLimiter>,
-) -> Result<AppScraper, Box<dyn Error + Send + Sync>> {
+fn create_vision_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> AppScraper {
     let headless_config = embacle::CopilotHeadlessConfig::from_env();
     info!("Initializing Copilot Headless LLM for vision login...");
-    let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config).await);
+    let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config));
 
     let config = ScraperConfig::default();
     info!(login_mode = ?config.login_mode, "Vision scraper ready");
     let chrome = ChromeScraper::new(config, provider).with_llm(llm);
     let queued = QueuedScraper::new(chrome, limiter);
-    Ok(CachedScraper::new(queued, &CacheConfig::default()))
+    CachedScraper::new(queued, &CacheConfig::default())
 }
 
 async fn run_server(
@@ -199,7 +196,7 @@ async fn run_server(
     let cached = {
         let config = ScraperConfig::default();
         if matches!(config.login_mode, LoginMode::Vision | LoginMode::Hybrid) {
-            create_vision_scraper(provider, Arc::clone(&limiter)).await?
+            create_vision_scraper(provider, Arc::clone(&limiter))
         } else {
             create_scraper(provider, Arc::clone(&limiter))
         }

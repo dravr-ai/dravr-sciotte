@@ -148,6 +148,7 @@ impl VisionScraper {
             top_p: None,
             stop: None,
             response_format: None,
+            turn_id: None,
         };
 
         let response = self
