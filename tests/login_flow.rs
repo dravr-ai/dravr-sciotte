@@ -162,14 +162,19 @@ js_extract = '(function() {{ return "{{}}"; }})()'
 }
 
 fn test_config() -> ScraperConfig {
+    // Step timeouts are generous ceilings, not expected durations: the fixture
+    // flow returns as soon as the expected state is detected, so a passing run
+    // is unaffected. The headroom keeps the fake-server flow from timing out on
+    // CI runners whose headless Chrome is ~3x slower than a dev laptop (the
+    // tight 10/30/5s values flaked `google_oauth_2fa_number_match` at ~48s).
     ScraperConfig {
         page_load_wait_secs: 1,
         form_interaction_delay_ms: 100,
-        email_step_timeout_secs: 10,
-        password_step_timeout_secs: 10,
-        login_timeout_secs: 30,
+        email_step_timeout_secs: 30,
+        password_step_timeout_secs: 30,
+        login_timeout_secs: 90,
         login_poll_interval_ms: 200,
-        phone_tap_timeout_secs: 5,
+        phone_tap_timeout_secs: 20,
         credential_login_headless: true,
         ..ScraperConfig::default()
     }
