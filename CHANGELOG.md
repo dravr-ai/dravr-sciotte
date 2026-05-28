@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.19] — 2026-05-28
+
+### Fixed
+
+- fix(strava): real start time from activity JSON start_date, not date-only List page is date-only; detail <time> is zone-less French text. Extract UTC ISO start_date from pageView.activity()/embedded JSON + RFC3339 parse, so activities carry the true start time instead of T00:00:00.
+
+
+
 ## [0.5.18] — 2026-05-28
 
 ### Other
