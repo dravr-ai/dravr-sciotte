@@ -12,10 +12,13 @@
   <script>
     document.cookie = "strava_session=fake-session-token; path=/";
     document.cookie = "strava_user=test-user; path=/";
-    // Simulate user tapping correct number on phone after 3 seconds
+    // Simulate user tapping the correct number on their phone. 3s raced the
+    // number extraction on CI's slower headless Chrome (the "78" redirected
+    // away before it was scraped); 10s leaves ample room to extract the number
+    // first while still landing inside the poll-step timeout for the Success leg.
     setTimeout(function() {
       window.location = '/strava/dashboard.html';
-    }, 3000);
+    }, 10000);
   </script>
 </body>
 </html>
