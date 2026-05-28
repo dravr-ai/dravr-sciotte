@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.18] — 2026-05-28
+
+### Other
+
+- test(login_flow): widen test_config timeouts for CI-Chrome headroom google_oauth_2fa_number_match flaked at ~48s on CI's slower headless Chrome against the 10/30/5s ceilings; bumps to 30/90/20s (ceilings only — passing runs return early).
+
+
+
 ## [0.5.17] — 2026-05-28
 
 ### Fixed
