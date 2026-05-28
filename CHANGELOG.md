@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.17] — 2026-05-28
+
+### Fixed
+
+- fix(test): drop chrome_runtime_missing assertion orphaned by 0db1717 Stealth no longer installs the chrome.runtime stub (it leaked an Object.defineProperty .toString() trace and the WebGL spoof shipped with it 427'd Cloudflare). Citation added in the test.
+
+### Other
+
+- chore(deps): align embacle to git v0.15.8 for pierre vision interop Ports vision.rs ChatRequest.turn_id and server with_config (now sync) to the 0.15.8 API so the shared Arc<dyn LlmProvider> trait objects unify.
+
+
+
 ## [0.5.16] — 2026-05-22
 
 
