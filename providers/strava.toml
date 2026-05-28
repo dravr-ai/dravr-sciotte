@@ -123,9 +123,19 @@ js_extract = '''
         }
     });
 
-    // Location from the date/location line
+    // Start datetime + location from the date/location line. Strava's <time>
+    // element carries the full ISO start timestamp in its `datetime` attribute
+    // (e.g. "2026-05-25T20:00:00Z"); fall back to its visible text. Without this
+    // the activity start_date is date-only (T00:00:00), which lands on the wrong
+    // local day under timezone conversion and zeroes the start times the
+    // fragment-dedup detector keys on.
     const timeEl = document.querySelector('time');
     if (timeEl) {
+        // This <time> is localized text ("08:11, le jeudi 28 mai 2026") with no
+        // datetime attr and no zone — prefer the ISO start_date from the embedded
+        // activity JSON (below). Only trust a real datetime attr if Strava adds one.
+        var tdt = timeEl.getAttribute('datetime');
+        if (tdt) { data.date = tdt.trim(); }
         const container = timeEl.closest('div') || timeEl.parentElement;
         if (container) {
             const fullText = container.textContent.trim();
@@ -191,6 +201,9 @@ js_extract = '''
         if (typeof pageView !== 'undefined' && pageView && typeof pageView.activity === 'function') {
             var act = pageView.activity();
             var attrs = (act && (act.attributes || (typeof act.toJSON === 'function' ? act.toJSON() : null))) || act;
+            // Real start timestamp (UTC ISO, e.g. "2026-05-28T12:11:00Z") — the
+            // only tz-correct source; the visible <time> is localized + zone-less.
+            if (attrs && attrs.start_date) { data.date = String(attrs.start_date); }
             if (attrs && Array.isArray(attrs.start_latlng) && attrs.start_latlng.length >= 2) {
                 var lat = Number(attrs.start_latlng[0]);
                 var lng = Number(attrs.start_latlng[1]);
@@ -201,6 +214,16 @@ js_extract = '''
             }
         }
     } catch(e) {}
+    // start_date regex fallback: pull the UTC ISO start_date from any embedded
+    // JSON when pageView.activity() isn't exposed. Matches the exact "start_date"
+    // key (not "start_date_local"). Skip if we already have an ISO value.
+    if (!data.date || data.date.indexOf('T') < 0) {
+        for (var ds = 0; ds < scripts.length; ds++) {
+            var dbody = scripts[ds].textContent || '';
+            var sdMatch = dbody.match(/"start_date"\s*:\s*"([^"]+)"/);
+            if (sdMatch) { data.date = sdMatch[1]; break; }
+        }
+    }
     if (!data.start_latitude) {
         for (var gs = 0; gs < scripts.length; gs++) {
             var gbody = scripts[gs].textContent || '';

@@ -2276,6 +2276,16 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
         start_date: data["date"]
             .as_str()
             .and_then(parse_strava_date)
+            .or_else(|| {
+                // The detail page's <time datetime> attr is ISO 8601 with a
+                // zone (e.g. "2026-05-25T20:00:00Z"), which parse_strava_date's
+                // naive formats reject — keep the real start time instead of
+                // collapsing to date-only midnight.
+                data["date"]
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc))
+            })
             .unwrap_or_else(Utc::now),
         duration_seconds: data["moving_time"]
             .as_str()
