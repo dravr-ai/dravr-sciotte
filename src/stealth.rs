@@ -52,7 +52,7 @@ const STEALTH_SCRIPT: &str = r"
     window.fetch = function(input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var p = origFetch.apply(this, arguments);
-        if (/activity-service|workout-service|gc-api/.test(url)) {
+        if (/activity-service|workout-service|gc-api|training_activities/.test(url)) {
             p.then(function(r) {
                 try {
                     var clone = r.clone();
@@ -78,7 +78,7 @@ const STEALTH_SCRIPT: &str = r"
     XMLHttpRequest.prototype.send = function() {
         var self = this;
         var url = this.__sciotteUrl || '';
-        if (/activity-service|workout-service|gc-api/.test(url)) {
+        if (/activity-service|workout-service|gc-api|training_activities/.test(url)) {
             this.addEventListener('load', function() {
                 try {
                     window.__sciotteApiCaptures[url] = {
