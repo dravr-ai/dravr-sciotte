@@ -2196,7 +2196,17 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc))
         })
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(|| {
+            // Never fabricate `now()` — a scrape-time stamp masquerades as a
+            // real start and silently poisons day-attribution downstream.
+            // Use the UNIX epoch as a loud, obviously-wrong sentinel and warn.
+            warn!(
+                id,
+                date = %date_field,
+                "list row exposed no parseable start_date — using UNIX_EPOCH sentinel, not now()"
+            );
+            chrono::DateTime::<Utc>::UNIX_EPOCH
+        });
 
     let duration_seconds = item["time"]
         .as_str()
@@ -2277,16 +2287,27 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
             .as_str()
             .and_then(parse_strava_date)
             .or_else(|| {
-                // The detail page's <time datetime> attr is ISO 8601 with a
-                // zone (e.g. "2026-05-25T20:00:00Z"), which parse_strava_date's
-                // naive formats reject — keep the real start time instead of
-                // collapsing to date-only midnight.
+                // The detail `js_extract` emits the activity's real UTC start as
+                // an ISO-8601 zoned string (e.g. "2026-05-29T12:36:07Z"),
+                // derived from the embedded activity JSON epoch — which
+                // parse_strava_date's naive formats reject. Parse it as RFC3339
+                // so we keep the true start time, not date-only midnight.
                 data["date"]
                     .as_str()
                     .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
                     .map(|dt| dt.with_timezone(&Utc))
             })
-            .unwrap_or_else(Utc::now),
+            .unwrap_or_else(|| {
+                // Never fabricate `now()` — that scrape-time stamp is what made
+                // every activity look like "today". Loud, obviously-wrong
+                // sentinel instead, so a future extraction miss is visible.
+                warn!(
+                    id = activity_id,
+                    date = %data["date"],
+                    "detail page exposed no parseable start_date — using UNIX_EPOCH sentinel, not now()"
+                );
+                chrono::DateTime::<Utc>::UNIX_EPOCH
+            }),
         duration_seconds: data["moving_time"]
             .as_str()
             .or_else(|| data["elapsed_time"].as_str())

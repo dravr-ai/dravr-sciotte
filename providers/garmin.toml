@@ -284,6 +284,19 @@ js_extract = '''
 
         // Normalized projection for SciotteActivity deserialization
         name: api.activityName || "Untitled",
+        // Real activity start (UTC). Garmin emits SQL-style timestamps
+        // ("2026-04-27 14:25:46.0") on startTimeGMT/startTimeLocal — convert to
+        // RFC3339 so a single-activity detail fetch carries the true start
+        // instead of falling back to the Rust UNIX_EPOCH sentinel. Mirrors the
+        // activity-list js_extract's toRfc3339 handling.
+        date: (function() {
+            function toRfc3339(s, isGmt) {
+                if (!s) return null;
+                var rfc = String(s).replace(" ", "T").replace(/\.\d+$/, "");
+                return isGmt ? rfc + "Z" : rfc;
+            }
+            return toRfc3339(summary.startTimeGMT, true) || toRfc3339(summary.startTimeLocal, false);
+        })(),
         type: api.activityTypeDTO ? api.activityTypeDTO.typeKey : null,
         distance: summary.distance != null ? summary.distance : null,
         moving_time: summary.movingDuration != null ? Math.round(summary.movingDuration) : null,

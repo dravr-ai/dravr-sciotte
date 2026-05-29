@@ -123,19 +123,12 @@ js_extract = '''
         }
     });
 
-    // Start datetime + location from the date/location line. Strava's <time>
-    // element carries the full ISO start timestamp in its `datetime` attribute
-    // (e.g. "2026-05-25T20:00:00Z"); fall back to its visible text. Without this
-    // the activity start_date is date-only (T00:00:00), which lands on the wrong
-    // local day under timezone conversion and zeroes the start times the
-    // fragment-dedup detector keys on.
+    // Location from the date/location line. The <time> element here is
+    // localized, zone-less text ("08:36, le vendredi 29 mai 2026") with no
+    // `datetime` attribute — it is NOT a reliable start timestamp. The real UTC
+    // start is read from the embedded activity JSON further below.
     const timeEl = document.querySelector('time');
     if (timeEl) {
-        // This <time> is localized text ("08:11, le jeudi 28 mai 2026") with no
-        // datetime attr and no zone — prefer the ISO start_date from the embedded
-        // activity JSON (below). Only trust a real datetime attr if Strava adds one.
-        var tdt = timeEl.getAttribute('datetime');
-        if (tdt) { data.date = tdt.trim(); }
         const container = timeEl.closest('div') || timeEl.parentElement;
         if (container) {
             const fullText = container.textContent.trim();
@@ -201,9 +194,6 @@ js_extract = '''
         if (typeof pageView !== 'undefined' && pageView && typeof pageView.activity === 'function') {
             var act = pageView.activity();
             var attrs = (act && (act.attributes || (typeof act.toJSON === 'function' ? act.toJSON() : null))) || act;
-            // Real start timestamp (UTC ISO, e.g. "2026-05-28T12:11:00Z") — the
-            // only tz-correct source; the visible <time> is localized + zone-less.
-            if (attrs && attrs.start_date) { data.date = String(attrs.start_date); }
             if (attrs && Array.isArray(attrs.start_latlng) && attrs.start_latlng.length >= 2) {
                 var lat = Number(attrs.start_latlng[0]);
                 var lng = Number(attrs.start_latlng[1]);
@@ -214,15 +204,50 @@ js_extract = '''
             }
         }
     } catch(e) {}
-    // start_date regex fallback: pull the UTC ISO start_date from any embedded
-    // JSON when pageView.activity() isn't exposed. Matches the exact "start_date"
-    // key (not "start_date_local"). Skip if we already have an ISO value.
+    // Real activity START timestamp (UTC). The visible <time> is localized and
+    // zone-less, and quoted "start_date":"...ISO..." strings on this page are
+    // SEGMENT EFFORTS (mid-ride), NOT the activity start — matching one of those
+    // reports a segment split time as the start. Read the activity's own UTC
+    // start_date *epoch* from the embedded JSON (e.g. similarActivitiesData),
+    // anchored to this activity's id so we never pick a neighbour's or a
+    // segment's value. Strava's startDateLocal is local-wall-time-as-epoch and
+    // is intentionally NOT used (it would misattribute by the tz offset).
     if (!data.date || data.date.indexOf('T') < 0) {
-        for (var ds = 0; ds < scripts.length; ds++) {
-            var dbody = scripts[ds].textContent || '';
-            var sdMatch = dbody.match(/"start_date"\s*:\s*"([^"]+)"/);
-            if (sdMatch) { data.date = sdMatch[1]; break; }
+        var actId = '';
+        try {
+            var aId = pageView.activity();
+            actId = String((aId && (aId.id || (aId.attributes && aId.attributes.id))) || '');
+        } catch (e) {}
+        if (!actId) {
+            var um = location.pathname.match(/activities\/(\d+)/);
+            if (um) actId = um[1];
         }
+        function epochToIso(sec) {
+            var n = Number(sec);
+            if (!isFinite(n) || n < 1000000000) return null;
+            return new Date(n * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+        }
+        var pageHtml = document.documentElement.innerHTML;
+        if (actId) {
+            var reAnchored = new RegExp('"activity_id"\\s*:\\s*' + actId + '[\\s\\S]{0,400}?"start_date"\\s*:\\s*(\\d{9,11})');
+            var mAnchored = pageHtml.match(reAnchored);
+            if (mAnchored) {
+                var isoA = epochToIso(mAnchored[1]);
+                if (isoA) data.date = isoA;
+            }
+        }
+        // Fallback: first UNQUOTED numeric start_date epoch. The quoted ISO
+        // start_dates (segment efforts) cannot match this pattern.
+        if (!data.date || data.date.indexOf('T') < 0) {
+            var mFirst = pageHtml.match(/"start_date"\s*:\s*(\d{9,11})\b/);
+            if (mFirst) {
+                var isoF = epochToIso(mFirst[1]);
+                if (isoF) data.date = isoF;
+            }
+        }
+        // No fabrication: if still unset, the page exposed no activity start
+        // epoch — leave data.date empty so the Rust layer fails visibly rather
+        // than stamping the scrape moment (Utc::now).
     }
     if (!data.start_latitude) {
         for (var gs = 0; gs < scripts.length; gs++) {
