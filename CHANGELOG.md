@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.21] — 2026-05-29
+
+### Fixed
+
+- fix(strava): real activity start_date from embedded JSON; never fabricate now() Detail js_extract now anchors to the activity id and reads its unquoted UTC start_date epoch (was matching mid-ride segment efforts, or Utc::now on no match — making everything look like today); Garmin detail projection emits startTimeGMT->RFC3339 for parity; build_activity_from_detail/js_item fall back to a loud UNIX_EPOCH sentinel + warn instead of now().
+
+
+
 ## [0.5.20] — 2026-05-29
 
 
