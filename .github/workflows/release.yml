@@ -142,8 +142,12 @@ jobs:
           git tag "v${VERSION}"
           git push origin main --tags
 
-  build:
-    name: Build (${{ matrix.target }})
+  build-and-release:
+    # Builds the binary AND attaches it directly to the GitHub Release in the
+    # same runner — bypasses workflow-artifact storage (the org artifact-storage
+    # quota was blocking uploads). softprops/action-gh-release is idempotent per
+    # tag_name: the first matrix entry creates the release, others append.
+    name: Build & Release (${{ matrix.target }})
     needs: version
     strategy:
       fail-fast: false
@@ -176,12 +180,14 @@ jobs:
           cp "target/${TARGET}/release/dravr-sciotte-server" "$DIR/"
           tar czf "${DIR}.tar.gz" "$DIR"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Attach binary to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: dravr-sciotte-${{ matrix.target }}
-          path: dravr-sciotte-v*.tar.gz
-          retention-days: 7
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          body_path: CHANGELOG.md
+          files: dravr-sciotte-v*.tar.gz
+          fail_on_unmatched_files: false
 
   docker:
     name: Docker Image
@@ -209,27 +215,3 @@ jobs:
             ghcr.io/dravr-ai/dravr-sciotte:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  release:
-    name: GitHub Release
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: v${{ needs.version.outputs.version }}
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: dravr-sciotte-*
-          merge-multiple: true
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.version.outputs.version }}
-          name: v${{ needs.version.outputs.version }}
-          body_path: CHANGELOG.md
-          files: artifacts/*
