@@ -40,6 +40,94 @@ row_selector = "tr.training-activity-row"
 link_selector = 'a[data-field-name="name"]'
 id_regex = '/\/activities\/(\d+)/'
 vision_prompt = "providers/strava/list_page.md"
+# The rendered /athlete/training table only exposes a DATE-ONLY column
+# (td.col-date), which collapses every activity's start to local midnight and
+# breaks "sort by start time" / day-attribution. The table is populated by a
+# /athlete/training_activities XHR whose JSON carries the real start on each
+# row: `start_time` ("2026-05-29T12:36:07+0000", UTC ISO). The stealth payload
+# records that XHR in window.__sciotteApiCaptures, so we read the JSON and use
+# the real start_time. Falls back to the date-only DOM scrape if the capture
+# is unavailable, so there is no regression.
+js_extract = '''
+(function() {
+    var captures = window.__sciotteApiCaptures || {};
+    var models = [];
+    for (var k in captures) {
+        if (!/\/athlete\/training_activities/.test(k)) continue;
+        var entry = captures[k];
+        if (!entry || entry.status !== 200) continue;
+        try {
+            var parsed = JSON.parse(entry.body);
+            var arr = (parsed && parsed.models) || parsed;
+            if (Array.isArray(arr)) { models = models.concat(arr); }
+        } catch (e) {}
+    }
+
+    // Real UTC start. start_time is "YYYY-MM-DDTHH:MM:SS+0000"; normalize to a
+    // Z-suffixed RFC3339 the Rust layer parses. start_date_local_raw is a LOCAL
+    // epoch (tz-shifted) so it is only a last resort, and start_date is the
+    // date-only display string (worst case).
+    function startIso(m) {
+        if (m.start_time) {
+            var d = new Date(m.start_time);
+            if (!isNaN(d.getTime())) return d.toISOString().replace(/\.\d+Z$/, "Z");
+        }
+        if (m.start_date_local_raw) {
+            var dl = new Date(Number(m.start_date_local_raw) * 1000);
+            if (!isNaN(dl.getTime())) return dl.toISOString().replace(/\.\d+Z$/, "Z");
+        }
+        return m.start_date || "";
+    }
+
+    if (models.length > 0) {
+        var out = [];
+        var seen = {};
+        for (var i = 0; i < models.length; i++) {
+            var m = models[i];
+            var id = String(m.id != null ? m.id : "");
+            if (!id || seen[id]) continue;
+            seen[id] = true;
+            out.push({
+                id: id,
+                name: m.name || "Untitled",
+                type: m.sport_type || m.display_type || "",
+                date: startIso(m),
+                time: (m.trainer ? m.elapsed_time_raw : m.moving_time_raw),
+                distance: m.distance_raw,
+                elevation: m.elevation_gain_raw,
+                suffer_score: m.suffer_score
+            });
+        }
+        return JSON.stringify(out);
+    }
+
+    // Fallback: capture unavailable — scrape the rendered table (date-only).
+    var q = function(el, sel) { var e = el.querySelector(sel); return e ? e.textContent.trim() : ""; };
+    var rows = document.querySelectorAll("tr.training-activity-row");
+    var activities = [];
+    var seen2 = {};
+    for (var r = 0; r < rows.length; r++) {
+        var row = rows[r];
+        var link = row.querySelector('a[data-field-name="name"]');
+        if (!link) continue;
+        var href = link.getAttribute("href") || "";
+        var idm = href.match(/\/activities\/(\d+)/);
+        if (!idm || seen2[idm[1]]) continue;
+        seen2[idm[1]] = true;
+        activities.push({
+            id: idm[1],
+            name: q(row, 'a[data-field-name="name"]'),
+            type: q(row, 'td[data-field-name="sport_type"]'),
+            date: q(row, "td.col-date"),
+            time: q(row, 'td[data-field-name="time"]'),
+            distance: q(row, "td.col-dist"),
+            elevation: q(row, "td.col-elev"),
+            suffer_score: q(row, "td.col-suffer-score")
+        });
+    }
+    return JSON.stringify(activities);
+})()
+'''
 
 [list_page.fields]
 name = 'a[data-field-name="name"]'
