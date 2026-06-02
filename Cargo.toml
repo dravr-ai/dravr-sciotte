@@ -109,7 +109,7 @@ base64 = "0.22"
 dirs = "6"
 toml = "0.8"
 urlencoding = "2"
-embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", tag = "v0.15.14", optional = true }
+embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", tag = "v0.15.15", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
