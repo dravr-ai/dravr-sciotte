@@ -9,13 +9,13 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "vision")]
+use crate::vision_model::VisionModel;
 use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chrono::{NaiveDateTime, Utc};
-#[cfg(feature = "vision")]
-use embacle::types::LlmProvider;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
@@ -107,7 +107,7 @@ const APPLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
 /// so the same engine can scrape different sport platforms.
 ///
 /// Set `DRAVR_SCIOTTE_LOGIN_MODE=vision` to use LLM-powered page analysis for login
-/// (requires the `vision` feature and an embacle `LlmProvider`).
+/// (requires the `vision` feature and a [`VisionModel`]).
 pub struct ChromeScraper {
     config: ScraperConfig,
     provider: ProviderConfig,
@@ -119,9 +119,9 @@ pub struct ChromeScraper {
     /// `ScraperConfig::pending_login_ttl_secs` instead of pinning Chrome
     /// for the lifetime of the scraper.
     pending_login: Mutex<Option<PendingLogin<(Browser, chromiumoxide::Page)>>>,
-    /// Optional LLM provider for vision-based login (requires `vision` feature)
+    /// Optional vision model for vision-based login (requires `vision` feature)
     #[cfg(feature = "vision")]
-    llm: Option<Arc<dyn LlmProvider>>,
+    llm: Option<Arc<dyn VisionModel>>,
     /// Persistent vision scraper instance for multi-step login flows (OTP/2FA follow-up)
     #[cfg(feature = "vision")]
     vision_scraper: Mutex<Option<VisionScraper>>,
@@ -143,10 +143,10 @@ impl ChromeScraper {
         }
     }
 
-    /// Set the LLM provider for vision-based login (requires `vision` feature)
+    /// Set the vision model for vision-based login (requires `vision` feature)
     #[cfg(feature = "vision")]
     #[must_use]
-    pub fn with_llm(mut self, llm: Arc<dyn LlmProvider>) -> Self {
+    pub fn with_llm(mut self, llm: Arc<dyn VisionModel>) -> Self {
         self.llm = Some(llm);
         self
     }

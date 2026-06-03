@@ -1,4 +1,4 @@
-// ABOUTME: Vision-based activity scraper using LLM screenshot analysis via embacle
+// ABOUTME: Vision-based activity scraper using LLM screenshot analysis via a VisionModel
 // ABOUTME: Resilient alternative to CSS selectors — survives UI redesigns by using visual understanding
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
@@ -16,7 +16,6 @@ use chromiumoxide::cdp::browser_protocol::input::InsertTextParams;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chrono::Utc;
-use embacle::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
 use tracing::{debug, info, warn};
@@ -31,11 +30,12 @@ use crate::models::{
 use crate::pending_login::PendingLogin;
 use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
+use crate::vision_model::VisionModel;
 
 /// Vision-based scraper that uses LLM screenshot analysis instead of CSS selectors.
 ///
 /// Implements the same `ActivityScraper` trait as `ChromeScraper` but extracts data
-/// by sending page screenshots to a vision-capable LLM (via embacle) with structured
+/// by sending page screenshots to a vision-capable LLM (via a [`VisionModel`]) with structured
 /// extraction prompts defined in markdown files.
 ///
 /// # Feature Flag
@@ -44,7 +44,7 @@ use crate::types::ActivityScraper;
 pub struct VisionScraper {
     config: ScraperConfig,
     provider: ProviderConfig,
-    llm: Arc<dyn LlmProvider>,
+    llm: Arc<dyn VisionModel>,
     browser: Mutex<Option<Arc<Browser>>>,
     /// Browser + page parked between vision-driven `credential_login` and a
     /// follow-up 2FA call. Wrapped in `PendingLogin` so abandoned flows are
@@ -53,8 +53,8 @@ pub struct VisionScraper {
 }
 
 impl VisionScraper {
-    /// Create a vision scraper with a provider config and an embacle LLM provider
-    pub fn new(config: ScraperConfig, provider: ProviderConfig, llm: Arc<dyn LlmProvider>) -> Self {
+    /// Create a vision scraper with a provider config and a [`VisionModel`]
+    pub fn new(config: ScraperConfig, provider: ProviderConfig, llm: Arc<dyn VisionModel>) -> Self {
         Self {
             config,
             provider,
@@ -129,37 +129,12 @@ impl VisionScraper {
         screenshot_b64: &str,
         prompt: &str,
     ) -> ScraperResult<String> {
-        let image = ImagePart::new(screenshot_b64.to_owned(), "image/png").map_err(|e| {
-            ScraperError::Internal {
-                reason: format!("Failed to create image part: {e}"),
-            }
-        })?;
-
-        let message = ChatMessage::user_with_images(prompt.to_owned(), vec![image]);
-
-        let request = ChatRequest {
-            messages: vec![message],
-            model: None,
-            temperature: Some(0.0),
-            max_tokens: Some(4096),
-            stream: false,
-            tools: None,
-            tool_choice: None,
-            top_p: None,
-            stop: None,
-            response_format: None,
-            turn_id: None,
-        };
-
-        let response = self
-            .llm
-            .complete(&request)
+        self.llm
+            .analyze_screenshot(prompt, screenshot_b64)
             .await
             .map_err(|e| ScraperError::Internal {
                 reason: format!("LLM request failed: {e}"),
-            })?;
-
-        Ok(response.content)
+            })
     }
 
     /// Load a prompt from a markdown file path

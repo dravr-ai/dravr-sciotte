@@ -87,6 +87,14 @@ pub mod teardown_signal;
 #[cfg(feature = "vision")]
 pub mod vision;
 
+/// The `VisionModel` trait consumers implement to supply vision-LLM access
+/// (requires `vision` feature)
+#[cfg(feature = "vision")]
+pub mod vision_model;
+
+#[cfg(feature = "vision")]
+pub use vision_model::{VisionModel, VisionModelError};
+
 // Re-export primary types for consumers
 pub use cache::CachedScraper;
 pub use queue::{

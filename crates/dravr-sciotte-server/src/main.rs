@@ -170,6 +170,47 @@ fn create_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> App
     CachedScraper::new(queued, &CacheConfig::default())
 }
 
+/// Adapts an embacle `CopilotHeadlessRunner` to sciotte's `VisionModel` trait,
+/// keeping the embacle dependency on the consumer side (sciotte itself no
+/// longer depends on embacle).
+#[cfg(feature = "vision")]
+struct EmbacleVisionModel(Arc<embacle::CopilotHeadlessRunner>);
+
+#[cfg(feature = "vision")]
+#[async_trait::async_trait]
+impl dravr_sciotte::VisionModel for EmbacleVisionModel {
+    async fn analyze_screenshot(
+        &self,
+        prompt: &str,
+        screenshot_png_b64: &str,
+    ) -> Result<String, dravr_sciotte::VisionModelError> {
+        use embacle::types::{ChatMessage, ChatRequest, ImagePart, LlmProvider};
+
+        let image = ImagePart::new(screenshot_png_b64.to_owned(), "image/png")
+            .map_err(|e| format!("invalid image part: {e}"))?;
+        let message = ChatMessage::user_with_images(prompt.to_owned(), vec![image]);
+        let request = ChatRequest {
+            messages: vec![message],
+            model: None,
+            temperature: Some(0.0),
+            max_tokens: Some(4096),
+            stream: false,
+            tools: None,
+            tool_choice: None,
+            top_p: None,
+            stop: None,
+            response_format: None,
+            turn_id: None,
+        };
+        let response = self
+            .0
+            .complete(&request)
+            .await
+            .map_err(|e| format!("vision LLM call failed: {e}"))?;
+        Ok(response.content)
+    }
+}
+
 /// Create a scraper with vision-based login via Copilot Headless LLM
 #[cfg(feature = "vision")]
 fn create_vision_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> AppScraper {
@@ -179,7 +220,7 @@ fn create_vision_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>)
 
     let config = ScraperConfig::default();
     info!(login_mode = ?config.login_mode, "Vision scraper ready");
-    let chrome = ChromeScraper::new(config, provider).with_llm(llm);
+    let chrome = ChromeScraper::new(config, provider).with_llm(Arc::new(EmbacleVisionModel(llm)));
     let queued = QueuedScraper::new(chrome, limiter);
     CachedScraper::new(queued, &CacheConfig::default())
 }

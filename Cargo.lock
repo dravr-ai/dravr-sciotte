@@ -583,7 +583,6 @@ dependencies = [
  "chromiumoxide",
  "chrono",
  "dirs",
- "embacle 0.15.15",
  "futures",
  "moka",
  "reqwest 0.12.28",
@@ -616,6 +615,7 @@ dependencies = [
 name = "dravr-sciotte-server"
 version = "0.5.26"
 dependencies = [
+ "async-trait",
  "axum",
  "chromiumoxide",
  "chrono",
@@ -623,7 +623,7 @@ dependencies = [
  "dravr-sciotte",
  "dravr-sciotte-mcp",
  "dravr-tronc",
- "embacle 0.15.14",
+ "embacle",
  "futures",
  "http",
  "serde",
@@ -677,28 +677,10 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "embacle"
-version = "0.15.14"
-source = "git+https://github.com/dravr-ai/dravr-embacle.git?tag=v0.15.14#fcc6c1cba1954eb4e2c7f1d61d47109fb1f42612"
-dependencies = [
- "agent-client-protocol-schema",
- "async-trait",
- "base64",
- "bitflags",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
- "which 7.0.3",
-]
-
-[[package]]
-name = "embacle"
 version = "0.15.15"
 source = "git+https://github.com/dravr-ai/dravr-embacle.git?tag=v0.15.15#837ae04eceb95ffc1c4c0a7a60aaba22c296f491"
 dependencies = [
+ "agent-client-protocol-schema",
  "async-trait",
  "base64",
  "bitflags",
