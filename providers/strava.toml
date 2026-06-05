@@ -45,12 +45,12 @@ vision_prompt = "providers/strava/list_page.md"
 # breaks "sort by start time" / day-attribution. The table is populated by a
 # /athlete/training_activities XHR whose JSON carries the real start on each
 # row: `start_time` ("2026-05-29T12:36:07+0000", UTC ISO). The stealth payload
-# records that XHR in window.__sciotteApiCaptures, so we read the JSON and use
+# records that XHR in window.__dravrCaptures, so we read the JSON and use
 # the real start_time. Falls back to the date-only DOM scrape if the capture
 # is unavailable, so there is no regression.
 js_extract = '''
 (function() {
-    var captures = window.__sciotteApiCaptures || {};
+    var captures = window.__dravrCaptures || {};
     var models = [];
     for (var k in captures) {
         if (!/\/athlete\/training_activities/.test(k)) continue;

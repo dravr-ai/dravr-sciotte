@@ -53,17 +53,14 @@ pub mod auth;
 /// Shared browser automation utilities (launch, cookies, CDP input)
 pub mod browser_utils;
 
-/// Anti-bot stealth: CDP-injected JS that hides automation tells (`navigator.webdriver` etc.)
-pub mod stealth;
-
 /// Runtime-loadable JS scripts with compiled-in defaults
 pub mod script_loader;
 
 /// Embedded fake login server for testing
 pub mod fake_login;
 
-/// JavaScript string escaping utilities for CDP evaluate calls
-pub mod js_utils;
+/// JavaScript string escaping utilities for CDP evaluate calls (shared via `dravr-browser`)
+pub use dravr_browser::js_utils;
 
 /// TOML-based provider configuration (selectors, URLs, JS extraction rules)
 pub mod provider;
@@ -80,8 +77,8 @@ pub mod queue;
 /// TTL-bounded slot for in-flight 2FA/OTP browser sessions
 pub mod pending_login;
 
-/// Process-wide teardown-window signal for chromiumoxide WS-reset suppression.
-pub mod teardown_signal;
+/// Process-wide teardown-window signal for chromiumoxide WS-reset suppression (shared via `dravr-browser`)
+pub use dravr_browser::teardown_signal;
 
 /// Vision-based scraper using LLM screenshot analysis (requires `vision` feature)
 #[cfg(feature = "vision")]

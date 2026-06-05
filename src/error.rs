@@ -87,6 +87,19 @@ impl ScraperError {
     }
 }
 
+impl From<dravr_browser::BrowserError> for ScraperError {
+    fn from(e: dravr_browser::BrowserError) -> Self {
+        use dravr_browser::BrowserError as B;
+        match e {
+            B::Browser { reason } | B::Navigation { reason } => Self::Browser { reason },
+            B::Interaction { reason } => Self::Scraping { reason },
+            B::Auth { reason } => Self::Auth { reason },
+            B::Config { reason } => Self::Config { reason },
+            B::Timeout { reason } => Self::Network { reason },
+        }
+    }
+}
+
 /// Result of a credential-based login attempt
 #[derive(Debug)]
 pub enum LoginResult {

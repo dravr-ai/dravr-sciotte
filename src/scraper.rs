@@ -21,6 +21,7 @@ use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
 use tracing::{debug, info, warn};
 
+use crate::browser_utils::apply_minimal_stealth;
 use crate::browser_utils::{
     capture_session, cdp_click_at, click_element, dismiss_cookie_dialog, element_exists,
     fill_input_field, inject_cookies, launch_browser, open_page_with_stealth, read_visible_text,
@@ -37,7 +38,6 @@ use crate::models::{
 use crate::pending_login::PendingLogin;
 use crate::provider::ProviderConfig;
 use crate::script_loader;
-use crate::stealth::apply_minimal_stealth;
 use crate::teardown_signal::TeardownGuard;
 use crate::types::ActivityScraper;
 #[cfg(feature = "vision")]

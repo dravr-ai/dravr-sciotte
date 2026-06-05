@@ -29,11 +29,11 @@ row_selector = '[class*="ActivityListItem_tabletListItem"]'
 link_selector = 'a[href*="/activity/"]'
 id_regex = '/\/activity\/(\d+)/'
 # Garmin /app/ is a client-rendered React app — read activity rows from the
-# capture map (window.__sciotteApiCaptures, installed by the stealth payload)
+# capture map (window.__dravrCaptures, installed by the stealth payload)
 # instead of DOM scraping. The list endpoint is captured during hydration.
 js_extract = '''
 (function() {
-    var captures = window.__sciotteApiCaptures || {};
+    var captures = window.__dravrCaptures || {};
 
     // Find the activity-search endpoint — we look for the canonical list call
     // and pick the most recent (highest entry index in the captures map).
@@ -146,13 +146,13 @@ js_extract = '''
     // Garmin Connect /app/ stores its API bearer under localStorage["JetLagToken"]
     // as JSON { access_token, refresh_token, expires_in, ... }. The /gc-api/
     // endpoints reject requests without an Authorization: Bearer header.
-    // The stealth payload installs window.__sciotteApiCaptures, which records
+    // The stealth payload installs window.__dravrCaptures, which records
     // every /activity-service/, /workout-service/, /gc-api/ response the page
     // fetches during hydration. Sciotte's Rust scraper waits long enough
     // before invoking this script that the captures are already in place —
     // a busy-loop here would block the JS event loop and prevent fetches
     // from resolving in the first place.
-    var captures = window.__sciotteApiCaptures || {};
+    var captures = window.__dravrCaptures || {};
 
     // Garmin's /app/ split the activity detail across multiple endpoints —
     // collect the main one (no path suffix after the ID) plus splits/laps

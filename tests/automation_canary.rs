@@ -34,9 +34,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dravr_sciotte::browser_utils::launch_browser;
+use dravr_sciotte::browser_utils::{apply_minimal_stealth, launch_browser};
 use dravr_sciotte::config::ScraperConfig;
-use dravr_sciotte::stealth::apply_minimal_stealth;
 use tokio::fs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
