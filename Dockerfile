@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # Copyright (c) 2026 dravr.ai
 
-FROM rust:1-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp
