@@ -473,6 +473,14 @@ pub struct ActivityParams {
     /// Navigate into each activity detail page for full metrics (slower but richer data)
     #[serde(default)]
     pub enrich_details: bool,
+    /// When `enrich_details` is set, cap detail-page enrichment to the first N
+    /// activities — the most recent, since the list is reverse-chronological.
+    /// `None` enriches every scraped activity: the N+1 headless roundtrip that
+    /// can run minutes and stall interactive callers. Set it (e.g. the recent
+    /// few) to keep detail metrics on the activities that matter without paying
+    /// the full N+1; the remainder keep their list-page fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrich_limit: Option<usize>,
 }
 
 // ============================================================================

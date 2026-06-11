@@ -912,14 +912,19 @@ impl ActivityScraper for ChromeScraper {
             .await;
         }
 
-        // Optionally enrich each activity by navigating to its detail page
+        // Optionally enrich each activity by navigating to its detail page.
+        // enrich_limit caps the N+1 to the most recent N (the list is
+        // reverse-chronological); None enriches all. The un-enriched tail keeps
+        // its list-page fields (type, date, distance, elevation).
         if params.enrich_details {
+            let enrich_cap = params.enrich_limit.unwrap_or(activities.len());
+            let total = activities.len().min(enrich_cap);
             info!(
-                count = activities.len(),
+                enriching = total,
+                scraped = activities.len(),
                 "Enriching activities from detail pages (this may take a while)"
             );
-            let total = activities.len();
-            for (i, activity) in activities.iter_mut().enumerate() {
+            for (i, activity) in activities.iter_mut().enumerate().take(enrich_cap) {
                 info!(
                     progress = format!("{}/{}", i + 1, total),
                     id = %activity.id,

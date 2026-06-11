@@ -31,6 +31,7 @@ impl CacheKey {
         let mut hasher = DefaultHasher::new();
         params.limit.hash(&mut hasher);
         params.enrich_details.hash(&mut hasher);
+        params.enrich_limit.hash(&mut hasher);
         if let Some(before) = params.before {
             before.timestamp().hash(&mut hasher);
         }
@@ -281,6 +282,36 @@ mod tests {
             &session,
             &ActivityParams {
                 limit: Some(20),
+                ..Default::default()
+            },
+        );
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_varies_with_enrich_limit() {
+        let session = AuthSession {
+            session_id: "test".to_owned(),
+            cookies: vec![],
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+        };
+
+        // A result enriched for the recent 3 must not collide with one enriched
+        // for the recent 10 — same enrich_details, different enrich_limit.
+        let k1 = CacheKey::new(
+            &session,
+            &ActivityParams {
+                enrich_details: true,
+                enrich_limit: Some(3),
+                ..Default::default()
+            },
+        );
+        let k2 = CacheKey::new(
+            &session,
+            &ActivityParams {
+                enrich_details: true,
+                enrich_limit: Some(10),
                 ..Default::default()
             },
         );
