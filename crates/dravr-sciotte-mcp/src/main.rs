@@ -4,6 +4,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
+
 use std::error::Error;
 use std::io::Error as IoError;
 use std::sync::Arc;
@@ -51,7 +61,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = SciotteLimiter::new(queue_config);
     let watchdog = limiter.spawn_watchdog();
 
-    let chrome = ChromeScraper::default_config();
+    let chrome = ChromeScraper::default_config()?;
     let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
     let cached = CachedScraper::new(queued, &CacheConfig::default());
     let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));

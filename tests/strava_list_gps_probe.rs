@@ -24,6 +24,13 @@
 //! the per-activity detail fetch that the platform's weather backfill
 //! currently relies on.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::str_to_string
+)]
+
 use std::env;
 use std::time::Duration;
 
@@ -187,7 +194,7 @@ async fn probe_strava_list_page_for_gps() {
         return;
     }
 
-    let provider = ProviderConfig::strava_default();
+    let provider = ProviderConfig::strava_default().unwrap();
     let config = ScraperConfig::default();
     let scraper = ChromeScraper::new(config.clone(), provider);
     let session = get_session(&scraper).await;

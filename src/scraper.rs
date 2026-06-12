@@ -152,9 +152,16 @@ impl ChromeScraper {
     }
 
     /// Create with default browser config and the built-in Strava provider
-    #[must_use]
-    pub fn default_config() -> Self {
-        Self::new(ScraperConfig::default(), ProviderConfig::strava_default())
+    ///
+    /// # Errors
+    ///
+    /// Returns a config error if the embedded Strava provider TOML is malformed
+    /// (compile-time constant, tested).
+    pub fn default_config() -> ScraperResult<Self> {
+        Ok(Self::new(
+            ScraperConfig::default(),
+            ProviderConfig::strava_default()?,
+        ))
     }
 
     /// Get a reference to the provider configuration
@@ -2933,7 +2940,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_valid_provider() {
-        let provider = ProviderConfig::strava_default();
+        let provider = ProviderConfig::strava_default().unwrap();
         let selectors = LoginSelectors::from_provider(&provider).unwrap(); // Safe: test with valid default provider
         assert!(!selectors.email.is_empty());
         assert!(!selectors.password.is_empty());
@@ -2942,7 +2949,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_email() {
-        let mut provider = ProviderConfig::strava_default();
+        let mut provider = ProviderConfig::strava_default().unwrap();
         provider.provider.login_email_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -2952,7 +2959,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_password() {
-        let mut provider = ProviderConfig::strava_default();
+        let mut provider = ProviderConfig::strava_default().unwrap();
         provider.provider.login_password_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -2962,7 +2969,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_button() {
-        let mut provider = ProviderConfig::strava_default();
+        let mut provider = ProviderConfig::strava_default().unwrap();
         provider.provider.login_button_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -3023,14 +3030,14 @@ mod tests {
 
     #[test]
     fn strava_provider_has_oauth_buttons() {
-        let provider = ProviderConfig::strava_default();
+        let provider = ProviderConfig::strava_default().unwrap();
         assert!(provider.provider.login_oauth_buttons.contains_key("google"));
         assert!(provider.provider.login_oauth_buttons.contains_key("apple"));
     }
 
     #[test]
     fn strava_provider_has_otp_selector() {
-        let provider = ProviderConfig::strava_default();
+        let provider = ProviderConfig::strava_default().unwrap();
         assert!(provider.provider.login_otp_selector.is_some());
     }
 
@@ -3104,7 +3111,7 @@ mod tests {
 
     #[test]
     fn garmin_provider_has_profile_url() {
-        let provider = ProviderConfig::garmin_default();
+        let provider = ProviderConfig::garmin_default().unwrap();
         assert!(provider.provider.profile_url.is_some());
         assert!(provider.provider.profile_js_extract.is_some());
     }

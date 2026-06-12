@@ -4,6 +4,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
 #![deny(unsafe_code)]
 
 //! # dravr-sciotte
@@ -26,7 +35,7 @@
 //! use dravr_sciotte::config::{ScraperConfig, CacheConfig};
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let scraper = ChromeScraper::default_config();
+//! let scraper = ChromeScraper::default_config()?;
 //! let cached = CachedScraper::new(scraper, &CacheConfig::default());
 //!
 //! // Opens a browser — user logs in to Strava, cookies are captured

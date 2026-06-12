@@ -4,6 +4,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::str_to_string
+    )
+)]
+
 use std::error::Error;
 use std::io::Error as IoError;
 use std::path::Path;
@@ -135,7 +145,7 @@ fn load_provider_config(
             info!(provider = %p, "Loading provider config");
             Ok(ProviderConfig::from_file(Path::new(p))?)
         }
-        None => Ok(ProviderConfig::strava_default()),
+        None => Ok(ProviderConfig::strava_default()?),
     }
 }
 

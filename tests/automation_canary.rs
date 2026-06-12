@@ -30,6 +30,13 @@
 //! When this test fails, the eprintln! before the assertion dumps the
 //! full signal map so the operator can see exactly which probe leaked.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::str_to_string
+)]
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

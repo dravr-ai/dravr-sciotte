@@ -4,6 +4,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::str_to_string
+)]
+
 use std::env;
 use std::time::Duration;
 
@@ -458,7 +465,7 @@ async fn explore_garmin_health_pages() {
         return;
     }
 
-    let provider = ProviderConfig::garmin_default();
+    let provider = ProviderConfig::garmin_default().unwrap();
     let config = ScraperConfig::default();
     let scraper = ChromeScraper::new(config.clone(), provider);
     let session = get_session(&scraper).await;
