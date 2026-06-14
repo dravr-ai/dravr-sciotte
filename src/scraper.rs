@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
-use chrono::{NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
@@ -835,53 +835,14 @@ impl ActivityScraper for ChromeScraper {
 
         let target_count = params.limit.unwrap_or(20) as usize;
         let js = self.provider.list_extraction_js();
-
-        // Paginate the training page: it shows ~20 activities per page with a "next" button.
-        // We extract each page and click next until we have enough activities.
-        let mut all_items: Vec<serde_json::Value> = Vec::new();
-
-        loop {
-            match extract_via_js(&page, &js).await {
-                Ok(items) => {
-                    debug!(count = items.len(), "Activities found on current page");
-                    all_items.extend(items);
-                }
-                Err(e) => {
-                    warn!(error = %e, "List page JS extraction failed");
-                    break;
-                }
-            }
-
-            if all_items.len() >= target_count {
-                break;
-            }
-
-            // Click the "next page" button if it exists
-            let has_next = page
-                .evaluate(
-                    r#"(function() {
-                        var btn = document.querySelector("button.next_page");
-                        if (btn && !btn.disabled) { btn.click(); return true; }
-                        return false;
-                    })()"#,
-                )
-                .await
-                .ok()
-                .and_then(|r| r.value().and_then(serde_json::Value::as_bool))
-                .unwrap_or(false);
-
-            if !has_next {
-                debug!("No more pages available");
-                break;
-            }
-
-            info!(
-                collected = all_items.len(),
-                target = target_count,
-                "Loading next page of activities"
-            );
-            time::sleep(Duration::from_millis(self.config.interaction_delay_ms * 3)).await;
-        }
+        let mut all_items = paginate_activity_list(
+            &page,
+            &js,
+            params,
+            self.config.max_scrape_pages,
+            self.config.interaction_delay_ms,
+        )
+        .await;
 
         // Truncate to target and deduplicate by ID
         deduplicate_by_id(&mut all_items);
@@ -2632,6 +2593,101 @@ fn deduplicate_by_id(items: &mut Vec<serde_json::Value>) {
 }
 
 /// Apply sport type, date range, and limit filters to an activity list
+/// Page through the reverse-chronological list feed, collecting raw JS rows
+/// until [`scrape_window_satisfied`] reports the request is covered (or the
+/// feed ends, or the `max_scrape_pages` backstop trips). Returns the raw,
+/// still-undeduplicated rows; the caller dedupes, parses, and filters.
+///
+/// Two stop modes:
+///   - count-bounded (no `after`): page until `limit` rows are collected.
+///   - date-bounded (`after` set): page until `limit` rows fall inside
+///     `(after, before)` or the oldest row collected crosses at/below `after`
+///     — paging further can only surface rows older than the window. This is
+///     what lets a historical query reach back years instead of returning only
+///     the recent feed. `max_scrape_pages` bounds a runaway "next" button.
+async fn paginate_activity_list(
+    page: &chromiumoxide::Page,
+    js: &str,
+    params: &ActivityParams,
+    max_scrape_pages: u32,
+    interaction_delay_ms: u64,
+) -> Vec<serde_json::Value> {
+    let target_count = params.limit.unwrap_or(20) as usize;
+    let max_pages = max_scrape_pages.max(1);
+    let mut all_items: Vec<serde_json::Value> = Vec::new();
+    let mut in_window_count: usize = 0;
+    let mut oldest: Option<DateTime<Utc>> = None;
+    let mut page_count: u32 = 0;
+
+    loop {
+        page_count += 1;
+        let items = match extract_via_js(page, js).await {
+            Ok(items) => {
+                debug!(count = items.len(), "Activities found on current page");
+                items
+            }
+            Err(e) => {
+                warn!(error = %e, "List page JS extraction failed");
+                break;
+            }
+        };
+
+        // Date bookkeeping only matters in date-bounded mode; skip the
+        // per-page parse entirely on the common count-bounded path.
+        if params.after.is_some() {
+            for activity in parse_js_activity_items(&items) {
+                if in_window(&activity, params) {
+                    in_window_count += 1;
+                }
+                oldest = Some(oldest.map_or(activity.start_date, |o| o.min(activity.start_date)));
+            }
+        }
+        all_items.extend(items);
+
+        if scrape_window_satisfied(all_items.len(), in_window_count, oldest, params) {
+            break;
+        }
+        if page_count >= max_pages {
+            warn!(
+                page_count,
+                max_pages,
+                collected = all_items.len(),
+                "Reached max scrape pages — stopping pagination (window may be incomplete)"
+            );
+            break;
+        }
+
+        // Click the "next page" button if it exists
+        let has_next = page
+            .evaluate(
+                r#"(function() {
+                    var btn = document.querySelector("button.next_page");
+                    if (btn && !btn.disabled) { btn.click(); return true; }
+                    return false;
+                })()"#,
+            )
+            .await
+            .ok()
+            .and_then(|r| r.value().and_then(serde_json::Value::as_bool))
+            .unwrap_or(false);
+
+        if !has_next {
+            debug!("No more pages available");
+            break;
+        }
+
+        info!(
+            collected = all_items.len(),
+            in_window = in_window_count,
+            target = target_count,
+            "Loading next page of activities"
+        );
+        time::sleep(Duration::from_millis(interaction_delay_ms * 3)).await;
+    }
+
+    all_items
+}
+
 fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParams) {
     if let Some(ref sport) = params.sport_type {
         let sport_lower = sport.to_lowercase();
@@ -2646,17 +2702,42 @@ fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParam
         });
     }
 
-    if let Some(before) = params.before {
-        activities.retain(|a| a.start_date < before);
-    }
-
-    if let Some(after) = params.after {
-        activities.retain(|a| a.start_date > after);
-    }
+    activities.retain(|a| in_window(a, params));
 
     if let Some(limit) = params.limit {
         activities.truncate(limit as usize);
     }
+}
+
+/// Whether an activity falls inside the requested `(after, before)` date
+/// window. The bounds are strict and either side may be unset. This is the
+/// single source of truth shared by the paginate-to-date stop condition and
+/// the final [`apply_activity_filters`] pass, so the loop never stops short of
+/// — or pages past — what the filter will ultimately keep.
+fn in_window(a: &Activity, params: &ActivityParams) -> bool {
+    params.after.is_none_or(|after| a.start_date > after)
+        && params.before.is_none_or(|before| a.start_date < before)
+}
+
+/// Pure stop decision for the list-page pagination loop.
+///
+/// `collected_len` is every row gathered so far; `in_window_count` and
+/// `oldest` are the running tallies the date-bounded loop maintains over the
+/// reverse-chronological feed. Returns `true` when pagination should stop:
+///   - no `after` (count-bounded): once `limit` rows are collected.
+///   - `after` set (date-bounded): once `limit` rows fall inside the window
+///     (the newest in-window slice the caller asked for) or the oldest row
+///     seen has crossed at/below `after` (nothing older can be in the window).
+fn scrape_window_satisfied(
+    collected_len: usize,
+    in_window_count: usize,
+    oldest: Option<DateTime<Utc>>,
+    params: &ActivityParams,
+) -> bool {
+    let limit = params.limit.unwrap_or(20) as usize;
+    params.after.map_or(collected_len >= limit, |after| {
+        in_window_count >= limit || oldest.is_some_and(|o| o <= after)
+    })
 }
 
 // ============================================================================
@@ -2769,6 +2850,101 @@ mod tests {
         assert_eq!(parse_duration_string("45:30"), Some(2730));
         assert_eq!(parse_duration_string("3600"), Some(3600));
         assert_eq!(parse_duration_string(""), None);
+    }
+
+    /// `YYYY-MM-DD` -> midnight UTC, for building deterministic test dates.
+    fn day(s: &str) -> DateTime<Utc> {
+        parse_strava_date(s).expect("test date parses")
+    }
+
+    fn params_window(after: Option<&str>, before: Option<&str>, limit: u32) -> ActivityParams {
+        ActivityParams {
+            limit: Some(limit),
+            after: after.map(day),
+            before: before.map(day),
+            ..Default::default()
+        }
+    }
+
+    fn activity_on(date: &str) -> Activity {
+        build_activity_from_js_item(
+            "t",
+            &serde_json::json!({ "name": "x", "type": "Run", "date": date }),
+        )
+    }
+
+    #[test]
+    fn in_window_respects_strict_bounds() {
+        let p = params_window(Some("2022-01-01"), Some("2023-01-01"), 20);
+        assert!(
+            in_window(&activity_on("2022-06-15"), &p),
+            "inside the window"
+        );
+        assert!(
+            !in_window(&activity_on("2024-01-01"), &p),
+            "newer than before-bound"
+        );
+        assert!(
+            !in_window(&activity_on("2021-06-15"), &p),
+            "older than after-bound"
+        );
+    }
+
+    #[test]
+    fn in_window_open_bounds() {
+        let after_only = params_window(Some("2022-01-01"), None, 20);
+        assert!(in_window(&activity_on("2026-01-01"), &after_only));
+        assert!(!in_window(&activity_on("2020-01-01"), &after_only));
+
+        let unbounded = params_window(None, None, 20);
+        assert!(in_window(&activity_on("1999-01-01"), &unbounded));
+    }
+
+    #[test]
+    fn satisfied_count_mode_stops_at_limit() {
+        let p = params_window(None, None, 20);
+        assert!(!scrape_window_satisfied(19, 0, None, &p), "under limit");
+        assert!(scrape_window_satisfied(20, 0, None, &p), "reached limit");
+    }
+
+    #[test]
+    fn satisfied_date_mode_stops_when_enough_in_window() {
+        let p = params_window(Some("2022-01-01"), Some("2023-01-01"), 20);
+        // 500 collected but only 19 inside the window, oldest still inside ->
+        // keep paging to gather the caller's full newest slice.
+        assert!(!scrape_window_satisfied(
+            500,
+            19,
+            Some(day("2022-03-01")),
+            &p
+        ));
+        // 20 inside the window -> we have the newest slice asked for, stop.
+        assert!(scrape_window_satisfied(
+            500,
+            20,
+            Some(day("2022-03-01")),
+            &p
+        ));
+    }
+
+    #[test]
+    fn satisfied_date_mode_stops_when_oldest_crosses_after() {
+        let p = params_window(Some("2022-01-01"), Some("2023-01-01"), 400);
+        // Far fewer than `limit` in-window, but the oldest row collected sits
+        // below `after` (in 2021) -> nothing older can qualify, stop.
+        assert!(scrape_window_satisfied(
+            5000,
+            30,
+            Some(day("2021-12-01")),
+            &p
+        ));
+        // Oldest still inside the window and under the limit -> keep paging.
+        assert!(!scrape_window_satisfied(
+            5000,
+            30,
+            Some(day("2022-02-01")),
+            &p
+        ));
     }
 
     #[test]

@@ -138,6 +138,12 @@ pub struct ScraperConfig {
     /// the next access — the held Chrome process is closed via
     /// chromiumoxide's `kill_on_drop`, freeing memory for abandoned flows.
     pub pending_login_ttl_secs: u64,
+    /// Hard cap on list-page "next" clicks during a single activity scrape.
+    /// A date-bounded historical scrape pages back through the reverse-
+    /// chronological feed until it crosses the requested `after`; this backstop
+    /// bounds a runaway (or a never-disabled "next" button) at
+    /// `max_scrape_pages * ~20` activities so a deep query can't scroll forever.
+    pub max_scrape_pages: u32,
 }
 
 impl Default for ScraperConfig {
@@ -167,6 +173,7 @@ impl Default for ScraperConfig {
                 .ok()
                 .filter(|s| !s.is_empty()),
             pending_login_ttl_secs: env_u64("DRAVR_SCIOTTE_PENDING_LOGIN_TTL", 300),
+            max_scrape_pages: env_u32("DRAVR_SCIOTTE_MAX_SCRAPE_PAGES", 250),
         }
     }
 }
