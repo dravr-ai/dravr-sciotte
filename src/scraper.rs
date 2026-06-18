@@ -2725,15 +2725,19 @@ async fn fetch_list_page(page: &chromiumoxide::Page, url: &str) -> Option<Fetche
             const url = {url_lit};
             const meta = document.querySelector('meta[name="csrf-token"]');
             const csrf = meta ? meta.content : '';
+            const ctrl = new AbortController();
+            const timer = setTimeout(function() {{ ctrl.abort(); }}, 20000);
             try {{
                 const resp = await fetch(url, {{
                     credentials: 'same-origin',
+                    signal: ctrl.signal,
                     headers: {{
                         'x-requested-with': 'XMLHttpRequest',
                         'x-csrf-token': csrf,
                         'accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
                     }}
                 }});
+                clearTimeout(timer);
                 if (!resp.ok) return JSON.stringify({{ error: 'http ' + resp.status }});
                 const body = await resp.text();
                 window.__dravrCaptures = window.__dravrCaptures || {{}};
@@ -2747,15 +2751,23 @@ async fn fetch_list_page(page: &chromiumoxide::Page, url: &str) -> Option<Fetche
                 }}
                 return JSON.stringify({{ count: models.length, start_times: starts }});
             }} catch (err) {{
+                clearTimeout(timer);
                 return JSON.stringify({{ error: String(err) }});
             }}
         }})()"#
     );
 
-    let result = match page.evaluate(js).await {
-        Ok(r) => r,
-        Err(e) => {
+    // Hard ceiling on the whole evaluate (CDP round-trip + in-page fetch) on top
+    // of the in-page AbortController, so a stalled request can never hang the
+    // backfill — and with it the single sciotte scrape permit — indefinitely.
+    let result = match time::timeout(Duration::from_secs(30), page.evaluate(js)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
             warn!(error = %e, url, "List page fetch evaluate failed");
+            return None;
+        }
+        Err(_) => {
+            warn!(url, "List page fetch evaluate timed out (30s)");
             return None;
         }
     };
@@ -2810,11 +2822,34 @@ async fn paginate_via_fetch(
     let mut pages_done: u32 = 0;
     let mut page_num = pagination.first_page;
 
+    info!(
+        first_page = page_num,
+        max_pages,
+        date_bounded = params.after.is_some(),
+        "Starting fetch-based list pagination"
+    );
+
     loop {
         let url = pagination
             .url_template
             .replace(PAGE_PLACEHOLDER, &page_num.to_string());
-        let Some(summary) = fetch_list_page(page, &url).await else {
+        // One retry for a transient stall/timeout (the prod datacenter IP can be
+        // soft-throttled); a second failure stops with whatever we have rather
+        // than spinning.
+        // One retry for a transient stall/timeout (the prod datacenter IP can be
+        // soft-throttled); a second failure stops with whatever we have rather
+        // than spinning. A `break` in the failure path keeps this an explicit
+        // `if let` (not collapsible to `map_or_else`).
+        let mut summary = fetch_list_page(page, &url).await;
+        if summary.is_none() {
+            warn!(page = page_num, "List page fetch failed; retrying once");
+            summary = fetch_list_page(page, &url).await;
+        }
+        let Some(summary) = summary else {
+            warn!(
+                page = page_num,
+                collected, "List page fetch failed twice — stopping with partial results"
+            );
             break;
         };
         pages_done += 1;
@@ -2851,7 +2886,7 @@ async fn paginate_via_fetch(
         time::sleep(Duration::from_millis(interaction_delay_ms)).await;
     }
 
-    debug!(
+    info!(
         pages_done,
         collected,
         in_window = in_window_count,
