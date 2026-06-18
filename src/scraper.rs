@@ -2869,6 +2869,20 @@ async fn paginate_via_fetch(
             }
         }
 
+        // Per-page progress: `oldest` dropping each page means pagination is
+        // advancing toward the requested window; a stuck `oldest` means the
+        // `page=N` fetch isn't returning older rows (it would then grind to the
+        // page cap). One line per page is verbose but it is the only way to see
+        // deep-history behaviour in a deployed, no-debug-logging environment.
+        info!(
+            page = page_num,
+            count = summary.count,
+            collected,
+            in_window = in_window_count,
+            oldest = ?oldest,
+            "list page fetched"
+        );
+
         if scrape_window_satisfied(collected, in_window_count, oldest, params) {
             break;
         }
