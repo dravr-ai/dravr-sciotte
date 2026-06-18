@@ -88,6 +88,12 @@ enum Command {
         /// Filter by sport type
         #[arg(long)]
         sport_type: Option<String>,
+        /// Only activities on/after this date (YYYY-MM-DD); pages the feed back to it
+        #[arg(long)]
+        after: Option<String>,
+        /// Only activities strictly before this date (YYYY-MM-DD)
+        #[arg(long)]
+        before: Option<String>,
         /// Output format
         #[arg(long, default_value = "table")]
         format: String,
@@ -117,10 +123,15 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         Some(Command::Activities {
             limit,
             sport_type,
+            after,
+            before,
             format,
             login,
             detail,
-        }) => run_activities(limit, sport_type, format, login, detail, provider).await,
+        }) => {
+            let params = build_activity_params(limit, sport_type, after, before, detail);
+            run_activities(params, format, login, provider).await
+        }
         Some(Command::AuthStatus) => run_auth_status().await,
         Some(Command::CacheClear) => {
             run_cache_clear();
@@ -312,12 +323,35 @@ async fn run_login(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send 
     Ok(())
 }
 
-async fn run_activities(
+/// Build the activity query from CLI args, parsing `--after`/`--before` as
+/// `YYYY-MM-DD` (midnight UTC). An unparseable date is treated as unbounded on
+/// that side so a typo widens the window rather than aborting the scrape.
+fn build_activity_params(
     limit: u32,
     sport_type: Option<String>,
+    after: Option<String>,
+    before: Option<String>,
+    detail: bool,
+) -> ActivityParams {
+    let parse_day = |s: Option<String>| -> Option<chrono::DateTime<chrono::Utc>> {
+        s.and_then(|d| chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok())
+            .and_then(|nd| nd.and_hms_opt(0, 0, 0))
+            .map(|ndt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(ndt, chrono::Utc))
+    };
+    ActivityParams {
+        limit: Some(limit),
+        sport_type,
+        after: parse_day(after),
+        before: parse_day(before),
+        enrich_details: detail,
+        ..Default::default()
+    }
+}
+
+async fn run_activities(
+    params: ActivityParams,
     format: String,
     force_login: bool,
-    detail: bool,
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = build_limiter()?;
@@ -337,13 +371,6 @@ async fn run_activities(
         auth::save_session(&s).await?;
         println!("Login successful!\n");
         s
-    };
-
-    let params = ActivityParams {
-        limit: Some(limit),
-        sport_type,
-        enrich_details: detail,
-        ..Default::default()
     };
 
     println!("Scraping activities...");

@@ -129,6 +129,13 @@ js_extract = '''
 })()
 '''
 
+[list_page.pagination]
+# Drive Strava's training-log list XHR directly with `&page={page}` instead of
+# clicking a "next page" button the page no longer exposes. The same-origin fetch
+# reuses the session cookies + CSRF, so a deep `after` (e.g. "my 2022 races")
+# pages back year by year — ~20 activities/page — until it crosses the window.
+url_template = "https://www.strava.com/athlete/training_activities?keywords=&sport_type=&tags=&commute=&private_activities=&trainer=&gear=&new_activity_only=false&page={page}"
+
 [list_page.fields]
 name = 'a[data-field-name="name"]'
 sport_type = 'td[data-field-name="sport_type"]'

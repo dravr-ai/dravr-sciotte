@@ -36,7 +36,7 @@ use crate::models::{
     SportType,
 };
 use crate::pending_login::PendingLogin;
-use crate::provider::ProviderConfig;
+use crate::provider::{ListPagination, ProviderConfig};
 use crate::script_loader;
 use crate::teardown_signal::TeardownGuard;
 use crate::types::ActivityScraper;
@@ -839,6 +839,7 @@ impl ActivityScraper for ChromeScraper {
             &page,
             &js,
             params,
+            self.provider.list_page.pagination.as_ref(),
             self.config.max_scrape_pages,
             self.config.interaction_delay_ms,
         )
@@ -2609,9 +2610,25 @@ async fn paginate_activity_list(
     page: &chromiumoxide::Page,
     js: &str,
     params: &ActivityParams,
+    pagination: Option<&ListPagination>,
     max_scrape_pages: u32,
     interaction_delay_ms: u64,
 ) -> Vec<serde_json::Value> {
+    // Fetch-based pagination (e.g. Strava): drive the list XHR with `&page=N`
+    // directly so a deep `after` pages back years. Falls through to the legacy
+    // "next page" button click for providers without a pagination config.
+    if let Some(pagination) = pagination {
+        return paginate_via_fetch(
+            page,
+            js,
+            params,
+            pagination,
+            max_scrape_pages,
+            interaction_delay_ms,
+        )
+        .await;
+    }
+
     let target_count = params.limit.unwrap_or(20) as usize;
     let max_pages = max_scrape_pages.max(1);
     let mut all_items: Vec<serde_json::Value> = Vec::new();
@@ -2686,6 +2703,168 @@ async fn paginate_activity_list(
     }
 
     all_items
+}
+
+/// One fetched list page summarized in-page: the row count and each row's start
+/// epoch (seconds). Summarizing in JS keeps the Rust loop's stop decision cheap
+/// without shipping the whole JSON body across the CDP bridge every iteration —
+/// the body itself is stashed in `window.__dravrCaptures` for the final extract.
+struct FetchedListPage {
+    count: usize,
+    start_times: Vec<i64>,
+}
+
+/// Fetch one list page same-origin, stash its body into `window.__dravrCaptures`
+/// (so the provider `js_extract` later maps it like a passively captured XHR),
+/// and return a summary for the date-stop decision. Returns `None` on a
+/// transport/HTTP error so the caller ends pagination with whatever it has.
+async fn fetch_list_page(page: &chromiumoxide::Page, url: &str) -> Option<FetchedListPage> {
+    let url_lit = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_owned());
+    let js = format!(
+        r#"(async function() {{
+            const url = {url_lit};
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            const csrf = meta ? meta.content : '';
+            try {{
+                const resp = await fetch(url, {{
+                    credentials: 'same-origin',
+                    headers: {{
+                        'x-requested-with': 'XMLHttpRequest',
+                        'x-csrf-token': csrf,
+                        'accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+                    }}
+                }});
+                if (!resp.ok) return JSON.stringify({{ error: 'http ' + resp.status }});
+                const body = await resp.text();
+                window.__dravrCaptures = window.__dravrCaptures || {{}};
+                window.__dravrCaptures[url] = {{ status: resp.status, body: body }};
+                let models = [];
+                try {{ const p = JSON.parse(body); models = (p && p.models) || []; }} catch (e) {{}}
+                const starts = [];
+                for (let i = 0; i < models.length; i++) {{
+                    const st = models[i].start_time;
+                    if (st) {{ const s = Math.floor(Date.parse(st) / 1000); if (!isNaN(s)) starts.push(s); }}
+                }}
+                return JSON.stringify({{ count: models.length, start_times: starts }});
+            }} catch (err) {{
+                return JSON.stringify({{ error: String(err) }});
+            }}
+        }})()"#
+    );
+
+    let result = match page.evaluate(js).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, url, "List page fetch evaluate failed");
+            return None;
+        }
+    };
+    let body = result.value().and_then(|v| v.as_str().map(String::from))?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
+        warn!(url, error = err, "List page fetch returned an error");
+        return None;
+    }
+    let count = parsed
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|c| usize::try_from(c).ok())
+        .unwrap_or(0);
+    let start_times = parsed
+        .get("start_times")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(serde_json::Value::as_i64)
+                .collect::<Vec<i64>>()
+        })
+        .unwrap_or_default();
+    Some(FetchedListPage { count, start_times })
+}
+
+/// Page the activity list by fetching its XHR with `&page=N` directly instead of
+/// clicking a "next page" button.
+///
+/// Each page is fetched same-origin (the browser attaches the session cookies +
+/// CSRF) and stashed into `window.__dravrCaptures`, so the provider's existing
+/// `js_extract` maps the accumulated rows with no duplicated field logic. The
+/// Rust loop owns the stop decision — it reads each page's `start_time`s to know
+/// when the feed crosses the requested `after` (date-bounded) or fills `limit`
+/// (count-bounded), mirroring [`scrape_window_satisfied`]. This lets a deep
+/// historical query reach back years where the legacy button-click path stalls
+/// on a "next" control the page no longer exposes.
+async fn paginate_via_fetch(
+    page: &chromiumoxide::Page,
+    js: &str,
+    params: &ActivityParams,
+    pagination: &ListPagination,
+    max_scrape_pages: u32,
+    interaction_delay_ms: u64,
+) -> Vec<serde_json::Value> {
+    const PAGE_PLACEHOLDER: &str = "{page}";
+
+    let max_pages = max_scrape_pages.max(1);
+    let mut in_window_count: usize = 0;
+    let mut collected: usize = 0;
+    let mut oldest: Option<DateTime<Utc>> = None;
+    let mut pages_done: u32 = 0;
+    let mut page_num = pagination.first_page;
+
+    loop {
+        let url = pagination
+            .url_template
+            .replace(PAGE_PLACEHOLDER, &page_num.to_string());
+        let Some(summary) = fetch_list_page(page, &url).await else {
+            break;
+        };
+        pages_done += 1;
+        if summary.count == 0 {
+            // Empty page — the feed has ended.
+            break;
+        }
+        collected += summary.count;
+        for ts in summary.start_times {
+            if let Some(dt) = DateTime::from_timestamp(ts, 0) {
+                oldest = Some(oldest.map_or(dt, |o| o.min(dt)));
+                let in_win =
+                    params.after.is_none_or(|a| dt > a) && params.before.is_none_or(|b| dt < b);
+                if in_win {
+                    in_window_count += 1;
+                }
+            }
+        }
+
+        if scrape_window_satisfied(collected, in_window_count, oldest, params) {
+            break;
+        }
+        if pages_done >= max_pages {
+            warn!(
+                pages_done,
+                max_pages,
+                collected,
+                "Reached max scrape pages — stopping fetch pagination (window may be incomplete)"
+            );
+            break;
+        }
+
+        page_num += 1;
+        time::sleep(Duration::from_millis(interaction_delay_ms)).await;
+    }
+
+    debug!(
+        pages_done,
+        collected,
+        in_window = in_window_count,
+        "Fetch pagination complete; mapping accumulated rows"
+    );
+
+    // Map every accumulated page via the provider's js_extract (it reads the
+    // captures the fetches stashed). Returns the raw, still-undeduplicated rows;
+    // the caller dedupes, parses, and filters.
+    extract_via_js(page, js).await.unwrap_or_else(|e| {
+        warn!(error = %e, "Final list extraction after fetch pagination failed");
+        Vec::new()
+    })
 }
 
 fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParams) {

@@ -95,6 +95,35 @@ pub struct ListPageConfig {
     /// Path to a markdown file with vision extraction prompt (used by `VisionScraper`)
     #[serde(default)]
     pub vision_prompt: Option<String>,
+    /// Optional fetch-based pagination. When present, the scraper pages the
+    /// activity list by fetching the list XHR directly (same-origin, reusing the
+    /// session cookies) instead of clicking a "next page" button — so a deep
+    /// historical query can page back years. Providers without this keep the
+    /// click-based loop.
+    #[serde(default)]
+    pub pagination: Option<ListPagination>,
+}
+
+/// Fetch-based pagination for the activity list.
+///
+/// The scraper pages by fetching [`url_template`](Self::url_template) (with
+/// `{page}` substituted, 1-based by default) via an in-page same-origin XHR.
+/// The fetched JSON is stored into `window.__dravrCaptures` exactly like a
+/// passively captured response, so the provider's existing `js_extract` maps it
+/// with no duplicated field logic. Driving the XHR avoids the brittle, slow path
+/// of clicking a "next" button (which Strava's training log no longer exposes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListPagination {
+    /// List XHR URL with a `{page}` placeholder. Fetched same-origin so the
+    /// browser attaches the session cookies and CSRF automatically.
+    pub url_template: String,
+    /// First page number (Strava is 1-based).
+    #[serde(default = "default_first_page")]
+    pub first_page: u32,
+}
+
+const fn default_first_page() -> u32 {
+    1
 }
 
 /// CSS selectors for extracting fields from list page rows
