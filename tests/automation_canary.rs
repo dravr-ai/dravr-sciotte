@@ -22,7 +22,9 @@
 //!   and/or our stealth payload.
 //! - `plugins_empty` — empty `PluginArray` (headless tell).
 //! - `languages_empty` — empty `navigator.languages` array (headless tell).
-//! - `webgl_swiftshader` — software-rendered WebGL is the headless tell.
+//! - `webgl_swiftshader` — software-rendered WebGL (collected for observability,
+//!   not asserted: the WebGL spoof was removed to fix Cloudflare 427s, so a
+//!   GPU-less host legitimately reports SwiftShader — see the body for details).
 //! - `notif_mismatch` — Permissions API `notifications` returns 'granted'
 //!   while `Notification.permission` returns 'denied'.
 //! - `ua_headless_substring` — `HeadlessChrome` in the User-Agent string.
@@ -204,19 +206,16 @@ async fn no_automation_signals_leak() {
         "languages_empty",
         "Stealth payload must populate navigator.languages.",
     );
-    // `chrome_runtime_missing` is intentionally not asserted. Commit 0db1717
-    // removed the `window.chrome.runtime` stub because the `Object.defineProperty`
-    // it relied on left a detectable `.toString()` trace, and the WebGL spoof
-    // shipped alongside it tripped Cloudflare 427s in production. The stealth
-    // payload now leans on Chrome launch flags rather than JS-level overrides;
-    // re-introducing this assertion without re-introducing the regression is
-    // not possible with the current strategy.
-    assert_signal_clean(
-        &signals,
-        "webgl_swiftshader",
-        "WebGL renderer must not contain SwiftShader/Mesa OffScreen/llvmpipe \
-         (real Chrome reports a real GPU; software-rasterized leaks headless).",
-    );
+    // `chrome_runtime_missing` and `webgl_swiftshader` are intentionally not
+    // asserted. Commit 0db1717 removed the `window.chrome.runtime` stub (its
+    // `Object.defineProperty` left a detectable `.toString()` trace) together with
+    // the WebGL renderer spoof shipped alongside it — the pair tripped Cloudflare
+    // 427s in production. The stealth payload now leans on Chrome launch flags
+    // rather than JS-level overrides, so without the spoof a GPU-less host (the CI
+    // runner and the Cloud Run deploy alike) reports a SwiftShader WebGL renderer;
+    // re-introducing either assertion without re-introducing the 427 regression is
+    // not possible with the current strategy. Both signals remain in the collected
+    // map above for observability.
     assert_signal_clean(
         &signals,
         "notif_mismatch",
