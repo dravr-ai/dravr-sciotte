@@ -18,8 +18,19 @@ use tokio::sync::RwLock;
 /// cache misses and login flows consume a slot.
 pub type AppScraper = CachedScraper<QueuedScraper<ChromeScraper>>;
 
-/// Type alias for the shared state handle used across the server
-pub type SharedState = Arc<RwLock<ServerState>>;
+/// Type alias for the shared state handle used across the server.
+///
+/// `dravr-tronc` 0.5 shares state as `Arc<S>`, so the mutable session store lives
+/// behind a per-field interior `RwLock` rather than an outer one.
+pub type SharedState = Arc<ServerState>;
+
+/// Interior-mutable session store: the session map plus the latest-session
+/// pointer, co-locked so the two stay consistent across updates.
+#[derive(Default)]
+struct SessionStore {
+    by_id: HashMap<String, AuthSession>,
+    latest_session_id: Option<String>,
+}
 
 /// Central server state holding the scraper, the backpressure limiter, and
 /// the multi-session authentication store.
@@ -29,8 +40,7 @@ pub type SharedState = Arc<RwLock<ServerState>>;
 pub struct ServerState {
     scraper: AppScraper,
     limiter: Arc<SciotteLimiter>,
-    sessions: HashMap<String, AuthSession>,
-    latest_session_id: Option<String>,
+    sessions: RwLock<SessionStore>,
 }
 
 impl ServerState {
@@ -39,8 +49,7 @@ impl ServerState {
         Self {
             scraper,
             limiter,
-            sessions: HashMap::new(),
-            latest_session_id: None,
+            sessions: RwLock::new(SessionStore::default()),
         }
     }
 
@@ -54,52 +63,58 @@ impl ServerState {
         &self.limiter
     }
 
-    /// Look up a session by ID
-    pub fn get_session(&self, session_id: &str) -> Option<&AuthSession> {
-        self.sessions.get(session_id)
+    /// Look up a session by ID, returning an owned copy.
+    pub async fn get_session(&self, session_id: &str) -> Option<AuthSession> {
+        self.sessions.read().await.by_id.get(session_id).cloned()
     }
 
     /// Add a new session (or replace an existing one with the same ID)
-    pub fn add_session(&mut self, session: AuthSession) {
+    pub async fn add_session(&self, session: AuthSession) {
         let id = session.session_id.clone();
-        self.sessions.insert(id.clone(), session);
-        self.latest_session_id = Some(id);
+        let mut store = self.sessions.write().await;
+        store.by_id.insert(id.clone(), session);
+        store.latest_session_id = Some(id);
     }
 
     /// Remove a session by ID, returning it if it existed
-    pub fn remove_session(&mut self, session_id: &str) -> Option<AuthSession> {
-        if self.latest_session_id.as_deref() == Some(session_id) {
-            self.latest_session_id = None;
+    pub async fn remove_session(&self, session_id: &str) -> Option<AuthSession> {
+        let mut store = self.sessions.write().await;
+        if store.latest_session_id.as_deref() == Some(session_id) {
+            store.latest_session_id = None;
         }
-        self.sessions.remove(session_id)
+        store.by_id.remove(session_id)
     }
 
     /// List all active session IDs
-    pub fn list_session_ids(&self) -> Vec<&str> {
-        self.sessions.keys().map(String::as_str).collect()
+    pub async fn list_session_ids(&self) -> Vec<String> {
+        self.sessions.read().await.by_id.keys().cloned().collect()
     }
 
     /// Get the number of active sessions
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
+    pub async fn session_count(&self) -> usize {
+        self.sessions.read().await.by_id.len()
     }
 
     /// Backward compatibility: return the latest session (or the only session)
-    pub fn session(&self) -> Option<&AuthSession> {
-        self.latest_session_id
+    pub async fn session(&self) -> Option<AuthSession> {
+        let store = self.sessions.read().await;
+        store
+            .latest_session_id
             .as_ref()
-            .and_then(|id| self.sessions.get(id))
-            .or_else(|| self.sessions.values().next())
+            .and_then(|id| store.by_id.get(id))
+            .or_else(|| store.by_id.values().next())
+            .cloned()
     }
 
     /// Backward compatibility: set session (adds to the store)
-    pub fn set_session(&mut self, session: AuthSession) {
-        self.add_session(session);
+    pub async fn set_session(&self, session: AuthSession) {
+        self.add_session(session).await;
     }
 
     /// Clear all sessions
-    pub fn clear_sessions(&mut self) {
-        self.sessions.clear();
-        self.latest_session_id = None;
+    pub async fn clear_sessions(&self) {
+        let mut store = self.sessions.write().await;
+        store.by_id.clear();
+        store.latest_session_id = None;
     }
 }

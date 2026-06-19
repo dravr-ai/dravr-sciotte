@@ -3082,7 +3082,7 @@ mod tests {
 
     /// `YYYY-MM-DD` -> midnight UTC, for building deterministic test dates.
     fn day(s: &str) -> DateTime<Utc> {
-        parse_strava_date(s).expect("test date parses")
+        parse_strava_date(s).expect("test date parses") // Safe: test fixture
     }
 
     fn params_window(after: Option<&str>, before: Option<&str>, limit: u32) -> ActivityParams {
@@ -3344,7 +3344,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_valid_provider() {
-        let provider = ProviderConfig::strava_default().unwrap();
+        let provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         let selectors = LoginSelectors::from_provider(&provider).unwrap(); // Safe: test with valid default provider
         assert!(!selectors.email.is_empty());
         assert!(!selectors.password.is_empty());
@@ -3353,7 +3353,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_email() {
-        let mut provider = ProviderConfig::strava_default().unwrap();
+        let mut provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         provider.provider.login_email_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -3363,7 +3363,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_password() {
-        let mut provider = ProviderConfig::strava_default().unwrap();
+        let mut provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         provider.provider.login_password_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -3373,7 +3373,7 @@ mod tests {
 
     #[test]
     fn login_selectors_from_provider_missing_button() {
-        let mut provider = ProviderConfig::strava_default().unwrap();
+        let mut provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         provider.provider.login_button_selector = None;
         let result = LoginSelectors::from_provider(&provider);
         assert!(result.is_err());
@@ -3434,14 +3434,14 @@ mod tests {
 
     #[test]
     fn strava_provider_has_oauth_buttons() {
-        let provider = ProviderConfig::strava_default().unwrap();
+        let provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         assert!(provider.provider.login_oauth_buttons.contains_key("google"));
         assert!(provider.provider.login_oauth_buttons.contains_key("apple"));
     }
 
     #[test]
     fn strava_provider_has_otp_selector() {
-        let provider = ProviderConfig::strava_default().unwrap();
+        let provider = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         assert!(provider.provider.login_otp_selector.is_some());
     }
 
@@ -3515,7 +3515,7 @@ mod tests {
 
     #[test]
     fn garmin_provider_has_profile_url() {
-        let provider = ProviderConfig::garmin_default().unwrap();
+        let provider = ProviderConfig::garmin_default().unwrap(); // Safe: test fixture
         assert!(provider.provider.profile_url.is_some());
         assert!(provider.provider.profile_js_extract.is_some());
     }

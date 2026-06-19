@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn parse_strava_default() {
-        let config = ProviderConfig::strava_default().unwrap();
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         assert_eq!(config.provider.name, "strava");
         assert!(config.list_page.url.contains("athlete/training"));
         assert!(config.detail_page.url_template.contains("{id}"));
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn detail_url_substitution() {
-        let config = ProviderConfig::strava_default().unwrap();
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         let url = config.detail_url("12345");
         assert!(url.contains("12345"));
         assert!(!url.contains("{id}"));
@@ -356,7 +356,7 @@ js_extract = '(function() { return "{}"; })()'
 
     #[test]
     fn strava_has_fitness_health_page() {
-        let config = ProviderConfig::strava_default().unwrap();
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         assert!(config.health_pages.contains_key("fitness"));
         let urls = config.health_urls(&chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()); // Safe: valid date literal
         assert!(!urls.is_empty());
@@ -365,7 +365,7 @@ js_extract = '(function() { return "{}"; })()'
 
     #[test]
     fn list_extraction_js_generates() {
-        let config = ProviderConfig::strava_default().unwrap();
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         let js = config.list_extraction_js();
         assert!(js.contains("training-activity-row"));
         assert!(js.contains("JSON.stringify"));

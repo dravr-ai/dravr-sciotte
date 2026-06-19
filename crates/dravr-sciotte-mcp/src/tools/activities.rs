@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use dravr_sciotte::models::ActivityParams;
 use dravr_sciotte::ActivityScraper;
-use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
-use dravr_tronc::McpTool;
+use dravr_tronc::mcp::schema::{Tool, ToolResponse};
+use dravr_tronc::{McpTool, ToolContext};
 use serde_json::{json, Value};
 
 use crate::state::{ServerState, SharedState};
@@ -18,8 +18,8 @@ pub struct GetActivitiesTool;
 
 #[async_trait]
 impl McpTool<ServerState> for GetActivitiesTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "get_activities".to_owned(),
             description: "Scrape activities from the Strava training page. Requires an active authenticated session.".to_owned(),
             input_schema: json!({
@@ -36,14 +36,18 @@ impl McpTool<ServerState> for GetActivitiesTool {
                 },
                 "required": []
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, arguments: Value) -> CallToolResult {
-        let state = state.read().await;
-
-        let Some(session) = state.session() else {
-            return CallToolResult::error(
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        arguments: Value,
+    ) -> ToolResponse {
+        let Some(session) = state.session().await else {
+            return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
@@ -55,15 +59,15 @@ impl McpTool<ServerState> for GetActivitiesTool {
             ..Default::default()
         };
 
-        match state.scraper().get_activities(session, &params).await {
+        match state.scraper().get_activities(&session, &params).await {
             Ok(activities) => {
                 let result = json!({
                     "count": activities.len(),
                     "activities": activities,
                 });
-                CallToolResult::text(serde_json::to_string_pretty(&result).unwrap_or_default())
+                ToolResponse::text(serde_json::to_string_pretty(&result).unwrap_or_default())
             }
-            Err(e) => CallToolResult::error(format!("Failed to scrape activities: {e}")),
+            Err(e) => ToolResponse::error(format!("Failed to scrape activities: {e}")),
         }
     }
 }
@@ -73,8 +77,8 @@ pub struct GetActivityTool;
 
 #[async_trait]
 impl McpTool<ServerState> for GetActivityTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "get_activity".to_owned(),
             description: "Scrape detailed data for a single Strava activity by ID".to_owned(),
             input_schema: json!({
@@ -87,30 +91,32 @@ impl McpTool<ServerState> for GetActivityTool {
                 },
                 "required": ["activity_id"]
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, arguments: Value) -> CallToolResult {
-        let state = state.read().await;
-
-        let Some(session) = state.session() else {
-            return CallToolResult::error(
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        arguments: Value,
+    ) -> ToolResponse {
+        let Some(session) = state.session().await else {
+            return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
         };
 
         let Some(activity_id) = arguments["activity_id"].as_str() else {
-            return CallToolResult::error("Missing required parameter: activity_id".to_owned());
+            return ToolResponse::error("Missing required parameter: activity_id".to_owned());
         };
 
-        match state.scraper().get_activity(session, activity_id).await {
+        match state.scraper().get_activity(&session, activity_id).await {
             Ok(activity) => {
-                CallToolResult::text(serde_json::to_string_pretty(&activity).unwrap_or_default())
+                ToolResponse::text(serde_json::to_string_pretty(&activity).unwrap_or_default())
             }
-            Err(e) => {
-                CallToolResult::error(format!("Failed to scrape activity {activity_id}: {e}"))
-            }
+            Err(e) => ToolResponse::error(format!("Failed to scrape activity {activity_id}: {e}")),
         }
     }
 }

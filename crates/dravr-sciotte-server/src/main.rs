@@ -37,7 +37,6 @@ use dravr_tronc::mcp::transport::stdio;
 use dravr_tronc::server::tracing_init;
 use dravr_tronc::McpServer;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tracing::info;
 
 #[derive(Parser)]
@@ -265,11 +264,11 @@ async fn run_server(
     };
     #[cfg(not(feature = "vision"))]
     let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));
+    let state = Arc::new(ServerState::new(cached, limiter));
 
     if let Ok(Some(session)) = auth::load_session().await {
         info!("Loaded persisted session");
-        state.write().await.set_session(session);
+        state.set_session(session).await;
     }
 
     let app = router::build_router(state);
@@ -288,10 +287,10 @@ async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + S
     let watchdog = limiter.spawn_watchdog();
 
     let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));
+    let state = Arc::new(ServerState::new(cached, limiter));
 
     if let Ok(Some(session)) = auth::load_session().await {
-        state.write().await.set_session(session);
+        state.set_session(session).await;
     }
 
     let server = Arc::new(McpServer::new(

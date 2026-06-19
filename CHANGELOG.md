@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.6] — 2026-06-19
+
+### Changed
+
+- deps: migrate `dravr-sciotte-mcp` and `dravr-sciotte-server` to dravr-tronc
+  0.5.3 (dual-era MCP engine). tronc 0.5 hands tools/handlers a shared
+  `&Arc<ServerState>` with no outer `RwLock`, so the session store moved to a
+  per-field interior `RwLock<SessionStore>`; the session accessors are now
+  `&self` async and return owned `AuthSession` clones. The scraper/limiter are
+  accessed lock-free (already `Sync`).
+
+### Fixed
+
+- lint: annotate test-fixture `unwrap`/`expect` in `scraper`/`provider` tests
+  with `// Safe` for the architectural-validation gate.
+
 ## [0.7.0] — 2026-06-05
 
 

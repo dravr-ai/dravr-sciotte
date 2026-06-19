@@ -157,7 +157,7 @@ pub async fn browser_login_ws(
         }
     }
 
-    let limiter = state.read().await.limiter().clone();
+    let limiter = state.limiter().clone();
     let permit = match limiter.acquire().await {
         Ok(p) => p,
         Err(err) => return scraper_error_response(&err.into_scraper_error()),
@@ -175,10 +175,7 @@ async fn handle_browser_login(
     method: String,
     permit: ScrapePermit,
 ) {
-    let provider = {
-        let guard = state.read().await;
-        guard.scraper().inner().inner().provider().clone()
-    };
+    let provider = state.scraper().inner().inner().provider().clone();
 
     info!(
         provider = %provider.provider.name,
@@ -265,7 +262,7 @@ async fn run_streaming_session(
                     }
                     let session_id = session.session_id.clone();
                     let cookie_count = session.cookies.len();
-                    state.write().await.add_session(session);
+                    state.add_session(session).await;
 
                     let msg = serde_json::json!({
                         "type": "login_success",
@@ -397,7 +394,7 @@ async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedS
             }
             let session_id = session.session_id.clone();
             let cookie_count = session.cookies.len();
-            state.write().await.add_session(session);
+            state.add_session(session).await;
             info!(session_id = %session_id, "Login successful");
             Json(json!({
                 "status": "authenticated",
@@ -457,13 +454,10 @@ pub async fn credential_login(
     State(state): State<SharedState>,
     Json(request): Json<CredentialLoginRequest>,
 ) -> impl IntoResponse {
-    let result = {
-        let guard = state.read().await;
-        guard
-            .scraper()
-            .credential_login(&request.email, &request.password, &request.method)
-            .await
-    };
+    let result = state
+        .scraper()
+        .credential_login(&request.email, &request.password, &request.method)
+        .await;
 
     handle_login_result(result, &state).await
 }
@@ -475,10 +469,7 @@ pub async fn submit_otp(
     State(state): State<SharedState>,
     Json(request): Json<OtpSubmitRequest>,
 ) -> impl IntoResponse {
-    let result: ScraperResult<LoginResult> = {
-        let guard = state.read().await;
-        guard.scraper().submit_otp(&request.code).await
-    };
+    let result: ScraperResult<LoginResult> = state.scraper().submit_otp(&request.code).await;
 
     match result {
         Ok(LoginResult::Success(session)) => {
@@ -487,7 +478,7 @@ pub async fn submit_otp(
             }
             let session_id = session.session_id.clone();
             let cookie_count = session.cookies.len();
-            state.write().await.add_session(session);
+            state.add_session(session).await;
 
             info!(session_id = %session_id, "OTP verification successful");
             Json(json!({
@@ -546,10 +537,8 @@ pub async fn select_two_factor(
     State(state): State<SharedState>,
     Json(request): Json<TwoFactorSelectRequest>,
 ) -> impl IntoResponse {
-    let result: ScraperResult<LoginResult> = {
-        let guard = state.read().await;
-        guard.scraper().select_two_factor(&request.option_id).await
-    };
+    let result: ScraperResult<LoginResult> =
+        state.scraper().select_two_factor(&request.option_id).await;
 
     match result {
         Ok(LoginResult::Success(session)) => {
@@ -558,7 +547,7 @@ pub async fn select_two_factor(
             }
             let session_id = session.session_id.clone();
             let cookie_count = session.cookies.len();
-            state.write().await.add_session(session);
+            state.add_session(session).await;
 
             info!(session_id = %session_id, "2FA method completed successfully");
             Json(json!({

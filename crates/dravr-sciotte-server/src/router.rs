@@ -96,12 +96,9 @@ fn resolve_session_id(headers: &HeaderMap) -> Option<String> {
 
 /// POST /auth/login — launch browser for user login
 async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let session = {
-        let guard = state.read().await;
-        match guard.scraper().browser_login().await {
-            Ok(s) => s,
-            Err(e) => return scraper_error_response(&e),
-        }
+    let session = match state.scraper().browser_login().await {
+        Ok(s) => s,
+        Err(e) => return scraper_error_response(&e),
     };
 
     if let Err(e) = auth::save_session(&session).await {
@@ -109,7 +106,7 @@ async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
     }
 
     let session_id = session.session_id.clone();
-    state.write().await.add_session(session);
+    state.add_session(session).await;
 
     info!("Login successful, session established");
     Json(json!({
@@ -124,13 +121,13 @@ async fn auth_status_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+    let session = match resolve_session_id(&headers) {
+        Some(id) => state.get_session(&id).await,
+        None => state.session().await,
+    };
 
     if let Some(session) = session {
-        let authenticated = guard.scraper().is_authenticated(session).await;
+        let authenticated = state.scraper().is_authenticated(&session).await;
         Json(json!({
             "authenticated": authenticated,
             "session_id": session.session_id,
@@ -146,8 +143,7 @@ async fn auth_status_handler(
 
 /// GET /auth/sessions — list all active session IDs
 async fn list_sessions_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let guard = state.read().await;
-    let session_ids = guard.list_session_ids();
+    let session_ids = state.list_session_ids().await;
     Json(json!({
         "count": session_ids.len(),
         "sessions": session_ids,
@@ -159,8 +155,7 @@ async fn delete_session_handler(
     State(state): State<SharedState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let mut guard = state.write().await;
-    if guard.remove_session(&session_id).is_some() {
+    if state.remove_session(&session_id).await.is_some() {
         Json(json!({"status": "removed", "session_id": session_id}))
     } else {
         Json(json!({"error": "session_not_found", "session_id": session_id}))
@@ -176,10 +171,10 @@ async fn athlete_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+    let session = match resolve_session_id(&headers) {
+        Some(id) => state.get_session(&id).await,
+        None => state.session().await,
+    };
 
     let Some(session) = session else {
         return (
@@ -189,7 +184,7 @@ async fn athlete_handler(
             .into_response();
     };
 
-    match guard.scraper().get_athlete(session).await {
+    match state.scraper().get_athlete(&session).await {
         Ok(profile) => Json(json!(profile)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -208,10 +203,10 @@ async fn activities_handler(
     headers: HeaderMap,
     Query(query): Query<ActivityQuery>,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+    let session = match resolve_session_id(&headers) {
+        Some(id) => state.get_session(&id).await,
+        None => state.session().await,
+    };
 
     let Some(session) = session else {
         return (
@@ -228,7 +223,7 @@ async fn activities_handler(
         ..Default::default()
     };
 
-    match guard.scraper().get_activities(session, &params).await {
+    match state.scraper().get_activities(&session, &params).await {
         Ok(activities) => Json(json!({
             "count": activities.len(),
             "activities": activities,
@@ -255,10 +250,10 @@ async fn activity_detail_handler(
     Path(id): Path<String>,
     Query(query): Query<ActivityDetailQuery>,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |sid| guard.get_session(&sid));
+    let session = match resolve_session_id(&headers) {
+        Some(sid) => state.get_session(&sid).await,
+        None => state.session().await,
+    };
 
     let Some(session) = session else {
         return (
@@ -269,13 +264,13 @@ async fn activity_detail_handler(
     };
 
     if query.raw {
-        return match guard.scraper().get_activity_raw(session, &id).await {
+        return match state.scraper().get_activity_raw(&session, &id).await {
             Ok(value) => Json(value).into_response(),
             Err(e) => scraper_error_response(&e),
         };
     }
 
-    match guard.scraper().get_activity(session, &id).await {
+    match state.scraper().get_activity(&session, &id).await {
         Ok(activity) => Json(json!(activity)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -296,10 +291,10 @@ async fn daily_summary_handler(
     headers: HeaderMap,
     Query(query): Query<DailySummaryQuery>,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+    let session = match resolve_session_id(&headers) {
+        Some(id) => state.get_session(&id).await,
+        None => state.session().await,
+    };
 
     let Some(session) = session else {
         return (
@@ -319,7 +314,7 @@ async fn daily_summary_handler(
 
     let params = HealthParams { date };
 
-    match guard.scraper().get_daily_summary(session, &params).await {
+    match state.scraper().get_daily_summary(&session, &params).await {
         Ok(summary) => Json(json!(summary)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -336,10 +331,10 @@ async fn list_page_probe_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let guard = state.read().await;
-
-    let session =
-        resolve_session_id(&headers).map_or_else(|| guard.session(), |id| guard.get_session(&id));
+    let session = match resolve_session_id(&headers) {
+        Some(id) => state.get_session(&id).await,
+        None => state.session().await,
+    };
 
     let Some(session) = session else {
         return (
@@ -349,7 +344,7 @@ async fn list_page_probe_handler(
             .into_response();
     };
 
-    match guard.scraper().probe_list_page_for_gps(session).await {
+    match state.scraper().probe_list_page_for_gps(&session).await {
         Ok(report) => Json(report).into_response(),
         Err(e) => scraper_error_response(&e),
     }

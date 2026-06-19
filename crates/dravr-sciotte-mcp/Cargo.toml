@@ -6,7 +6,7 @@
 
 [package]
 name = "dravr-sciotte-mcp"
-version = "0.7.0"
+version = "0.7.1"
 publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -25,8 +25,8 @@ name = "dravr-sciotte-mcp"
 path = "src/main.rs"
 
 [dependencies]
-dravr-sciotte = { path = "../..", version = "0.7.0" }
-dravr-tronc = "0.3"
+dravr-sciotte = { path = "../..", version = "0.7.1" }
+dravr-tronc = "0.5.3"
 async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }

@@ -7,8 +7,8 @@
 use async_trait::async_trait;
 use dravr_sciotte::models::HealthParams;
 use dravr_sciotte::ActivityScraper;
-use dravr_tronc::mcp::protocol::{CallToolResult, ToolDefinition};
-use dravr_tronc::McpTool;
+use dravr_tronc::mcp::schema::{Tool, ToolResponse};
+use dravr_tronc::{McpTool, ToolContext};
 use serde_json::{json, Value};
 
 use crate::state::{ServerState, SharedState};
@@ -18,8 +18,8 @@ pub struct GetDailySummaryTool;
 
 #[async_trait]
 impl McpTool<ServerState> for GetDailySummaryTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
+    fn definition(&self) -> Tool {
+        Tool {
             name: "get_daily_summary".to_owned(),
             description: "Scrape daily health/wellness summary (heart rate, body battery, stress, steps, VO2 max, etc.) for a given date. Requires an active authenticated session and a provider with health page support.".to_owned(),
             input_schema: json!({
@@ -32,38 +32,40 @@ impl McpTool<ServerState> for GetDailySummaryTool {
                 },
                 "required": ["date"]
             }),
+            annotations: None,
         }
     }
 
-    async fn execute(&self, state: &SharedState, arguments: Value) -> CallToolResult {
-        let state = state.read().await;
-
-        let Some(session) = state.session() else {
-            return CallToolResult::error(
+    async fn execute(
+        &self,
+        state: &SharedState,
+        _ctx: &ToolContext,
+        arguments: Value,
+    ) -> ToolResponse {
+        let Some(session) = state.session().await else {
+            return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
         };
 
         let Some(date_str) = arguments["date"].as_str() else {
-            return CallToolResult::error(
-                "Missing required parameter: date (YYYY-MM-DD)".to_owned(),
-            );
+            return ToolResponse::error("Missing required parameter: date (YYYY-MM-DD)".to_owned());
         };
 
         let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") else {
-            return CallToolResult::error(format!(
+            return ToolResponse::error(format!(
                 "Invalid date format '{date_str}', expected YYYY-MM-DD"
             ));
         };
 
         let params = HealthParams { date };
 
-        match state.scraper().get_daily_summary(session, &params).await {
+        match state.scraper().get_daily_summary(&session, &params).await {
             Ok(summary) => {
-                CallToolResult::text(serde_json::to_string_pretty(&summary).unwrap_or_default())
+                ToolResponse::text(serde_json::to_string_pretty(&summary).unwrap_or_default())
             }
-            Err(e) => CallToolResult::error(format!("Failed to scrape daily summary: {e}")),
+            Err(e) => ToolResponse::error(format!("Failed to scrape daily summary: {e}")),
         }
     }
 }

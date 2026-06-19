@@ -28,7 +28,6 @@ use dravr_tronc::mcp::server::McpServer;
 use dravr_tronc::mcp::transport::{http, stdio};
 use dravr_tronc::server::cli::McpArgs;
 use dravr_tronc::server::tracing_init;
-use tokio::sync::RwLock;
 
 /// dravr-sciotte-mcp — MCP server exposing Strava scraping via Model Context Protocol
 #[derive(Parser)]
@@ -64,7 +63,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let chrome = ChromeScraper::default_config()?;
     let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
     let cached = CachedScraper::new(queued, &CacheConfig::default());
-    let state = Arc::new(RwLock::new(ServerState::new(cached, limiter)));
+    let state = Arc::new(ServerState::new(cached, limiter));
     let tool_registry = build_tool_registry();
     let server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",

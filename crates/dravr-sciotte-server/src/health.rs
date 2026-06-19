@@ -12,10 +12,9 @@ use dravr_sciotte_mcp::state::SharedState;
 
 /// GET /health — server health check
 pub async fn health_handler(State(state): State<SharedState>) -> Json<Value> {
-    let guard = state.read().await;
-    let session_count = guard.session_count();
-    let session_ids = guard.list_session_ids();
-    let cache_stats = guard.scraper().stats();
+    let session_count = state.session_count().await;
+    let session_ids = state.list_session_ids().await;
+    let cache_stats = state.scraper().stats();
 
     Json(json!({
         "status": "ok",
