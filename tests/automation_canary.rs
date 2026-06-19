@@ -22,9 +22,9 @@
 //!   and/or our stealth payload.
 //! - `plugins_empty` — empty `PluginArray` (headless tell).
 //! - `languages_empty` — empty `navigator.languages` array (headless tell).
-//! - `webgl_swiftshader` — software-rendered WebGL (collected for observability,
-//!   not asserted: the WebGL spoof was removed to fix Cloudflare 427s, so a
-//!   GPU-less host legitimately reports SwiftShader — see the body for details).
+//! - `webgl_swiftshader` — software-rendered `WebGL` (collected for observability,
+//!   not asserted: the `WebGL` spoof was removed to fix Cloudflare 427s, so a
+//!   GPU-less host legitimately reports `SwiftShader` — see the body for details).
 //! - `notif_mismatch` — Permissions API `notifications` returns 'granted'
 //!   while `Notification.permission` returns 'denied'.
 //! - `ua_headless_substring` — `HeadlessChrome` in the User-Agent string.
