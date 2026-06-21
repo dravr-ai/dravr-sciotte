@@ -17,9 +17,9 @@
 //! What the test covers (each signal has a citation in the fixture):
 //! - `cdp_runtime_enable` — Castle.io's Error.stack getter trick that
 //!   fires whenever CDP's `Runtime.enable` is active.
-//! - `webdriver_set` — `navigator.webdriver === true`. Should be hidden
-//!   by `.hide()` (which emits `--disable-blink-features=AutomationControlled`)
-//!   and/or our stealth payload.
+//! - `webdriver_set` — `navigator.webdriver === true`. Hidden by `.hide()`,
+//!   which emits `--disable-blink-features=AutomationControlled`. The injected
+//!   payload is the network-capture hook only; it touches no navigator signal.
 //! - `plugins_empty` — empty `PluginArray` (headless tell).
 //! - `languages_empty` — empty `navigator.languages` array (headless tell).
 //! - `webgl_swiftshader` — software-rendered `WebGL` (collected for observability,
@@ -193,18 +193,22 @@ async fn no_automation_signals_leak() {
     assert_signal_clean(
         &signals,
         "webdriver_set",
-        "Stealth payload + --disable-blink-features=AutomationControlled \
-         must hide navigator.webdriver=true.",
+        "--disable-blink-features=AutomationControlled (emitted by .hide()) \
+         must hide navigator.webdriver=true. The injected payload no longer \
+         touches it — a JS override left a detectable .toString() trace.",
     );
     assert_signal_clean(
         &signals,
         "plugins_empty",
-        "Stealth payload must spoof navigator.plugins to a non-empty array.",
+        "New-headless Chrome (--headless=new via .new_headless_mode()) reports a \
+         non-empty navigator.plugins natively; old headless returned empty. \
+         No JS spoof — see the chrome_runtime/WebGL note below.",
     );
     assert_signal_clean(
         &signals,
         "languages_empty",
-        "Stealth payload must populate navigator.languages.",
+        "New-headless Chrome populates navigator.languages from the configured \
+         locale natively; no JS spoof is applied.",
     );
     // `chrome_runtime_missing` and `webgl_swiftshader` are intentionally not
     // asserted. Commit 0db1717 removed the `window.chrome.runtime` stub (its
