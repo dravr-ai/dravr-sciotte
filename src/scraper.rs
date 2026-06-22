@@ -3334,23 +3334,43 @@ fn parse_duration_string(s: &str) -> Option<u64> {
     }
 }
 
-/// Parse distance strings like "5.2 km" or "3.1 mi" into meters
+/// Normalize a locale-formatted number to a Rust-parseable `f64` string.
+///
+/// Strava renders distances with the viewer's locale separators: English
+/// `"1,250.5"` (comma grouping, dot decimal) but French/German/Spanish/Portuguese
+/// `"1 250,5"` or `"5,41"` (space/dot grouping, COMMA decimal). Stripping the
+/// comma blindly turns `"5,41"` into `541` — a 100x distance error. So: when both
+/// `,` and `.` appear the last-occurring one is the decimal separator and the
+/// other is grouping; a lone comma is the decimal separator (Strava never renders
+/// a comma-grouped distance without a dot decimal); whitespace is always grouping.
+fn normalize_decimal(s: &str) -> String {
+    let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    match (s.rfind(','), s.rfind('.')) {
+        // Comma after dot => European: dots are grouping, comma is decimal.
+        (Some(c), Some(d)) if c > d => s.replace('.', "").replace(',', "."),
+        // Dot after comma => English: commas are grouping, dot is decimal.
+        (Some(_), Some(_)) => s.replace(',', ""),
+        // Lone comma => decimal separator.
+        (Some(_), None) => s.replace(',', "."),
+        // Lone dot or integer => already parseable.
+        (None, _) => s,
+    }
+}
+
+/// Parse distance strings like "5.2 km", "5,41 km" (fr), or "3.1 mi" into meters
 fn parse_distance_string(s: &str) -> Option<f64> {
     let s = s.trim().to_lowercase();
 
     if s.contains("km") {
-        let num_str = s.replace("km", "").replace(',', "").trim().to_owned();
-        let km: f64 = num_str.parse().ok()?;
+        let km: f64 = normalize_decimal(&s.replace("km", "")).parse().ok()?;
         Some(km * 1000.0)
     } else if s.contains("mi") {
-        let num_str = s.replace("mi", "").replace(',', "").trim().to_owned();
-        let mi: f64 = num_str.parse().ok()?;
+        let mi: f64 = normalize_decimal(&s.replace("mi", "")).parse().ok()?;
         Some(mi * 1609.344)
     } else if s.contains('m') {
-        let num_str = s.replace(['m', ','], "").trim().to_owned();
-        num_str.parse().ok()
+        normalize_decimal(&s.replace('m', "")).parse().ok()
     } else {
-        s.replace(',', "").parse().ok()
+        normalize_decimal(&s).parse().ok()
     }
 }
 
@@ -3358,18 +3378,15 @@ fn parse_distance_string(s: &str) -> Option<f64> {
 fn parse_speed_string(s: &str) -> Option<f64> {
     let s = s.trim().to_lowercase();
     if s.contains("km/h") || s.contains("kph") {
-        let num: f64 = s
-            .replace("km/h", "")
-            .replace("kph", "")
-            .trim()
+        let num: f64 = normalize_decimal(&s.replace("km/h", "").replace("kph", ""))
             .parse()
             .ok()?;
         Some(num / 3.6)
     } else if s.contains("mph") {
-        let num: f64 = s.replace("mph", "").trim().parse().ok()?;
+        let num: f64 = normalize_decimal(&s.replace("mph", "")).parse().ok()?;
         Some(num * 0.447_04)
     } else {
-        s.parse().ok()
+        normalize_decimal(&s).parse().ok()
     }
 }
 
@@ -3590,6 +3607,28 @@ mod tests {
 
         let d = parse_distance_string("800m").unwrap(); // Safe: test with valid distance string
         assert!((d - 800.0).abs() < 1.0);
+
+        // European comma-decimal (Strava renders fr/de/es/pt this way). The
+        // regression that prompted this: "5,41 km" must be 5410 m, NOT 541000.
+        let d = parse_distance_string("5,41 km").unwrap();
+        assert!((d - 5410.0).abs() < 1.0, "comma-decimal km: got {d}");
+        let d = parse_distance_string("12,07 km").unwrap();
+        assert!((d - 12070.0).abs() < 1.0, "comma-decimal km: got {d}");
+        // Grouped + decimal, both locales, must agree (1250.5 km).
+        let en = parse_distance_string("1,250.5 km").unwrap();
+        let fr = parse_distance_string("1 250,5 km").unwrap();
+        assert!((en - 1_250_500.0).abs() < 1.0, "en grouped: {en}");
+        assert!((fr - en).abs() < 1.0, "fr {fr} must equal en {en}");
+    }
+
+    #[test]
+    fn normalize_decimal_handles_both_locales() {
+        assert_eq!(normalize_decimal("5,41"), "5.41"); // fr decimal
+        assert_eq!(normalize_decimal("5.41"), "5.41"); // en decimal
+        assert_eq!(normalize_decimal("1 250,5"), "1250.5"); // fr grouped+decimal
+        assert_eq!(normalize_decimal("1,250.5"), "1250.5"); // en grouped+decimal
+        assert_eq!(normalize_decimal("1.250,5"), "1250.5"); // de grouped+decimal
+        assert_eq!(normalize_decimal("523"), "523"); // integer
     }
 
     #[test]
