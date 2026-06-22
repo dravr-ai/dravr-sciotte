@@ -367,7 +367,9 @@ js_extract = '(function() { return "{}"; })()'
     fn list_extraction_js_generates() {
         let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
         let js = config.list_extraction_js();
-        assert!(js.contains("training-activity-row"));
+        // Strava now extracts from the training-log interval feed's React
+        // `preFetchedEntries`, not the old `tr.training-activity-row` table.
+        assert!(js.contains("preFetchedEntries"));
         assert!(js.contains("JSON.stringify"));
     }
 }

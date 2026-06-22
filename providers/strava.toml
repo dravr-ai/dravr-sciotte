@@ -40,101 +40,163 @@ row_selector = "tr.training-activity-row"
 link_selector = 'a[data-field-name="name"]'
 id_regex = '/\/activities\/(\d+)/'
 vision_prompt = "providers/strava/list_page.md"
-# The rendered /athlete/training table only exposes a DATE-ONLY column
-# (td.col-date), which collapses every activity's start to local midnight and
-# breaks "sort by start time" / day-attribution. The table is populated by a
-# /athlete/training_activities XHR whose JSON carries the real start on each
-# row: `start_time` ("2026-05-29T12:36:07+0000", UTC ISO). The stealth payload
-# records that XHR in window.__dravrCaptures, so we read the JSON and use
-# the real start_time. Falls back to the date-only DOM scrape if the capture
-# is unavailable, so there is no regression.
+# Activities come from Strava's training-LOG interval feed (see the
+# `graph_date_range` pagination below), not the /athlete/training table. Each
+# month's response stashes a `#interval-rides` React feed into
+# window.__dravrCaptures whose `preFetchedEntries` carry the granular sport
+# `type` (TrailRun/Ride/Kayaking — not the list page's flattened "Ride") and the
+# real UTC `startDate`. This extractor reads those captures: it pulls the
+# jQuery("#interval-rides").html("...") payload, lets a detached element
+# entity-unescape `data-react-props`, then maps each Activity entry to the
+# {id,name,type,date,time,distance,elevation,pace} shape build_activity_from_js_item consumes.
 js_extract = '''
 (function() {
     var captures = window.__dravrCaptures || {};
-    var models = [];
-    for (var k in captures) {
-        if (!/\/athlete\/training_activities/.test(k)) continue;
-        var entry = captures[k];
-        if (!entry || entry.status !== 200) continue;
+    var out = [];
+    var seen = {};
+
+    // The `*_subtitle` stat value tells us what the paired `*` value is. Strava
+    // localizes subtitles (fr OR en), so each field matches both spellings.
+    function statValueBySubtitle(stats, subtitleRe) {
+        // stats is a flat array of { key, value } pairs where each metric is a
+        // value entry ("stat_one") followed by its subtitle ("stat_one_subtitle").
+        // Match a subtitle by its localized text, then read the sibling value
+        // entry whose key is the subtitle key minus the "_subtitle" suffix.
+        if (!stats || !stats.length) return undefined;
+        var byKey = {};
+        for (var i = 0; i < stats.length; i++) {
+            var s = stats[i];
+            if (s && s.key != null) byKey[s.key] = (s.value != null ? s.value : "");
+        }
+        for (var j = 0; j < stats.length; j++) {
+            var st = stats[j];
+            if (!st || st.key == null) continue;
+            var key = String(st.key);
+            if (key.indexOf("_subtitle") < 0) continue;
+            var subVal = st.value != null ? String(st.value) : "";
+            if (!subtitleRe.test(subVal)) continue;
+            var valueKey = key.slice(0, -("_subtitle".length));
+            if (byKey.hasOwnProperty(valueKey)) return byKey[valueKey];
+        }
+        return undefined;
+    }
+
+    // Pull the FIRST jQuery("#interval-rides").html( STRING ) argument out of the
+    // raw interval response and decode it from a JS string literal back to HTML.
+    // The argument is a double-quoted JS string literal (internal quotes and
+    // backslashes escaped). JSON.parse decodes the common escapes; a manual
+    // unescape covers literals JSON rejects (e.g. \' single-quote escapes).
+    function extractIntervalHtml(body) {
+        if (!body) return null;
+        // Match .html( "<escaped string literal>" ), allowing whitespace and the
+        // jQuery alias ($ or jQuery). [\s\S] is used instead of . so the literal
+        // can span newlines inside the captured group.
+        var m = body.match(/(?:jQuery|\$)\(\s*["']#interval-rides["']\s*\)\s*\.html\(\s*"((?:[^"\\]|\\[\s\S])*)"/);
+        if (!m) return null;
+        var inner = m[1];
+        var html = null;
         try {
-            var parsed = JSON.parse(entry.body);
-            var arr = (parsed && parsed.models) || parsed;
-            if (Array.isArray(arr)) { models = models.concat(arr); }
-        } catch (e) {}
+            html = JSON.parse('"' + inner + '"');
+        } catch (e1) {
+            try {
+                // Fallback for JS-literal-only escapes that JSON.parse rejects.
+                html = inner
+                    .replace(/\\'/g, "'")
+                    .replace(/\\"/g, '"')
+                    .replace(/\\n/g, "\n")
+                    .replace(/\\r/g, "\r")
+                    .replace(/\\t/g, "\t")
+                    .replace(/\\\//g, "/")
+                    .replace(/\\\\/g, "\\");
+            } catch (e2) {
+                html = null;
+            }
+        }
+        return html;
     }
 
-    // Real UTC start. start_time is "YYYY-MM-DDTHH:MM:SS+0000"; normalize to a
-    // Z-suffixed RFC3339 the Rust layer parses. start_date_local_raw is a LOCAL
-    // epoch (tz-shifted) so it is only a last resort, and start_date is the
-    // date-only display string (worst case).
-    function startIso(m) {
-        if (m.start_time) {
-            var d = new Date(m.start_time);
-            if (!isNaN(d.getTime())) return d.toISOString().replace(/\.\d+Z$/, "Z");
+    // Read appContext.preFetchedEntries from the interval HTML by letting the
+    // browser entity-unescape data-react-props for us (a detached div's
+    // getAttribute returns the already-unescaped attribute value).
+    function entriesFromHtml(html) {
+        if (!html) return [];
+        try {
+            var div = document.createElement("div");
+            div.innerHTML = html;
+            var node = div.querySelector(".react-feed-component");
+            if (!node) return [];
+            var propsStr = node.getAttribute("data-react-props");
+            if (!propsStr) return [];
+            var props = JSON.parse(propsStr);
+            var entries =
+                props &&
+                props.appContext &&
+                props.appContext.preFetchedEntries;
+            return Array.isArray(entries) ? entries : [];
+        } catch (e) {
+            return [];
         }
-        if (m.start_date_local_raw) {
-            var dl = new Date(Number(m.start_date_local_raw) * 1000);
-            if (!isNaN(dl.getTime())) return dl.toISOString().replace(/\.\d+Z$/, "Z");
-        }
-        return m.start_date || "";
     }
 
-    if (models.length > 0) {
-        var out = [];
-        var seen = {};
-        for (var i = 0; i < models.length; i++) {
-            var m = models[i];
-            var id = String(m.id != null ? m.id : "");
-            if (!id || seen[id]) continue;
+    function pushEntry(entry) {
+        try {
+            if (!entry || entry.entity !== "Activity") return;
+            var a = entry.activity;
+            if (!a) return;
+            var id = a.id != null ? String(a.id) : "";
+            if (!id || seen[id]) return;
+
+            var stats = a.stats;
+            var distance = statValueBySubtitle(stats, /distance/i);
+            var pace = statValueBySubtitle(stats, /allure|pace/i);
+            var elevation = statValueBySubtitle(stats, /dénivel|denivel|elevation/i);
+
             seen[id] = true;
             out.push({
                 id: id,
-                name: m.name || "Untitled",
-                type: m.sport_type || m.display_type || "",
-                date: startIso(m),
-                time: (m.trainer ? m.elapsed_time_raw : m.moving_time_raw),
-                distance: m.distance_raw,
-                elevation: m.elevation_gain_raw,
-                suffer_score: m.suffer_score
+                name: a.activityName != null ? a.activityName : "Untitled",
+                type: a.type != null ? a.type : "",
+                date: a.startDate != null ? a.startDate : "",
+                // elapsedTime is a numeric seconds value; pass it through as-is so
+                // the Rust layer reads it via json_field_f64, not a display string.
+                time: a.elapsedTime != null ? a.elapsedTime : 0,
+                distance: distance != null ? distance : "",
+                elevation: elevation != null ? elevation : "",
+                suffer_score: a.sufferScore != null ? a.sufferScore : undefined,
+                pace: pace != null ? pace : ""
             });
-        }
-        return JSON.stringify(out);
+        } catch (e) {}
     }
 
-    // Fallback: capture unavailable — scrape the rendered table (date-only).
-    var q = function(el, sel) { var e = el.querySelector(sel); return e ? e.textContent.trim() : ""; };
-    var rows = document.querySelectorAll("tr.training-activity-row");
-    var activities = [];
-    var seen2 = {};
-    for (var r = 0; r < rows.length; r++) {
-        var row = rows[r];
-        var link = row.querySelector('a[data-field-name="name"]');
-        if (!link) continue;
-        var href = link.getAttribute("href") || "";
-        var idm = href.match(/\/activities\/(\d+)/);
-        if (!idm || seen2[idm[1]]) continue;
-        seen2[idm[1]] = true;
-        activities.push({
-            id: idm[1],
-            name: q(row, 'a[data-field-name="name"]'),
-            type: q(row, 'td[data-field-name="sport_type"]'),
-            date: q(row, "td.col-date"),
-            time: q(row, 'td[data-field-name="time"]'),
-            distance: q(row, "td.col-dist"),
-            elevation: q(row, "td.col-elev"),
-            suffer_score: q(row, "td.col-suffer-score")
-        });
+    for (var k in captures) {
+        if (!/graph_date_range/.test(k)) continue;
+        try {
+            var entry = captures[k];
+            if (!entry || (entry.status != null && entry.status !== 200)) continue;
+            var html = extractIntervalHtml(entry.body);
+            if (!html) continue;
+            var entries = entriesFromHtml(html);
+            for (var i = 0; i < entries.length; i++) {
+                pushEntry(entries[i]);
+            }
+        } catch (e) {}
     }
-    return JSON.stringify(activities);
+
+    return JSON.stringify(out);
 })()
 '''
 
 [list_page.pagination]
-# Drive Strava's training-log list XHR directly with `&page={page}` instead of
-# clicking a "next page" button the page no longer exposes. The same-origin fetch
-# reuses the session cookies + CSRF, so a deep `after` (e.g. "my 2022 races")
-# pages back year by year — ~20 activities/page — until it crosses the window.
-url_template = "https://www.strava.com/athlete/training_activities?keywords=&sport_type=&tags=&commute=&private_activities=&trainer=&gear=&new_activity_only=false&page={page}"
+# Walk Strava's training LOG a calendar month at a time via the same-origin
+# `graph_date_range` XHR. The `{interval}` placeholder (presence => interval mode
+# in the scraper) is `YYYYMM`; `{year_offset}` is how many years back that month
+# sits from now; `{athlete_id}` is the logged-in numeric id resolved at scrape
+# time. Each response carries that month's activities in a `#interval-rides`
+# React feed (granular sport `type` + real UTC `startDate`), so a deep `after`
+# (e.g. "my 2022 races") is reached in ~12 fetches a year instead of ~100
+# `&page=N` list pages — fast enough to finish before a serverless instance is
+# reclaimed. The js_extract above reads these captures.
+url_template = "https://www.strava.com/athletes/{athlete_id}/graph_date_range?chart_type=miles&interval_type=month&interval={interval}&year_offset={year_offset}"
 
 [list_page.fields]
 name = 'a[data-field-name="name"]'

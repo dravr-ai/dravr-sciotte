@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use chromiumoxide::browser::Browser;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDateTime, Utc};
 use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::time::{self, Instant};
@@ -833,11 +833,23 @@ impl ActivityScraper for ChromeScraper {
 
         check_session_redirect(&page, &self.provider).await?;
 
+        // Numeric athlete id for the `/athletes/{id}/graph_date_range` interval
+        // scrape (Strava training-log). `None` for providers/pages that don't
+        // expose it — the interval path then yields nothing; the page-based and
+        // click paths don't use it, so they are unaffected.
+        let athlete_id = resolve_athlete_id(&page).await;
+        if let Some(id) = &athlete_id {
+            info!(athlete_id = %id, "Resolved athlete id");
+        } else {
+            debug!("Athlete id unresolved (non-interval provider or page)");
+        }
+
         let target_count = params.limit.unwrap_or(20) as usize;
         let js = self.provider.list_extraction_js();
         let mut all_items = paginate_activity_list(
             &page,
             &js,
+            athlete_id.as_deref(),
             params,
             self.provider.list_page.pagination.as_ref(),
             self.config.max_scrape_pages,
@@ -2593,6 +2605,63 @@ fn deduplicate_by_id(items: &mut Vec<serde_json::Value>) {
     });
 }
 
+/// A year-month cursor driving Strava's training-log interval navigation.
+///
+/// The training log pages activities a month at a time via
+/// `graph_date_range?interval_type=month&interval=YYYYMM&year_offset=N`, where
+/// `year_offset` is how many calendar years back the interval's year sits from
+/// the current year. Stepping the cursor back one month at a time walks the
+/// reverse-chronological history a whole month per request (~12 fetches a year)
+/// instead of ~20 activities per page — so a deep historical window is reached
+/// in a dozen same-origin fetches rather than a hundred Chrome pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IntervalCursor {
+    year: i32,
+    month: u32,
+}
+
+impl IntervalCursor {
+    /// Cursor for the calendar month containing `dt`.
+    fn containing(dt: DateTime<Utc>) -> Self {
+        Self {
+            year: dt.year(),
+            month: dt.month(),
+        }
+    }
+
+    /// Strava's `interval` value for `interval_type=month`: `YYYYMM`.
+    fn interval_param(self) -> String {
+        format!("{:04}{:02}", self.year, self.month)
+    }
+
+    /// `year_offset` = current calendar year − this interval's year (never negative).
+    fn year_offset(self, now_year: i32) -> u32 {
+        u32::try_from(now_year - self.year).unwrap_or(0)
+    }
+
+    /// The previous calendar month (rolls the year over at January).
+    fn prev_month(self) -> Self {
+        if self.month <= 1 {
+            Self {
+                year: self.year - 1,
+                month: 12,
+            }
+        } else {
+            Self {
+                year: self.year,
+                month: self.month - 1,
+            }
+        }
+    }
+
+    /// Whether this month sits entirely before `after`'s month — i.e. stepping
+    /// back to it would only surface activities older than the requested window,
+    /// so the date-bounded walk can stop.
+    fn is_before_month_of(self, after: DateTime<Utc>) -> bool {
+        (self.year, self.month) < (after.year(), after.month())
+    }
+}
+
 /// Apply sport type, date range, and limit filters to an activity list
 /// Page through the reverse-chronological list feed, collecting raw JS rows
 /// until [`scrape_window_satisfied`] reports the request is covered (or the
@@ -2609,6 +2678,7 @@ fn deduplicate_by_id(items: &mut Vec<serde_json::Value>) {
 async fn paginate_activity_list(
     page: &chromiumoxide::Page,
     js: &str,
+    athlete_id: Option<&str>,
     params: &ActivityParams,
     pagination: Option<&ListPagination>,
     max_scrape_pages: u32,
@@ -2618,6 +2688,27 @@ async fn paginate_activity_list(
     // directly so a deep `after` pages back years. Falls through to the legacy
     // "next page" button click for providers without a pagination config.
     if let Some(pagination) = pagination {
+        // Interval mode (Strava training-log): the url_template carries the
+        // `{interval}` placeholder and the scrape walks a calendar month at a
+        // time via `graph_date_range` — a dozen fetches reach a deep year vs ~100
+        // `&page=N` pages, so the walk completes before a serverless instance is
+        // reclaimed. Needs the numeric athlete id for the `/athletes/{id}/` URL.
+        if pagination.url_template.contains("{interval}") {
+            let Some(aid) = athlete_id else {
+                warn!("interval url_template configured but athlete id unresolved — no activities");
+                return Vec::new();
+            };
+            return paginate_via_interval(
+                page,
+                js,
+                aid,
+                params,
+                pagination,
+                max_scrape_pages,
+                interaction_delay_ms,
+            )
+            .await;
+        }
         return paginate_via_fetch(
             page,
             js,
@@ -2916,6 +3007,220 @@ async fn paginate_via_fetch(
     })
 }
 
+/// Page-context JS that reports the logged-in athlete's numeric id, trying the
+/// places Strava embeds it, in order of reliability. Returns a JSON string
+/// (`{"id":"12345"}` or `{"id":null}`) — `evaluate` marshals through a string.
+const ATHLETE_ID_JS: &str = r#"(function() {
+    function digits(s) { var m = s && s.match(/(\d{3,})/); return m ? m[1] : null; }
+    var id = null;
+    var el = document.querySelector('[data-athlete-id]');
+    if (el) { id = digits(el.getAttribute('data-athlete-id')); }
+    if (!id) {
+        try {
+            if (window.pageView && typeof window.pageView.currentAthlete === 'function') {
+                var a = window.pageView.currentAthlete();
+                if (a && a.get) { id = digits(String(a.get('id'))); }
+                else if (a && a.id) { id = digits(String(a.id)); }
+            }
+        } catch (e) {}
+    }
+    if (!id) {
+        var link = document.querySelector('a[href*="/athletes/"]');
+        if (link) { id = digits(link.getAttribute('href')); }
+    }
+    if (!id) { id = digits(window.location.pathname); }
+    return JSON.stringify({ id: id });
+})()"#;
+
+/// Resolve the authenticated athlete's numeric id from an already-loaded,
+/// cookie-authenticated Strava page. `None` if no source on the page exposes it
+/// (the caller then has no `graph_date_range` interval path and returns nothing).
+async fn resolve_athlete_id(page: &chromiumoxide::Page) -> Option<String> {
+    let result = page.evaluate(ATHLETE_ID_JS).await.ok()?;
+    let json_str = result.value().and_then(|v| v.as_str().map(String::from))?;
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    let id = parsed.get("id")?.as_str()?.to_owned();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// One fetched training-log interval (a single month) summarized in-page: just
+/// the count of `Activity` entries the `graph_date_range` body carries. The raw
+/// body is stashed into `window.__dravrCaptures` for the final `js_extract`, so
+/// only the cheap count crosses the CDP bridge each iteration (mirroring
+/// [`fetch_list_page`]).
+///
+/// Unlike the list XHR (`{models:[...]}` JSON), `graph_date_range` returns an
+/// HTML-escaped JS blob; an activity row shows up as the escaped marker
+/// `&quot;entity&quot;:&quot;Activity&quot;`, so the count is the number of
+/// occurrences of that literal in the raw body. Returns `None` on a
+/// transport/HTTP error so the caller can end pagination with what it has.
+async fn fetch_interval_page(page: &chromiumoxide::Page, url: &str) -> Option<usize> {
+    let url_lit = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_owned());
+    let js = format!(
+        r#"(async function() {{
+            const url = {url_lit};
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            const csrf = meta ? meta.content : '';
+            const ctrl = new AbortController();
+            const timer = setTimeout(function() {{ ctrl.abort(); }}, 20000);
+            try {{
+                const resp = await fetch(url, {{
+                    credentials: 'same-origin',
+                    signal: ctrl.signal,
+                    headers: {{
+                        'x-requested-with': 'XMLHttpRequest',
+                        'x-csrf-token': csrf,
+                        'accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
+                    }}
+                }});
+                clearTimeout(timer);
+                if (!resp.ok) return JSON.stringify({{ error: 'http ' + resp.status }});
+                const body = await resp.text();
+                window.__dravrCaptures = window.__dravrCaptures || {{}};
+                window.__dravrCaptures[url] = {{ status: resp.status, body: body }};
+                const marker = '&quot;entity&quot;:&quot;Activity&quot;';
+                const count = body.split(marker).length - 1;
+                return JSON.stringify({{ count: count }});
+            }} catch (err) {{
+                clearTimeout(timer);
+                return JSON.stringify({{ error: String(err) }});
+            }}
+        }})()"#
+    );
+
+    let result = match time::timeout(Duration::from_secs(30), page.evaluate(js)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            warn!(error = %e, url, "Interval page fetch evaluate failed");
+            return None;
+        }
+        Err(_) => {
+            warn!(url, "Interval page fetch evaluate timed out (30s)");
+            return None;
+        }
+    };
+    let body = result.value().and_then(|v| v.as_str().map(String::from))?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
+        warn!(url, error = err, "Interval page fetch returned an error");
+        return None;
+    }
+    let count = parsed
+        .get("count")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|c| usize::try_from(c).ok())
+        .unwrap_or(0);
+    Some(count)
+}
+
+/// Page the activity history by walking Strava's training-log a calendar month
+/// at a time via `graph_date_range`, instead of fetching `&page=N` of the
+/// reverse-chronological list feed. A deep `after` is reached in ~12 fetches a
+/// year rather than ~100 list pages — fast enough to complete before a
+/// serverless instance is reclaimed.
+///
+/// Each month is fetched same-origin (cookies + CSRF) and stashed into
+/// `window.__dravrCaptures` by [`fetch_interval_page`]; the provider's
+/// `js_extract` then maps the accumulated months, exactly like
+/// [`paginate_via_fetch`]. The Rust loop owns the stop decision, stepping the
+/// [`IntervalCursor`] back one month per request.
+async fn paginate_via_interval(
+    page: &chromiumoxide::Page,
+    js: &str,
+    athlete_id: &str,
+    params: &ActivityParams,
+    pagination: &ListPagination,
+    max_scrape_pages: u32,
+    interaction_delay_ms: u64,
+) -> Vec<serde_json::Value> {
+    const ATHLETE_PLACEHOLDER: &str = "{athlete_id}";
+    const INTERVAL_PLACEHOLDER: &str = "{interval}";
+    const YEAR_OFFSET_PLACEHOLDER: &str = "{year_offset}";
+
+    let max_months = max_scrape_pages.max(1);
+    let target_count = params.limit.unwrap_or(20) as usize;
+    let now_year = Utc::now().year();
+    let date_bounded = params.after.is_some();
+
+    let mut cursor = IntervalCursor::containing(params.before.unwrap_or_else(Utc::now));
+    let mut collected: usize = 0;
+    let mut months_done: u32 = 0;
+
+    info!(
+        start_month = cursor.interval_param(),
+        max_months, date_bounded, "Starting interval-based (month-at-a-time) list pagination"
+    );
+
+    loop {
+        let interval = cursor.interval_param();
+        let url = pagination
+            .url_template
+            .replace(ATHLETE_PLACEHOLDER, athlete_id)
+            .replace(INTERVAL_PLACEHOLDER, &interval)
+            .replace(
+                YEAR_OFFSET_PLACEHOLDER,
+                &cursor.year_offset(now_year).to_string(),
+            );
+
+        let mut count = fetch_interval_page(page, &url).await;
+        if count.is_none() {
+            warn!(month = %interval, "Interval page fetch failed; retrying once");
+            count = fetch_interval_page(page, &url).await;
+        }
+        let Some(count) = count else {
+            warn!(
+                month = %interval,
+                collected, "Interval page fetch failed twice — stopping with partial results"
+            );
+            break;
+        };
+        months_done += 1;
+        collected += count;
+
+        info!(month = %interval, count, collected, "interval month fetched");
+
+        // Date-bounded: we just fetched the month at/after `after`, so stepping
+        // back would only surface older activities. Count-bounded: `limit` rows
+        // are in hand. `max_months` backstops a runaway walk.
+        if let Some(after) = params.after {
+            if cursor.prev_month().is_before_month_of(after) {
+                break;
+            }
+        } else if collected >= target_count {
+            break;
+        }
+        if months_done >= max_months {
+            warn!(
+                months_done,
+                max_months,
+                collected,
+                "Reached max scrape pages — stopping interval pagination (window may be incomplete)"
+            );
+            break;
+        }
+
+        cursor = cursor.prev_month();
+        time::sleep(Duration::from_millis(interaction_delay_ms * 3)).await;
+    }
+
+    info!(
+        months_done,
+        collected, "Interval pagination complete; mapping accumulated months"
+    );
+
+    // Map every accumulated month via the provider's js_extract (it reads the
+    // graph_date_range captures the fetches stashed). Returns the raw,
+    // still-undeduplicated rows; the caller dedupes, parses, and filters.
+    extract_via_js(page, js).await.unwrap_or_else(|e| {
+        warn!(error = %e, "Final list extraction after interval pagination failed");
+        Vec::new()
+    })
+}
+
 fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParams) {
     if let Some(ref sport) = params.sport_type {
         let sport_lower = sport.to_lowercase();
@@ -3071,6 +3376,51 @@ fn parse_speed_string(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+
+    fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).single().unwrap()
+    }
+
+    #[test]
+    fn interval_cursor_param_and_offset() {
+        let c = IntervalCursor::containing(at(2022, 6, 15));
+        assert_eq!(c.interval_param(), "202206");
+        assert_eq!(c.year_offset(2026), 4);
+        // Same-year interval => offset 0; future-year clamps to 0 (never negative).
+        assert_eq!(
+            IntervalCursor::containing(at(2026, 1, 1)).year_offset(2026),
+            0
+        );
+        assert_eq!(
+            IntervalCursor::containing(at(2027, 1, 1)).year_offset(2026),
+            0
+        );
+    }
+
+    #[test]
+    fn interval_cursor_steps_back_a_month_and_rolls_the_year() {
+        let jan = IntervalCursor::containing(at(2022, 1, 10));
+        assert_eq!(jan.interval_param(), "202201");
+        let dec_prev = jan.prev_month();
+        assert_eq!(dec_prev, IntervalCursor::containing(at(2021, 12, 1)));
+        assert_eq!(dec_prev.interval_param(), "202112");
+        // Mid-year step is a plain decrement.
+        assert_eq!(
+            IntervalCursor::containing(at(2022, 7, 1))
+                .prev_month()
+                .interval_param(),
+            "202206"
+        );
+    }
+
+    #[test]
+    fn interval_cursor_stops_below_the_after_month() {
+        let after = at(2022, 1, 1);
+        // Walking back from Dec 2022 stays in-window until it crosses Jan 2022.
+        assert!(!IntervalCursor::containing(at(2022, 1, 31)).is_before_month_of(after));
+        assert!(IntervalCursor::containing(at(2021, 12, 31)).is_before_month_of(after));
+    }
 
     #[test]
     fn parse_duration() {
