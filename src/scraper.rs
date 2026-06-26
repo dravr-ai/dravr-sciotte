@@ -3357,8 +3357,35 @@ fn normalize_decimal(s: &str) -> String {
     }
 }
 
-/// Parse distance strings like "5.2 km", "5,41 km" (fr), or "3.1 mi" into meters
+/// Strip HTML tags from a scraped stat value.
+///
+/// Strava's training-log interval feed wraps the unit in an `<abbr>` tag, e.g.
+/// `"8,19<abbr class='unit' title='kilomètres'> km</abbr>"`. The tags — and
+/// their attribute text, which carries the localized unit word
+/// ("kilomètres"/"miles") — would otherwise defeat numeric parsing and mislead
+/// unit detection. The visible unit (" km") sits OUTSIDE the tags, so stripping
+/// only the `<...>` spans leaves a clean `"8,19 km"` the parsers handle. A value
+/// with no tags is returned unchanged.
+fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Parse distance strings like "5.2 km", "5,41 km" (fr), or "3.1 mi" into meters.
+///
+/// Tolerates the interval feed's `<abbr>`-wrapped values (e.g.
+/// `"8,19<abbr class='unit'> km</abbr>"`) by stripping HTML tags first.
 fn parse_distance_string(s: &str) -> Option<f64> {
+    let s = strip_html_tags(s);
     let s = s.trim().to_lowercase();
 
     if s.contains("km") {
@@ -3619,6 +3646,26 @@ mod tests {
         let fr = parse_distance_string("1 250,5 km").unwrap();
         assert!((en - 1_250_500.0).abs() < 1.0, "en grouped: {en}");
         assert!((fr - en).abs() < 1.0, "fr {fr} must equal en {en}");
+
+        // The training-log INTERVAL feed wraps the unit in an <abbr> tag (real
+        // captured value). Without stripping the HTML the parse failed and the
+        // fr-comma was dropped, yielding 819 m for an 8.19 km run (shown as
+        // "0.02 km" on Telegram). Must now be 8190 m.
+        let d =
+            parse_distance_string("8,19<abbr class='unit' title='kilomètres'> km</abbr>").unwrap();
+        assert!((d - 8190.0).abs() < 1.0, "abbr-wrapped fr km: got {d}");
+        // Same shape with a miles athlete must use the mi factor, not km.
+        let d = parse_distance_string("15.4<abbr class='unit' title='miles'> mi</abbr>").unwrap();
+        assert!((d - 24_783.9).abs() < 1.0, "abbr-wrapped mi: got {d}");
+    }
+
+    #[test]
+    fn strip_html_tags_keeps_text_drops_tags() {
+        assert_eq!(
+            strip_html_tags("8,19<abbr class='unit' title='kilomètres'> km</abbr>"),
+            "8,19 km"
+        );
+        assert_eq!(strip_html_tags("no tags here"), "no tags here");
     }
 
     #[test]

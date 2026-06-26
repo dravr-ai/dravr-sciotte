@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.8] — 2026-06-26
+
+### Fixed
+
+- scraper: strip HTML tags from scraped distance values before parsing. Strava's
+  training-log interval feed (`graph_date_range`) wraps the unit in an `<abbr>`
+  tag, e.g. `"8,19<abbr class='unit' title='kilomètres'> km</abbr>"`. The tags
+  (and their `title` text, which carries the localized unit word) broke
+  `parse_distance_string` — the numeric `.parse()` failed on the HTML, fell back
+  to a digit-only filter that dropped the fr-comma, and yielded `819` m for an
+  8.19 km run (rendered "0.02 km" downstream). `parse_distance_string` now
+  strips `<…>` spans first, recovering the clean `"8,19 km"` → 8190 m. The
+  visible unit text sits outside the tags, so km/mi detection still works.
+
 ## [0.7.6] — 2026-06-19
 
 ### Changed
