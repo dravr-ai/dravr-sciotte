@@ -111,6 +111,55 @@ impl SportType {
         }
     }
 
+    /// Parse a Garmin Connect `activityType.typeKey` into a `SportType`.
+    ///
+    /// Garmin emits lowercase snake-case keys (`trail_running`, `gravel_cycling`,
+    /// `lap_swimming`, …) that the Strava parser leaves as `Other` (the two
+    /// vocabularies are disjoint), so callers can try [`Self::from_strava`] first
+    /// and fall back here. Unknown keys preserve the raw string as `Other`.
+    #[must_use]
+    pub fn from_garmin(type_key: &str) -> Self {
+        match type_key.trim() {
+            "running" | "street_running" | "track_running" | "obstacle_run" => Self::Run,
+            "treadmill_running" | "indoor_running" | "virtual_run" => Self::VirtualRun,
+            "trail_running" | "ultra_running" => Self::TrailRunning,
+            "cycling" | "road_biking" | "road_cycling" | "commuting" => Self::Ride,
+            "mountain_biking" | "downhill_biking" | "cyclocross" => Self::MountainBike,
+            "gravel_cycling" | "gravel_unpaved_cycling" => Self::GravelRide,
+            "indoor_cycling" | "virtual_ride" => Self::VirtualRide,
+            "e_bike_fitness" | "e_bike_mountain" | "ebiking" => Self::EbikeRide,
+            "walking" | "casual_walking" | "speed_walking" => Self::Walk,
+            "hiking" | "rucking" => Self::Hike,
+            "lap_swimming" | "open_water_swimming" | "swimming" => Self::Swim,
+            "cross_country_skiing"
+            | "cross_country_skiing_ws"
+            | "skate_skiing_ws"
+            | "classic_skiing_ws"
+            | "skating_cross_country_ws" => Self::CrossCountrySkiing,
+            "resort_skiing" | "resort_skiing_snowboarding_ws" => Self::AlpineSkiing,
+            "backcountry_skiing" | "backcountry_skiing_snowboarding_ws" | "skiing_touring" => {
+                Self::BackcountrySkiing
+            }
+            "snowboarding" | "resort_snowboarding_ws" => Self::Snowboarding,
+            "snowshoeing" | "snow_shoe" | "snow_shoe_ws" => Self::Snowshoe,
+            "skating" | "inline_skating" => Self::InlineSkating,
+            "kayaking" | "kayaking_ws" | "whitewater_rafting_kayaking" => Self::Kayaking,
+            "canoeing" | "canoeing_ws" => Self::Canoeing,
+            "rowing" | "indoor_rowing" | "rowing_ws" => Self::Rowing,
+            "stand_up_paddleboarding" | "stand_up_paddleboarding_ws" => Self::Paddleboarding,
+            "surfing" | "surfing_ws" => Self::Surfing,
+            "kitesurfing" | "kiteboarding_ws" => Self::Kitesurfing,
+            "strength_training" | "indoor_cardio" | "fitness_equipment" => Self::StrengthTraining,
+            "yoga" | "pilates" => Self::Yoga,
+            "rock_climbing" | "bouldering" | "mountaineering" => Self::RockClimbing,
+            "tennis" => Self::Tennis,
+            "golf" => Self::Golf,
+            "soccer" => Self::Soccer,
+            "basketball" => Self::Basketball,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
     /// Human-readable display name
     #[must_use]
     pub const fn display_name(&self) -> &'static str {
@@ -668,6 +717,36 @@ mod tests {
         assert_eq!(
             SportType::from_strava("Unknown"),
             SportType::Other("Unknown".to_owned())
+        );
+    }
+
+    #[test]
+    fn sport_type_from_garmin() {
+        // Garmin lowercase snake_case typeKeys map to the same variants Strava
+        // CamelCase reaches — these are jf's real scraped keys.
+        assert_eq!(
+            SportType::from_garmin("trail_running"),
+            SportType::TrailRunning
+        );
+        assert_eq!(
+            SportType::from_garmin("gravel_cycling"),
+            SportType::GravelRide
+        );
+        assert_eq!(
+            SportType::from_garmin("mountain_biking"),
+            SportType::MountainBike
+        );
+        assert_eq!(SportType::from_garmin("walking"), SportType::Walk);
+        assert_eq!(SportType::from_garmin("hiking"), SportType::Hike);
+        assert_eq!(SportType::from_garmin("lap_swimming"), SportType::Swim);
+        assert_eq!(
+            SportType::from_garmin("cross_country_skiing"),
+            SportType::CrossCountrySkiing
+        );
+        // Unknown keys preserve the raw string.
+        assert_eq!(
+            SportType::from_garmin("quidditch"),
+            SportType::Other("quidditch".to_owned())
         );
     }
 

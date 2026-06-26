@@ -1952,6 +1952,7 @@ async fn extract_via_js(
         })?;
 
     let json_str = result.value().and_then(|v| v.as_str()).unwrap_or("[]");
+    debug!(raw = %json_str, "js_extract raw result");
 
     serde_json::from_str(json_str).map_err(|e| ScraperError::Scraping {
         reason: format!("Failed to parse JS result: {e}"),
@@ -2206,7 +2207,14 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
         sport_type: if sport_type_str.is_empty() {
             SportType::Other("Unknown".to_owned())
         } else {
-            SportType::from_strava(sport_type_str)
+            // Strava CamelCase vocabulary first; Garmin emits disjoint snake_case
+            // typeKeys (trail_running, gravel_cycling, …), so fall back to the
+            // Garmin mapper when Strava leaves it Other. The raw key survives only
+            // when neither vocabulary recognizes it.
+            match SportType::from_strava(sport_type_str) {
+                SportType::Other(_) => SportType::from_garmin(sport_type_str),
+                mapped => mapped,
+            }
         },
         start_date,
         duration_seconds,
@@ -2267,7 +2275,10 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
         name: data["name"].as_str().unwrap_or("Untitled").to_owned(),
         sport_type: data["type"].as_str().map_or_else(
             || SportType::Other("Unknown".to_owned()),
-            SportType::from_strava,
+            |s| match SportType::from_strava(s) {
+                SportType::Other(_) => SportType::from_garmin(s),
+                mapped => mapped,
+            },
         ),
         start_date: data["date"]
             .as_str()
@@ -2299,7 +2310,13 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
             .or_else(|| data["elapsed_time"].as_str())
             .and_then(parse_duration_string)
             .unwrap_or(0),
-        distance_meters: data["distance"].as_str().and_then(parse_distance_string),
+        // Garmin's detail js_extract emits `distance` as a bare number (meters);
+        // Strava emits a unit-bearing display string. Try the string parser first,
+        // then fall back to the raw numeric so the Garmin detail path keeps it.
+        distance_meters: data["distance"]
+            .as_str()
+            .and_then(parse_distance_string)
+            .or_else(|| json_field_f64(&data["distance"])),
         elevation_gain: data["elevation"]
             .as_str()
             .and_then(|e| e.replace([',', ' '], "").trim().parse().ok()),

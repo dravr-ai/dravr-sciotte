@@ -33,7 +33,22 @@ id_regex = '/\/activity\/(\d+)/'
 # instead of DOM scraping. The list endpoint is captured during hydration.
 js_extract = '''
 (function() {
-    var captures = window.__dravrCaptures || {};
+    // dravr-browser nests captured XHRs under `.byUrl` (with a `.last` pointer);
+    // older/explicit-fetch entries sit flat at the top level. Merge both so this
+    // extract finds the captured response regardless of capture-map shape.
+    var __raw = window.__dravrCaptures || {};
+    var captures = {};
+    if (__raw.byUrl) { for (var __cu in __raw.byUrl) { captures[__cu] = __raw.byUrl[__cu]; } }
+    for (var __ck in __raw) { if (__ck !== "byUrl" && __ck !== "last") { captures[__ck] = __raw[__ck]; } }
+    // dravr-browser stores the response body as `chunks: [string,...]` (+ a `done`
+    // flag), not `.body`; the explicit-fetch path still writes flat `.body`. Read
+    // either shape so this extract works regardless of how the entry was captured.
+    function captureBody(e) {
+        if (!e) return null;
+        if (e.body != null) return e.body;
+        if (Array.isArray(e.chunks)) return e.chunks.join("");
+        return null;
+    }
 
     // Find the activity-search endpoint — we look for the canonical list call
     // and pick the most recent (highest entry index in the captures map).
@@ -64,7 +79,7 @@ js_extract = '''
     }
 
     var rows;
-    try { rows = JSON.parse(listEntry.body); }
+    try { rows = JSON.parse(captureBody(listEntry)); }
     catch (e) { return JSON.stringify([{__debug: "list parse failed", message: String(e)}]); }
 
     // Garmin returns either an array directly or {activityList: [...]}.
@@ -152,7 +167,22 @@ js_extract = '''
     // before invoking this script that the captures are already in place —
     // a busy-loop here would block the JS event loop and prevent fetches
     // from resolving in the first place.
-    var captures = window.__dravrCaptures || {};
+    // dravr-browser nests captured XHRs under `.byUrl` (with a `.last` pointer);
+    // older/explicit-fetch entries sit flat at the top level. Merge both so this
+    // extract finds the captured response regardless of capture-map shape.
+    var __raw = window.__dravrCaptures || {};
+    var captures = {};
+    if (__raw.byUrl) { for (var __cu in __raw.byUrl) { captures[__cu] = __raw.byUrl[__cu]; } }
+    for (var __ck in __raw) { if (__ck !== "byUrl" && __ck !== "last") { captures[__ck] = __raw[__ck]; } }
+    // dravr-browser stores the response body as `chunks: [string,...]` (+ a `done`
+    // flag), not `.body`; the explicit-fetch path still writes flat `.body`. Read
+    // either shape so this extract works regardless of how the entry was captured.
+    function captureBody(e) {
+        if (!e) return null;
+        if (e.body != null) return e.body;
+        if (Array.isArray(e.chunks)) return e.chunks.join("");
+        return null;
+    }
 
     // Garmin's /app/ split the activity detail across multiple endpoints —
     // collect the main one (no path suffix after the ID) plus splits/laps
@@ -164,7 +194,7 @@ js_extract = '''
     var typedSplitsCapture = null;
     var idMarker = "/activity-service/activity/" + id;
 
-    function bodyOk(c) { return c && c.status === 200 && c.body; }
+    function bodyOk(c) { return c && c.status === 200 && captureBody(c); }
 
     for (var k in captures) {
         if (k.indexOf(idMarker) < 0) continue;
@@ -192,24 +222,24 @@ js_extract = '''
             error: "main capture non-2xx",
             status: captureEntry.status,
             url: captureKey,
-            body: (captureEntry.body || "").slice(0, 300)
+            body: (captureBody(captureEntry) || "").slice(0, 300)
         });
     }
 
     var api;
-    try { api = JSON.parse(captureEntry.body); }
+    try { api = JSON.parse(captureBody(captureEntry)); }
     catch (e) { return JSON.stringify({error: "parse failed", message: String(e)}); }
 
     // Fold splits/laps captures into api_raw so the OAuth deserializer sees
     // the full provider DTO surface from a single response.
     if (bodyOk(splitsCapture)) {
-        try { api.splits_response = JSON.parse(splitsCapture.body); } catch (e) {}
+        try { api.splits_response = JSON.parse(captureBody(splitsCapture)); } catch (e) {}
     }
     if (bodyOk(typedSplitsCapture)) {
-        try { api.typed_splits_response = JSON.parse(typedSplitsCapture.body); } catch (e) {}
+        try { api.typed_splits_response = JSON.parse(captureBody(typedSplitsCapture)); } catch (e) {}
     }
     if (bodyOk(lapsCapture)) {
-        try { api.laps_response = JSON.parse(lapsCapture.body); } catch (e) {}
+        try { api.laps_response = JSON.parse(captureBody(lapsCapture)); } catch (e) {}
     }
 
     // Normalize Garmin camelCase DTOs to Strava-style snake_case so the

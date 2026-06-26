@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.9] — 2026-06-26
+
+### Fixed
+
+- garmin: restore activity-list + detail capture broken by the dravr-browser
+  consolidation. The injected capture payload now nests responses under
+  `__dravrCaptures.byUrl` (with a `.last` pointer) and stores the body as
+  `chunks: [string]` rather than the old flat `{[url]: {status, body}}` map.
+  Garmin's `js_extract` relies on the passive hydration capture, so it silently
+  read an empty map and scraped 0 activities; Strava was unaffected because it
+  explicitly fetch+stashes into the flat top level. Both Garmin extract blocks
+  now merge the `.byUrl` + flat shapes and read the body via `chunks.join("")`.
+
+### Added
+
+- `SportType::from_garmin` maps Garmin's lowercase snake-case `typeKey`
+  (`trail_running`, `gravel_cycling`, `mountain_biking`, `lap_swimming`, …) to
+  the shared sport variants. The list + detail builders try `from_strava` first
+  and fall back to `from_garmin`, so Garmin activities no longer all bucket as
+  `Other`. The detail builder also reads `distance` via a numeric fallback
+  (Garmin emits a bare-number meters field where Strava emits a unit string).
+
 ## [0.7.8] — 2026-06-26
 
 ### Fixed
