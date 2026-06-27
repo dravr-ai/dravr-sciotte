@@ -3440,7 +3440,7 @@ mod tests {
     use chrono::TimeZone;
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).single().unwrap()
+        Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).single().unwrap() // Safe: test fixture
     }
 
     #[test]
@@ -3654,13 +3654,13 @@ mod tests {
 
         // European comma-decimal (Strava renders fr/de/es/pt this way). The
         // regression that prompted this: "5,41 km" must be 5410 m, NOT 541000.
-        let d = parse_distance_string("5,41 km").unwrap();
+        let d = parse_distance_string("5,41 km").unwrap(); // Safe: test with valid distance string
         assert!((d - 5410.0).abs() < 1.0, "comma-decimal km: got {d}");
-        let d = parse_distance_string("12,07 km").unwrap();
+        let d = parse_distance_string("12,07 km").unwrap(); // Safe: test with valid distance string
         assert!((d - 12070.0).abs() < 1.0, "comma-decimal km: got {d}");
         // Grouped + decimal, both locales, must agree (1250.5 km).
-        let en = parse_distance_string("1,250.5 km").unwrap();
-        let fr = parse_distance_string("1 250,5 km").unwrap();
+        let en = parse_distance_string("1,250.5 km").unwrap(); // Safe: test with valid distance string
+        let fr = parse_distance_string("1 250,5 km").unwrap(); // Safe: test with valid distance string
         assert!((en - 1_250_500.0).abs() < 1.0, "en grouped: {en}");
         assert!((fr - en).abs() < 1.0, "fr {fr} must equal en {en}");
 
@@ -3669,10 +3669,10 @@ mod tests {
         // fr-comma was dropped, yielding 819 m for an 8.19 km run (shown as
         // "0.02 km" on Telegram). Must now be 8190 m.
         let d =
-            parse_distance_string("8,19<abbr class='unit' title='kilomètres'> km</abbr>").unwrap();
+            parse_distance_string("8,19<abbr class='unit' title='kilomètres'> km</abbr>").unwrap(); // Safe: test with valid distance string
         assert!((d - 8190.0).abs() < 1.0, "abbr-wrapped fr km: got {d}");
         // Same shape with a miles athlete must use the mi factor, not km.
-        let d = parse_distance_string("15.4<abbr class='unit' title='miles'> mi</abbr>").unwrap();
+        let d = parse_distance_string("15.4<abbr class='unit' title='miles'> mi</abbr>").unwrap(); // Safe: test with valid distance string
         assert!((d - 24_783.9).abs() < 1.0, "abbr-wrapped mi: got {d}");
     }
 
