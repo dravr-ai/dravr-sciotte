@@ -54,6 +54,12 @@ jobs:
   test-linux:
     name: Tests (Linux)
     runs-on: ubuntu-latest
+    # A flaky Chrome launch in the real-browser integration tests (chromiumoxide's
+    # CDP handshake has no per-launch timeout) can wedge the single-threaded suite.
+    # Without this bound the job runs to GitHub's 6-hour hard cap before failing; a
+    # warm run is ~2 min and a cold-cache rebuild ~10 min, so 15 fails a hang fast
+    # while leaving headroom for a legitimate cold build.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
