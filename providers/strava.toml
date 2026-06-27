@@ -147,7 +147,16 @@ js_extract = '''
             if (!id || seen[id]) return;
 
             var stats = a.stats;
-            var distance = statValueBySubtitle(stats, /distance/i);
+            // Prefer the activity's canonical numeric distance (meters), the same
+            // way `time` uses a.elapsedTime above. The formatted `stats` distance
+            // is locale-shaped and, in some interval-feed months, arrives as a
+            // bare number with no km/mi unit — which the Rust parser then keeps as
+            // km-treated-as-metres (the 2024 "0.0X km" bug). The numeric field is
+            // unit-unambiguous and immune to that. Fall back to the formatted stat
+            // only when the numeric field is absent (no regression for any year).
+            var distance = (typeof a.distance === "number")
+                ? a.distance
+                : statValueBySubtitle(stats, /distance/i);
             var pace = statValueBySubtitle(stats, /allure|pace/i);
             var elevation = statValueBySubtitle(stats, /dénivel|denivel|elevation/i);
 

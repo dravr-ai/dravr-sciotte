@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.10] — 2026-06-26
+
+### Fixed
+
+- strava: read the activity's canonical numeric `distance` (meters) from the
+  interval-feed entry instead of the formatted `stats` distance value. Some
+  graph_date_range months deliver that stat as a bare number with no km/mi unit
+  token, which `build_activity_from_js_item`'s parser then kept as
+  km-magnitude-treated-as-meters (the "0.0X km" bug on 2024 activities). The
+  numeric `a.distance` field is unit-unambiguous and locale-proof — the same
+  pattern the extract already uses for `a.elapsedTime`. Falls back to the
+  formatted stat only when the numeric field is absent (no regression for any
+  year). Validated live against a real 2024 Strava scrape.
+
 ## [0.7.9] — 2026-06-26
 
 ### Fixed
