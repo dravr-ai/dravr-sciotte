@@ -50,44 +50,48 @@ js_extract = '''
         return null;
     }
 
-    // Find the activity-search endpoint — we look for the canonical list call
-    // and pick the most recent (highest entry index in the captures map).
-    var listKey = null;
-    var listEntry = null;
+    // Find the activity-search endpoint(s). Offset pagination stashes one capture
+    // per page (each a different `start=` offset), so accumulate rows across EVERY
+    // matching activity-list capture rather than taking only the last — otherwise
+    // a deep historical scrape keeps just the final page. Downstream Rust dedupes
+    // by activity id, so overlap between pages is harmless.
+    var rows = [];
+    var sawList = false;
+    var anyOk = false;
+    var lastStatus = null;
     for (var k in captures) {
-        if (/\/activitylist-service\/activities\/search\/activities/.test(k) ||
-            /\/activitylist-service\/.*activities/.test(k)) {
-            listKey = k;
-            listEntry = captures[k];
+        if (!/\/activitylist-service\/activities\/search\/activities/.test(k) &&
+            !/\/activitylist-service\/.*activities/.test(k)) {
+            continue;
         }
+        sawList = true;
+        var entry = captures[k];
+        lastStatus = entry.status;
+        if (entry.status !== 200) continue;
+        var body = captureBody(entry);
+        if (!body) continue;
+        var parsed;
+        try { parsed = JSON.parse(body); }
+        catch (e) { continue; }
+        // Garmin returns either an array directly or {activityList: [...]}.
+        if (!Array.isArray(parsed) && parsed && Array.isArray(parsed.activityList)) {
+            parsed = parsed.activityList;
+        }
+        if (Array.isArray(parsed)) { rows = rows.concat(parsed); anyOk = true; }
     }
 
-    if (!listEntry) {
+    if (!sawList) {
         // Fall back to listing what we did capture so we can iterate
         return JSON.stringify([{
             __debug: "no activity-list capture",
             seen_urls: Object.keys(captures).slice(0, 30)
         }]);
     }
-
-    if (listEntry.status !== 200) {
+    if (!anyOk) {
         return JSON.stringify([{
-            __debug: "list capture non-2xx",
-            status: listEntry.status,
-            url: listKey
+            __debug: "list capture non-2xx or unparseable",
+            status: lastStatus
         }]);
-    }
-
-    var rows;
-    try { rows = JSON.parse(captureBody(listEntry)); }
-    catch (e) { return JSON.stringify([{__debug: "list parse failed", message: String(e)}]); }
-
-    // Garmin returns either an array directly or {activityList: [...]}.
-    if (!Array.isArray(rows) && rows && Array.isArray(rows.activityList)) {
-        rows = rows.activityList;
-    }
-    if (!Array.isArray(rows)) {
-        return JSON.stringify([{__debug: "list body not array", shape: typeof rows}]);
     }
 
     // Garmin emits SQL-style timestamps ("2026-04-27 14:25:46.0") on
@@ -127,6 +131,24 @@ js_extract = '''
     return JSON.stringify(activities);
 })()
 '''
+
+[list_page.pagination]
+# Garmin's /app/ React UI moved the activity list behind a GraphQL gateway, so it
+# no longer fires the REST `/activitylist-service` XHR the passive capture relied
+# on (→ 0 activities). Drive the REST list endpoint directly instead: it is still
+# live, same-origin on connect.garmin.com, and the gc-api gateway authenticates by
+# session cookie + a `connect-csrf-token` header (read from <meta name="csrf-token">,
+# which is server-rendered so it's readable the instant the page loads — no
+# hydration race) — NOT a Bearer. `start=` is a 0-based ROW offset (so page_step is
+# the page size, not 1), `limit=100` pulls a deep page per fetch, and the JSON
+# array response is stashed into window.__dravrCaptures for the js_extract above to
+# accumulate + map. Offset paging walks back through history until the `after`
+# window is satisfied.
+url_template = "https://connect.garmin.com/gc-api/activitylist-service/activities/search/activities?start={page}&limit=100"
+first_page = 0
+page_step = 100
+csrf_header = "connect-csrf-token"
+accept = "*/*"
 
 # Fields are unused when js_extract is set, but required by the schema
 [list_page.fields]

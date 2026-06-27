@@ -117,13 +117,43 @@ pub struct ListPagination {
     /// List XHR URL with a `{page}` placeholder. Fetched same-origin so the
     /// browser attaches the session cookies and CSRF automatically.
     pub url_template: String,
-    /// First page number (Strava is 1-based).
+    /// First page value (Strava is 1-based `&page=N`; Garmin's `start=` row
+    /// offset is 0-based).
     #[serde(default = "default_first_page")]
     pub first_page: u32,
+    /// Amount added to the page value between successive fetches. Strava pages by
+    /// `&page=N` so it steps by 1; Garmin's `start=` is a row offset so it steps
+    /// by the page size (e.g. 100). Defaults to 1 to preserve page-number paging.
+    #[serde(default = "default_page_step")]
+    pub page_step: u32,
+    /// Name of the request header carrying the CSRF token read from
+    /// `<meta name="csrf-token">`. Strava's gateway reads `x-csrf-token`; Garmin's
+    /// gc-api gateway requires `connect-csrf-token`. Defaults to `x-csrf-token` so
+    /// existing providers are unchanged.
+    #[serde(default = "default_csrf_header")]
+    pub csrf_header: String,
+    /// Value of the `Accept` request header. Strava's training-log XHR returns
+    /// `text/javascript`; Garmin's gc-api JSON wants `*/*`. Defaults to Strava's
+    /// JavaScript accept so existing providers are unchanged.
+    #[serde(default = "default_list_accept")]
+    pub accept: String,
 }
 
 const fn default_first_page() -> u32 {
     1
+}
+
+const fn default_page_step() -> u32 {
+    1
+}
+
+fn default_csrf_header() -> String {
+    "x-csrf-token".to_owned()
+}
+
+fn default_list_accept() -> String {
+    "text/javascript, application/javascript, application/ecmascript, application/x-ecmascript"
+        .to_owned()
 }
 
 /// CSS selectors for extracting fields from list page rows
@@ -371,5 +401,51 @@ js_extract = '(function() { return "{}"; })()'
         // `preFetchedEntries`, not the old `tr.training-activity-row` table.
         assert!(js.contains("preFetchedEntries"));
         assert!(js.contains("JSON.stringify"));
+    }
+
+    #[test]
+    fn parse_garmin_default_pagination() {
+        let config = ProviderConfig::garmin_default().unwrap(); // Safe: test fixture
+        assert_eq!(config.provider.name, "garmin");
+
+        // Garmin's /app/ UI no longer fires the REST list XHR, so the scrape
+        // drives the gc-api activity-list endpoint via offset pagination behind
+        // the CSRF gateway. Guard every field the scrape depends on.
+        let pg = config
+            .list_page
+            .pagination
+            .as_ref()
+            .expect("garmin must define list_page.pagination");
+        assert!(
+            pg.url_template
+                .contains("activitylist-service/activities/search/activities"),
+            "garmin pages the REST activity-list endpoint"
+        );
+        assert!(pg.url_template.contains("{page}"));
+        assert_eq!(pg.first_page, 0, "Garmin start= offset is 0-based");
+        assert_eq!(pg.page_step, 100, "start= steps by the page size, not 1");
+        assert_eq!(
+            pg.csrf_header, "connect-csrf-token",
+            "gc-api gateway requires connect-csrf-token, not a Bearer or x-csrf-token"
+        );
+        assert_eq!(pg.accept, "*/*", "gc-api JSON wants */*");
+    }
+
+    #[test]
+    fn strava_pagination_keeps_page_defaults() {
+        // The new ListPagination knobs must default to Strava's existing
+        // behavior so the working Strava path is untouched.
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
+        let pg = config
+            .list_page
+            .pagination
+            .as_ref()
+            .expect("strava defines list_page.pagination");
+        assert_eq!(pg.page_step, 1, "Strava pages by &page=N, step 1");
+        assert_eq!(pg.csrf_header, "x-csrf-token");
+        assert!(
+            pg.accept.contains("text/javascript"),
+            "Strava keeps its JavaScript Accept"
+        );
     }
 }

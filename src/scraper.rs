@@ -2826,38 +2826,64 @@ struct FetchedListPage {
 /// (so the provider `js_extract` later maps it like a passively captured XHR),
 /// and return a summary for the date-stop decision. Returns `None` on a
 /// transport/HTTP error so the caller ends pagination with whatever it has.
-async fn fetch_list_page(page: &chromiumoxide::Page, url: &str) -> Option<FetchedListPage> {
+async fn fetch_list_page(
+    page: &chromiumoxide::Page,
+    url: &str,
+    csrf_header: &str,
+    accept: &str,
+) -> Option<FetchedListPage> {
     let url_lit = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".to_owned());
+    let csrf_header_lit =
+        serde_json::to_string(csrf_header).unwrap_or_else(|_| "\"x-csrf-token\"".to_owned());
+    let accept_lit = serde_json::to_string(accept).unwrap_or_else(|_| "\"*/*\"".to_owned());
     let js = format!(
         r#"(async function() {{
             const url = {url_lit};
             const meta = document.querySelector('meta[name="csrf-token"]');
             const csrf = meta ? meta.content : '';
+            const headers = {{
+                'x-requested-with': 'XMLHttpRequest',
+                'accept': {accept_lit}
+            }};
+            headers[{csrf_header_lit}] = csrf;
             const ctrl = new AbortController();
             const timer = setTimeout(function() {{ ctrl.abort(); }}, 20000);
             try {{
                 const resp = await fetch(url, {{
                     credentials: 'same-origin',
                     signal: ctrl.signal,
-                    headers: {{
-                        'x-requested-with': 'XMLHttpRequest',
-                        'x-csrf-token': csrf,
-                        'accept': 'text/javascript, application/javascript, application/ecmascript, application/x-ecmascript'
-                    }}
+                    headers: headers
                 }});
                 clearTimeout(timer);
                 if (!resp.ok) return JSON.stringify({{ error: 'http ' + resp.status }});
                 const body = await resp.text();
                 window.__dravrCaptures = window.__dravrCaptures || {{}};
                 window.__dravrCaptures[url] = {{ status: resp.status, body: body }};
-                let models = [];
-                try {{ const p = JSON.parse(body); models = (p && p.models) || []; }} catch (e) {{}}
+                // Row shape varies by provider: Strava nests under `.models`,
+                // Garmin returns a bare array (or `{{activityList:[...]}}`). Read
+                // whichever is present so the stop-decision count is accurate.
+                let rows = [];
+                try {{
+                    const p = JSON.parse(body);
+                    if (Array.isArray(p)) rows = p;
+                    else if (p && Array.isArray(p.models)) rows = p.models;
+                    else if (p && Array.isArray(p.activityList)) rows = p.activityList;
+                }} catch (e) {{}}
                 const starts = [];
-                for (let i = 0; i < models.length; i++) {{
-                    const st = models[i].start_time;
-                    if (st) {{ const s = Math.floor(Date.parse(st) / 1000); if (!isNaN(s)) starts.push(s); }}
+                for (let i = 0; i < rows.length; i++) {{
+                    // Strava: `start_time` (RFC3339). Garmin: `startTimeGMT` /
+                    // `startTimeLocal` as SQL-style "YYYY-MM-DD HH:MM:SS" — the
+                    // space→T swap lets Date.parse handle it. This epoch only
+                    // drives the cheap stop heuristic; js_extract owns the exact
+                    // per-activity timestamp, so a few hours of tz slop is fine.
+                    const raw = rows[i].start_time || rows[i].startTimeGMT || rows[i].startTimeLocal;
+                    if (raw) {{
+                        const norm = (typeof raw === 'string') ? raw.replace(' ', 'T') : raw;
+                        const s = Math.floor(Date.parse(norm) / 1000);
+                        if (!isNaN(s)) starts.push(s);
+                    }}
                 }}
-                return JSON.stringify({{ count: models.length, start_times: starts }});
+                return JSON.stringify({{ count: rows.length, start_times: starts }});
             }} catch (err) {{
                 clearTimeout(timer);
                 return JSON.stringify({{ error: String(err) }});
@@ -2948,10 +2974,12 @@ async fn paginate_via_fetch(
         // soft-throttled); a second failure stops with whatever we have rather
         // than spinning. A `break` in the failure path keeps this an explicit
         // `if let` (not collapsible to `map_or_else`).
-        let mut summary = fetch_list_page(page, &url).await;
+        let mut summary =
+            fetch_list_page(page, &url, &pagination.csrf_header, &pagination.accept).await;
         if summary.is_none() {
             warn!(page = page_num, "List page fetch failed; retrying once");
-            summary = fetch_list_page(page, &url).await;
+            summary =
+                fetch_list_page(page, &url, &pagination.csrf_header, &pagination.accept).await;
         }
         let Some(summary) = summary else {
             warn!(
@@ -3004,7 +3032,10 @@ async fn paginate_via_fetch(
             break;
         }
 
-        page_num += 1;
+        // Strava steps by 1 (`&page=N`); Garmin's `start=` is a row offset so it
+        // steps by the page size. `.max(1)` guards a misconfigured 0 step from
+        // looping forever on the same page.
+        page_num += pagination.page_step.max(1);
         time::sleep(Duration::from_millis(interaction_delay_ms)).await;
     }
 
