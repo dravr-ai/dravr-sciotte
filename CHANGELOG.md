@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.12] — 2026-06-30
+
+### Added
+
+- login: observability for the silent-hang class. `poll_credential_login_result`
+  and `wait_for_login` now log every page navigation as a breadcrumb, warn every
+  15s while stuck on the initial login page with no navigation after submit (the
+  signature of a provider blocking the browser or serving an inline challenge),
+  and name the last page reached + elapsed time in the timeout error. A
+  blocked/challenged credential login is now diagnosable from the logs instead of
+  a contextless multi-minute spin. Extracted `log_login_nav`, `log_login_stall`,
+  and `credential_login_timeout_error` helpers (behaviour-preserving).
+
 ## [0.7.10] — 2026-06-26
 
 ### Fixed

@@ -1562,6 +1562,45 @@ async fn save_timeout_screenshot(page: &chromiumoxide::Page, label: &str) {
     }
 }
 
+/// Log a page navigation during credential-login polling, updating `last_url`.
+/// The breadcrumb trail makes a hang show which pages the provider walked us
+/// through before stalling.
+fn log_login_nav(last_url: &mut String, url: &str) {
+    if url != last_url {
+        info!(from = %last_url, to = %url, "Credential login: page navigated");
+        url.clone_into(last_url);
+    }
+}
+
+/// Surface a no-navigation stall (throttled to every 15s): the submit fired but
+/// the page never left the login form — the signature of the provider blocking
+/// the (headless) browser or serving an inline challenge our selectors miss.
+fn log_login_stall(last_stall_log: &mut Instant, url: &str, started: Instant) {
+    if last_stall_log.elapsed() >= Duration::from_secs(15) {
+        warn!(
+            url = %url,
+            elapsed_secs = started.elapsed().as_secs(),
+            "Credential login still on the initial login page — no navigation after submit \
+             (provider may be blocking the browser or showing an inline challenge)"
+        );
+        *last_stall_log = Instant::now();
+    }
+}
+
+/// Build the credential-login timeout error, naming the last page reached so the
+/// failure is diagnosable instead of a contextless "timed out".
+fn credential_login_timeout_error(last_url: &str, started: Instant) -> ScraperError {
+    let elapsed = started.elapsed().as_secs();
+    warn!(
+        last_url = %last_url,
+        elapsed_secs = elapsed,
+        "Credential login timed out — page never reached OTP or a success URL"
+    );
+    ScraperError::Auth {
+        reason: format!("Credential login timed out after {elapsed}s — last page: {last_url}"),
+    }
+}
+
 /// Poll for credential login result: success, OTP required, or failure with error message
 async fn poll_credential_login_result(
     page: &chromiumoxide::Page,
@@ -1580,13 +1619,19 @@ async fn poll_credential_login_result(
     // Capture the initial URL so we can detect when the page actually changes
     let initial_url = page.url().await.ok().flatten().unwrap_or_default();
     debug!(initial_url = %initial_url, "Polling for login result");
+    // Observability for the silent-hang class: track the last page so every
+    // navigation is logged as a breadcrumb, a no-navigation stall is surfaced
+    // periodically (not just at the final timeout), and the timeout error names
+    // the page we died on. Without this a blocked/challenged login is a silent
+    // multi-minute spin with a contextless "timed out".
+    let started = Instant::now();
+    let mut last_url = initial_url.clone();
+    let mut last_stall_log = Instant::now();
 
     loop {
         if Instant::now() > deadline {
             save_timeout_screenshot(page, "login-timeout").await;
-            return Err(ScraperError::Auth {
-                reason: "Credential login timed out".to_owned(),
-            });
+            return Err(credential_login_timeout_error(&last_url, started));
         }
 
         let url = page
@@ -1596,6 +1641,10 @@ async fn poll_credential_login_result(
                 reason: format!("Failed to get page URL: {e}"),
             })?
             .unwrap_or_default();
+
+        // Breadcrumb: log every real navigation so a hang shows the trail of
+        // pages the provider walked us through before stalling.
+        log_login_nav(&mut last_url, &url);
 
         // Check success patterns early — works even if URL hasn't changed
         if !url.is_empty() && url_path_matches(&url, &provider.provider.login_success_patterns) {
@@ -1617,6 +1666,7 @@ async fn poll_credential_login_result(
 
         // Wait for the URL to change from the initial page before checking challenge types
         if url == initial_url {
+            log_login_stall(&mut last_stall_log, &url, started);
             time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
             continue;
         }
@@ -1706,12 +1756,17 @@ async fn wait_for_login(
 ) -> ScraperResult<()> {
     let timeout = config.login_timeout_secs;
     let deadline = Instant::now() + Duration::from_secs(timeout);
+    // Track the last page so the timeout names where we stalled (see the
+    // matching breadcrumb logic in poll_credential_login_result).
+    let mut last_url = String::new();
 
     loop {
         if Instant::now() > deadline {
+            warn!(last_url = %last_url, "Login timed out — never reached a success URL");
             return Err(ScraperError::Auth {
                 reason: format!(
-                    "Login timed out after {timeout} seconds — close the browser and retry"
+                    "Login timed out after {timeout} seconds (last page: {last_url}) — \
+                     close the browser and retry"
                 ),
             });
         }
@@ -1723,6 +1778,11 @@ async fn wait_for_login(
                 reason: format!("Failed to get page URL: {e}"),
             })?
             .unwrap_or_default();
+
+        if url != last_url {
+            info!(from = %last_url, to = %url, "Login wait: page navigated");
+            last_url = url.clone();
+        }
 
         let on_failure_page = url_path_matches(&url, &provider.provider.login_failure_patterns);
         let on_success_page = url_path_matches(&url, &provider.provider.login_success_patterns);
