@@ -415,7 +415,7 @@ js_extract = '(function() { return "{}"; })()'
             .list_page
             .pagination
             .as_ref()
-            .expect("garmin must define list_page.pagination");
+            .expect("garmin must define list_page.pagination"); // Safe: test asserts fixture invariant
         assert!(
             pg.url_template
                 .contains("activitylist-service/activities/search/activities"),
@@ -440,7 +440,7 @@ js_extract = '(function() { return "{}"; })()'
             .list_page
             .pagination
             .as_ref()
-            .expect("strava defines list_page.pagination");
+            .expect("strava defines list_page.pagination"); // Safe: test asserts fixture invariant
         assert_eq!(pg.page_step, 1, "Strava pages by &page=N, step 1");
         assert_eq!(pg.csrf_header, "x-csrf-token");
         assert!(
