@@ -50,6 +50,7 @@ http = "1.4"
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

@@ -41,7 +41,12 @@ pub fn build_router(state: SharedState) -> Router {
         dravr_sciotte_mcp::build_tool_registry(),
         Arc::clone(&state),
     ));
-    let mcp_router = http::mcp_router(mcp_server);
+    // Gate the MCP transport behind the same `DRAVR_SCIOTTE_API_KEY` bearer
+    // check as the REST API. The MCP tools scrape the same authenticated
+    // provider data as `/api/*`, so leaving `/mcp` unauthenticated would be an
+    // auth bypass around the REST gate. When the env var is unset the middleware
+    // passes through (localhost development mode), matching REST behavior.
+    let mcp_router = http::mcp_router(mcp_server).layer(middleware::from_fn(auth_middleware));
 
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
@@ -347,5 +352,105 @@ async fn list_page_probe_handler(
     match state.scraper().probe_list_page_for_gps(&session).await {
         Ok(report) => Json(report).into_response(),
         Err(e) => scraper_error_response(&e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use dravr_sciotte::cache::CachedScraper;
+    use dravr_sciotte::config::{CacheConfig, ScraperConfig};
+    use dravr_sciotte::provider::ProviderConfig;
+    use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
+    use dravr_sciotte::scraper::ChromeScraper;
+    use dravr_sciotte_mcp::state::{AppScraper, ServerState};
+    use tower::ServiceExt;
+
+    use super::*;
+
+    /// Build a minimal, browser-lazy `SharedState` for router wiring tests.
+    /// `ChromeScraper::new` allocates no browser until a scrape runs, so no
+    /// tool ever executes here — the auth layer rejects before any handler.
+    fn test_state() -> SharedState {
+        let limiter = SciotteLimiter::new(QueueConfig {
+            max_concurrent: 1,
+            max_queue_depth: 1,
+            acquire_timeout: Duration::from_millis(200),
+            parked_permit_ttl: Duration::from_millis(200),
+            watchdog_interval: Duration::from_millis(50),
+            retry_after_hint: Duration::from_millis(500),
+            closed_retry_after: Duration::from_secs(1),
+        });
+        let provider = ProviderConfig::strava_default().expect("embedded strava provider config");
+        let chrome = ChromeScraper::new(ScraperConfig::default(), provider);
+        let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
+        let cached: AppScraper = CachedScraper::new(queued, &CacheConfig::default());
+        Arc::new(ServerState::new(cached, limiter))
+    }
+
+    /// The MCP transport must honor the same `DRAVR_SCIOTTE_API_KEY` gate as the
+    /// REST API: an unauthenticated `POST /mcp` is rejected with 401 when the key
+    /// is set, `/health` stays open, and a correct bearer token passes the gate.
+    #[tokio::test]
+    async fn mcp_route_enforces_api_key_gate() {
+        const KEY: &str = "router-mcp-auth-test-key";
+        // Safe: edition 2021 set_var; single test mutates this key, removed below.
+        env::set_var("DRAVR_SCIOTTE_API_KEY", KEY);
+
+        // Unauthenticated POST /mcp -> 401 (the gate that protects /api/*).
+        let app = build_router(test_state());
+        let unauth = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(
+            unauth.status(),
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated /mcp must be rejected"
+        );
+
+        // /health stays open even with the key set.
+        let app = build_router(test_state());
+        let health = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(health.status(), StatusCode::OK, "/health must stay open");
+
+        // A correct bearer token passes the gate (status is not 401).
+        let app = build_router(test_state());
+        let authed = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("authorization", format!("Bearer {KEY}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_ne!(
+            authed.status(),
+            StatusCode::UNAUTHORIZED,
+            "correct bearer token must pass the gate"
+        );
+
+        env::remove_var("DRAVR_SCIOTTE_API_KEY");
     }
 }
