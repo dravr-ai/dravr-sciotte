@@ -4,7 +4,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -137,11 +139,15 @@ impl VisionScraper {
             })
     }
 
-    /// Load a prompt from a markdown file path
+    /// Load a prompt from a markdown file path.
+    ///
+    /// Resolves via `DRAVR_SCIOTTE_SCRIPTS_DIR` overrides first, then the
+    /// compiled-in prompts, then the raw path — see [`resolve_prompt`].
     fn load_prompt(path: &str) -> ScraperResult<String> {
-        fs::read_to_string(path).map_err(|e| ScraperError::Config {
-            reason: format!("Failed to read vision prompt '{path}': {e}"),
-        })
+        let override_dir = env::var("DRAVR_SCIOTTE_SCRIPTS_DIR")
+            .ok()
+            .map(PathBuf::from);
+        resolve_prompt(path, override_dir.as_deref())
     }
 
     /// Handle the provider login page — click OAuth button or fill email
@@ -949,8 +955,48 @@ const DEFAULT_PAGE_ANALYSIS_PROMPT: &str = r#"Analyze this web page screenshot. 
 - "match_number": if page shows a number matching challenge (e.g. "Tap 78 on your phone"), extract the number as a string (e.g. "78"), otherwise null
 Return valid JSON only."#;
 
+/// Resolve a vision prompt path to its content.
+///
+/// Resolution order: the override directory (`DRAVR_SCIOTTE_SCRIPTS_DIR`, the
+/// same hot-swappable mount as [`crate::script_loader`]), then the compiled-in
+/// prompts, then the raw path (absolute paths and runtime-loaded provider
+/// configs). The compiled-in prompts keep deployed binaries working when the
+/// working directory does not contain the repository's `providers/` tree.
+fn resolve_prompt(path: &str, override_dir: Option<&Path>) -> ScraperResult<String> {
+    if let Some(dir) = override_dir {
+        let full = dir.join(path);
+        if let Ok(content) = fs::read_to_string(&full) {
+            debug!(path, dir = %dir.display(), "Loaded vision prompt from override directory");
+            return Ok(content);
+        }
+    }
+    if let Some(content) = embedded_prompt(path) {
+        return Ok(content.to_owned());
+    }
+    fs::read_to_string(path).map_err(|e| ScraperError::Config {
+        reason: format!("Failed to read vision prompt '{path}': {e}"),
+    })
+}
+
+/// Compiled-in vision prompts for the built-in providers, keyed by the path
+/// strings the embedded provider TOMLs use.
+fn embedded_prompt(path: &str) -> Option<&'static str> {
+    match path {
+        "providers/strava/page_analysis.md" => {
+            Some(include_str!("../providers/strava/page_analysis.md"))
+        }
+        "providers/strava/list_page.md" => Some(include_str!("../providers/strava/list_page.md")),
+        "providers/strava/detail_page.md" => {
+            Some(include_str!("../providers/strava/detail_page.md"))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::process;
+
     use super::*;
 
     #[test]
@@ -1031,5 +1077,71 @@ mod tests {
         let analysis: PageAnalysis = serde_json::from_str(json).unwrap(); // Safe: test with valid JSON
         assert_eq!(analysis.two_factor_options.len(), 2);
         assert_eq!(analysis.two_factor_options[0].id, "otp");
+    }
+
+    #[test]
+    fn embedded_prompts_cover_builtin_provider_configs() {
+        let configs = [
+            ProviderConfig::strava_default().unwrap(), // Safe: test asserts fixture invariant
+            ProviderConfig::garmin_default().unwrap(), // Safe: test asserts fixture invariant
+        ];
+        for config in &configs {
+            let paths = [
+                config.provider.vision_page_analysis_prompt.as_deref(),
+                config.list_page.vision_prompt.as_deref(),
+                config.detail_page.vision_prompt.as_deref(),
+            ];
+            for path in paths.into_iter().flatten() {
+                assert!(
+                    embedded_prompt(path).is_some_and(|p| !p.trim().is_empty()),
+                    "configured vision prompt '{path}' has no embedded default — deployed binaries would fail to load it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_prompts_match_repo_files() {
+        for path in [
+            "providers/strava/page_analysis.md",
+            "providers/strava/list_page.md",
+            "providers/strava/detail_page.md",
+        ] {
+            let embedded = embedded_prompt(path).unwrap(); // Safe: test asserts embedded key exists
+            let on_disk = fs::read_to_string(path).unwrap(); // Safe: repo file exists at test cwd
+            assert_eq!(
+                embedded, on_disk,
+                "embedded prompt for '{path}' maps to the wrong file"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_prompt_uses_embedded_default_without_files() {
+        // Simulates a deployed binary: override dir absent on disk, no
+        // providers/ tree consulted — the compiled-in prompt must resolve.
+        let prompt = resolve_prompt(
+            "providers/strava/page_analysis.md",
+            Some(Path::new("/nonexistent-sciotte-override")),
+        )
+        .unwrap(); // Safe: test asserts embedded fallback
+        assert!(!prompt.trim().is_empty());
+    }
+
+    #[test]
+    fn resolve_prompt_override_dir_wins() {
+        let dir = env::temp_dir().join(format!("sciotte-prompt-override-{}", process::id()));
+        let sub = dir.join("providers/strava");
+        fs::create_dir_all(&sub).unwrap(); // Safe: test-owned temp dir
+        fs::write(sub.join("page_analysis.md"), "OVERRIDDEN PROMPT").unwrap(); // Safe: test-owned temp dir
+        let prompt = resolve_prompt("providers/strava/page_analysis.md", Some(&dir));
+        fs::remove_dir_all(&dir).unwrap(); // Safe: test-owned temp dir
+        assert_eq!(prompt.unwrap(), "OVERRIDDEN PROMPT"); // Safe: test asserts override read
+    }
+
+    #[test]
+    fn resolve_prompt_unknown_missing_path_errors() {
+        let err = resolve_prompt("providers/nope/missing.md", None).unwrap_err(); // Safe: test asserts error path
+        assert!(matches!(err, ScraperError::Config { .. }));
     }
 }

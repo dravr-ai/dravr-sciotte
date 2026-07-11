@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.13] — 2026-07-11
+
+### Fixed
+
+- vision: prompts referenced by the embedded provider TOMLs
+  (`providers/strava/{page_analysis,list_page,detail_page}.md`) are now
+  compiled into the binary and resolved through the
+  `DRAVR_SCIOTTE_SCRIPTS_DIR` override directory first, instead of a bare
+  cwd-relative filesystem read. Deployed binaries — whose working directory
+  does not contain the repository's `providers/` tree — failed every Strava
+  vision credential login with `config error: Failed to read vision prompt
+  'providers/strava/page_analysis.md': No such file or directory`. Prompts
+  now load from the compiled-in defaults, with the scripts-dir mount as a
+  hot-swappable override; raw paths still resolve for custom provider
+  configs.
+
 ## [0.7.12] — 2026-06-30
 
 ### Added
