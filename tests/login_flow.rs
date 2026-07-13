@@ -11,11 +11,20 @@
     clippy::str_to_string
 )]
 
+use std::collections::HashMap;
+use std::fmt::Debug as FmtDebug;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use tracing::field::{Field, Visit};
+use tracing::Subscriber;
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use dravr_sciotte::config::ScraperConfig;
 use dravr_sciotte::error::LoginResult;
@@ -385,6 +394,115 @@ async fn garmin_selector_login_retries_after_transient_failure() {
         matches!(result, Ok(LoginResult::Success(_))),
         "selector login must recover via the reload-retry after a transient first-attempt \
          failure (no vision fallback in selector mode); got {result:?}"
+    );
+}
+
+/// A captured tracing event: its message and its fields rendered to strings.
+type CapturedEvent = (String, HashMap<String, String>);
+/// Shared, thread-safe log of captured events.
+type CapturedEvents = Arc<Mutex<Vec<CapturedEvent>>>;
+
+/// Captures each tracing event's message + fields so a test can assert on the
+/// forensic snapshot the selector-login failure path logs.
+#[derive(Clone, Default)]
+struct EventCapture {
+    events: CapturedEvents,
+}
+
+#[derive(Default)]
+struct FieldGrab {
+    message: String,
+    fields: HashMap<String, String>,
+}
+
+impl Visit for FieldGrab {
+    fn record_debug(&mut self, field: &Field, value: &dyn FmtDebug) {
+        let rendered = format!("{value:?}");
+        if field.name() == "message" {
+            self.message.clone_from(&rendered);
+        }
+        self.fields.insert(field.name().to_owned(), rendered);
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_owned());
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_owned(), value.to_string());
+    }
+}
+
+impl<S> Layer<S> for EventCapture
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        let mut grab = FieldGrab::default();
+        event.record(&mut grab);
+        self.events
+            .lock()
+            .unwrap()
+            .push((grab.message, grab.fields));
+    }
+}
+
+/// The forensic snapshot on a selector-login failure must capture ground truth
+/// about the page — here an under-rendered first page — so a future diagnosis
+/// reads data, not inference: the expected email selector is absent and the
+/// page state names the under-rendered shell.
+#[tokio::test]
+async fn garmin_selector_failure_logs_forensics() {
+    let capture = EventCapture::default();
+    let events = Arc::clone(&capture.events);
+    let guard = tracing_subscriber::registry().with(capture).set_default();
+
+    let (addr, _server) = start_flaky_login_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_garmin_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+    // First page is under-rendered → selector attempt 1 fails and logs forensics;
+    // the reload-retry then succeeds. We only care that the failure was recorded.
+    let _ = scraper
+        .credential_login("test@example.com", "no-mfa-password", "email")
+        .await;
+
+    let snapshot = events.lock().unwrap().clone();
+    drop(guard);
+
+    let (_, fields) = snapshot
+        .iter()
+        .find(|(msg, _)| msg.contains("Selector login failure forensics"))
+        .unwrap_or_else(|| {
+            let msgs: Vec<&String> = snapshot.iter().map(|(m, _)| m).collect();
+            panic!("expected a forensics event; captured messages: {msgs:?}")
+        });
+
+    assert_eq!(
+        fields.get("email_selector_present").map(String::as_str),
+        Some("false"),
+        "forensics must report the missing email selector on the under-rendered page; fields: {fields:?}"
+    );
+    assert!(
+        fields.contains_key("attempt"),
+        "forensics must record which attempt failed; fields: {fields:?}"
+    );
+    let page_state = fields
+        .get("page_state")
+        .cloned()
+        .unwrap_or_default()
+        .to_lowercase();
+    assert!(
+        page_state.contains("just a moment"),
+        "forensics page_state must capture the actual page (under-rendered shell); got: {page_state}"
     );
 }
 

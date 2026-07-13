@@ -418,16 +418,59 @@ impl ChromeScraper {
         .await
     }
 
+    /// Log a forensic snapshot of the page after a selector login attempt fails.
+    ///
+    /// The intermittent selector failure (`element-not-found` / step timeout)
+    /// has several indistinguishable causes — an under-rendered page, a
+    /// bot-challenge, a changed provider login page, or a pure timing blip — and
+    /// the error alone cannot tell them apart. This captures the page's actual
+    /// state (URL, title, `readyState`, body length, challenge markers, and
+    /// whether the expected selectors are present) so a future diagnosis reads
+    /// ground truth instead of inferring it. Text-only, so it survives in the
+    /// Cloud Run log stream (unlike the `/tmp` screenshot, which dies with the
+    /// pod). Best-effort — never affects the login result.
+    async fn log_selector_login_failure_forensics(
+        &self,
+        page: &chromiumoxide::Page,
+        attempt: u8,
+        reason: &str,
+    ) {
+        let (email_selector_present, password_selector_present) =
+            match LoginSelectors::from_provider(&self.provider) {
+                Ok(s) => (
+                    element_exists(page, s.email).await,
+                    element_exists(page, s.password).await,
+                ),
+                Err(_) => (false, false),
+            };
+        let page_state = page
+            .evaluate(
+                r#"(function(){var b=(document.body&&document.body.innerText)||"";var low=b.toLowerCase();var sigs=["just a moment","cloudflare","captcha","verify","are you human","unusual traffic","access denied","rate limit","too many requests","challenge","enable javascript","robot"];var markers=sigs.filter(function(m){return low.indexOf(m)>-1;});return JSON.stringify({url:location.href,title:document.title,ready:document.readyState,body_len:b.length,markers:markers,body_head:b.slice(0,200).replace(/\s+/g," ").trim()});})()"#,
+            )
+            .await
+            .ok()
+            .and_then(|r| r.value().and_then(|v| v.as_str().map(String::from)))
+            .unwrap_or_else(|| "<page eval failed>".to_owned());
+        warn!(
+            provider = %self.provider.provider.name,
+            attempt,
+            reason,
+            email_selector_present,
+            password_selector_present,
+            page_state = %page_state,
+            "Selector login failure forensics"
+        );
+    }
+
     /// Run the selector-based direct login, retrying once after a fresh page
     /// reload before the caller falls back to vision.
     ///
-    /// The production datacenter IP is intermittently soft-throttled, so the
-    /// provider login page occasionally renders too slowly and the selector step
-    /// fails transiently with element-not-found or a step timeout — the same
-    /// transient the list and interval fetch paths already absorb with a single
-    /// retry. A fresh render clears it far more cheaply than a full vision
-    /// round-trip, which is slow and only warranted when the page genuinely
-    /// cannot be driven by selectors.
+    /// The selector step fails intermittently (`element-not-found` / step
+    /// timeout), the same transient class the list and interval fetch paths
+    /// already absorb with a single retry; a fresh render clears it far more
+    /// cheaply than a full vision round-trip. Each failed attempt logs a
+    /// forensic page snapshot (see [`Self::log_selector_login_failure_forensics`])
+    /// so the actual cause is observed, not inferred.
     async fn run_direct_credential_login_with_retry(
         &self,
         page: &chromiumoxide::Page,
@@ -440,14 +483,22 @@ impl ChromeScraper {
             .await
         {
             Err(e) => {
+                self.log_selector_login_failure_forensics(page, 1, &e.to_string())
+                    .await;
                 warn!(error = %e, "Selector login failed; reloading page and retrying once");
                 if let Err(nav) = page.goto(login_url).await {
                     warn!(error = %nav, "Reload before selector retry failed");
                 }
                 time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
                 dismiss_cookie_dialog(page).await;
-                self.run_direct_credential_login(page, email, password)
-                    .await
+                let retry = self
+                    .run_direct_credential_login(page, email, password)
+                    .await;
+                if let Err(ref e2) = retry {
+                    self.log_selector_login_failure_forensics(page, 2, &e2.to_string())
+                        .await;
+                }
+                retry
             }
             other => other,
         }
