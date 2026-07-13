@@ -418,6 +418,41 @@ impl ChromeScraper {
         .await
     }
 
+    /// Run the selector-based direct login, retrying once after a fresh page
+    /// reload before the caller falls back to vision.
+    ///
+    /// The production datacenter IP is intermittently soft-throttled, so the
+    /// provider login page occasionally renders too slowly and the selector step
+    /// fails transiently with element-not-found or a step timeout — the same
+    /// transient the list and interval fetch paths already absorb with a single
+    /// retry. A fresh render clears it far more cheaply than a full vision
+    /// round-trip, which is slow and only warranted when the page genuinely
+    /// cannot be driven by selectors.
+    async fn run_direct_credential_login_with_retry(
+        &self,
+        page: &chromiumoxide::Page,
+        login_url: &str,
+        email: &str,
+        password: &str,
+    ) -> ScraperResult<LoginResult> {
+        match self
+            .run_direct_credential_login(page, email, password)
+            .await
+        {
+            Err(e) => {
+                warn!(error = %e, "Selector login failed; reloading page and retrying once");
+                if let Err(nav) = page.goto(login_url).await {
+                    warn!(error = %nav, "Reload before selector retry failed");
+                }
+                time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
+                dismiss_cookie_dialog(page).await;
+                self.run_direct_credential_login(page, email, password)
+                    .await
+            }
+            other => other,
+        }
+    }
+
     /// OAuth credential login — click provider OAuth button, then fill Google/Apple form
     async fn run_oauth_credential_login(
         &self,
@@ -585,16 +620,17 @@ impl ActivityScraper for ChromeScraper {
                     .await
             }
             _ => {
-                self.run_direct_credential_login(&page, email, password)
+                self.run_direct_credential_login_with_retry(&page, &login_url, email, password)
                     .await
             }
         };
 
-        // Hybrid mode: on failure, retry with vision
+        // Hybrid mode: after the selector login (incl. its one reload-retry) still
+        // fails, fall back to vision.
         #[cfg(feature = "vision")]
         if matches!(config.login_mode, LoginMode::Hybrid) {
             if let Err(ref e) = result {
-                warn!(error = %e, "Selector login failed, retrying with vision mode");
+                warn!(error = %e, "Selector login failed after retry, falling back to vision mode");
                 return self
                     .run_vision_credential_login(email, password, method)
                     .await;

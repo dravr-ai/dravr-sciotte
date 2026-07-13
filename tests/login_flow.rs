@@ -13,6 +13,8 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dravr_sciotte::config::ScraperConfig;
@@ -275,6 +277,114 @@ async fn garmin_login_no_mfa() {
     assert!(
         matches!(result, LoginResult::Success(_)),
         "Expected Success (no MFA), got {result:?}"
+    );
+}
+
+/// Fixture server that serves an under-rendered login page (no email field) on
+/// the FIRST request to the Garmin login path, then the real fixture on every
+/// request after — simulating the transient datacenter-IP soft-throttle that
+/// leaves the selector step with nothing to fill. Proves the reload-and-retry.
+async fn start_flaky_login_server() -> (SocketAddr, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let login_hits = Arc::new(AtomicUsize::new(0));
+
+    let handle = tokio::spawn(async move {
+        let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let dir = fixtures_dir.clone();
+            let hits = Arc::clone(&login_hits);
+            tokio::spawn(async move {
+                handle_http_flaky(stream, dir, &hits).await;
+            });
+        }
+    });
+
+    (addr, handle)
+}
+
+/// Like [`handle_http`], but the first request to `garmin/sign-in.html` returns a
+/// page missing the login fields (an under-rendered "just a moment" shell), so
+/// the selector step fails once before the retry reloads and gets the real page.
+async fn handle_http_flaky(stream: TcpStream, fixtures_dir: PathBuf, login_hits: &AtomicUsize) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = vec![0u8; 4096];
+    let (mut reader, mut writer) = stream.into_split();
+    let n = reader.read(&mut buf).await.unwrap_or(0);
+    if n == 0 {
+        return;
+    }
+
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let file_path = path
+        .split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_start_matches('/');
+
+    let broken_first =
+        file_path == "garmin/sign-in.html" && login_hits.fetch_add(1, Ordering::SeqCst) == 0;
+
+    let (status, content_type, body): (&str, &str, Vec<u8>) = if broken_first {
+        (
+            "200 OK",
+            "text/html",
+            b"<html><body><h1>Just a moment...</h1></body></html>".to_vec(),
+        )
+    } else {
+        let full_path = fixtures_dir.join(file_path);
+        if full_path.exists() && full_path.is_file() {
+            let body = fs::read(&full_path).await.unwrap_or_default();
+            let ct = if Path::new(file_path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+            {
+                "text/html"
+            } else {
+                "application/octet-stream"
+            };
+            ("200 OK", ct, body)
+        } else {
+            ("404 Not Found", "text/plain", b"Not Found".to_vec())
+        }
+    };
+
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = writer.write_all(response.as_bytes()).await;
+    let _ = writer.write_all(&body).await;
+}
+
+/// The selector login must recover from a transient first-attempt failure via its
+/// one reload-retry. Selector-only mode has NO vision fallback, so the login can
+/// only succeed if the retry re-fetches the (now real) page and drives it —
+/// without the retry this returns `Err`.
+#[tokio::test]
+async fn garmin_selector_login_retries_after_transient_failure() {
+    let (addr, _server) = start_flaky_login_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_garmin_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    let result = scraper
+        .credential_login("test@example.com", "no-mfa-password", "email")
+        .await;
+
+    assert!(
+        matches!(result, Ok(LoginResult::Success(_))),
+        "selector login must recover via the reload-retry after a transient first-attempt \
+         failure (no vision fallback in selector mode); got {result:?}"
     );
 }
 
