@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use dravr_sciotte::auth;
-use dravr_sciotte::models::{ActivityParams, HealthParams};
+use dravr_sciotte::models::{ActivityParams, AuthSession, HealthParams};
 use dravr_sciotte::ActivityScraper;
 use dravr_sciotte_mcp::state::SharedState;
 use dravr_tronc::mcp::transport::http;
@@ -53,6 +53,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/auth/status", get(auth_status_handler))
         .route("/auth/sessions", get(list_sessions_handler))
         .route("/auth/sessions/{id}", delete(delete_session_handler))
+        // Session-of-record boundary (ADR-021): export hands the full AuthSession
+        // to the platform to persist; import re-hydrates this transient store from
+        // the platform's durable copy after a scale-to-zero / redeploy.
+        .route("/auth/sessions/{id}/export", get(export_session_handler))
+        .route("/auth/import-session", post(import_session_handler))
         .route(
             "/auth/login-with-credentials",
             post(streaming::credential_login),
@@ -165,6 +170,48 @@ async fn delete_session_handler(
     } else {
         Json(json!({"error": "session_not_found", "session_id": session_id}))
     }
+}
+
+/// GET /auth/sessions/:id/export — return the full [`AuthSession`] (cookies) so a
+/// platform caller can persist it as the durable session-of-record.
+///
+/// This server holds sessions only transiently (in-memory + ephemeral Cloud Run
+/// disk); the platform's encrypted store is authoritative across restarts and
+/// redeploys. After a credential login the platform exports the session here and
+/// persists it, then re-hydrates via `/auth/import-session` when this instance no
+/// longer has it (ADR-021 session-of-record boundary).
+async fn export_session_handler(
+    State(state): State<SharedState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    state.get_session(&session_id).await.map_or_else(
+        || {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "session_not_found", "session_id": session_id})),
+            )
+                .into_response()
+        },
+        |session| Json(session).into_response(),
+    )
+}
+
+/// POST /auth/import-session — re-hydrate the in-memory store from a
+/// platform-supplied [`AuthSession`].
+///
+/// Lets a subsequent scrape run after this instance has scaled to zero or been
+/// redeployed: the platform re-passes the durable session it persisted at login,
+/// and the returned `session_id` is used on the `X-Session-Id` header for the
+/// following `/api/*` call. Idempotent — a repeat import of the same session id
+/// simply overwrites the stored copy.
+async fn import_session_handler(
+    State(state): State<SharedState>,
+    Json(session): Json<AuthSession>,
+) -> impl IntoResponse {
+    let session_id = session.session_id.clone();
+    state.add_session(session).await;
+    info!(session_id = %session_id, "Session imported from platform");
+    Json(json!({"status": "imported", "session_id": session_id}))
 }
 
 // ============================================================================
