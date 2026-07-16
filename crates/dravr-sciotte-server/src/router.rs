@@ -12,6 +12,7 @@ use axum::middleware;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use chrono::DateTime;
 use dravr_sciotte::auth;
 use dravr_sciotte::models::{ActivityParams, AuthSession, HealthParams};
 use dravr_sciotte::ActivityScraper;
@@ -247,6 +248,10 @@ struct ActivityQuery {
     limit: Option<u32>,
     sport_type: Option<String>,
     detail: Option<bool>,
+    /// Only return activities after this Unix epoch (seconds) — historical window lower bound.
+    after: Option<i64>,
+    /// Only return activities before this Unix epoch (seconds) — historical window upper bound.
+    before: Option<i64>,
 }
 
 /// GET /api/activities — list scraped activities (supports `X-Session-Id` header)
@@ -270,6 +275,8 @@ async fn activities_handler(
 
     let params = ActivityParams {
         limit: query.limit,
+        before: query.before.and_then(|ts| DateTime::from_timestamp(ts, 0)),
+        after: query.after.and_then(|ts| DateTime::from_timestamp(ts, 0)),
         sport_type: query.sport_type,
         enrich_details: query.detail.unwrap_or(false),
         ..Default::default()
