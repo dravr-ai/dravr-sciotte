@@ -21,7 +21,7 @@ impl McpTool<ServerState> for AuthStatusTool {
     fn definition(&self) -> Tool {
         Tool {
             name: "auth_status".to_owned(),
-            description: "Check if the Strava session is authenticated and valid".to_owned(),
+            description: "Check if the provider session is authenticated and valid".to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -37,14 +37,21 @@ impl McpTool<ServerState> for AuthStatusTool {
         _ctx: &ToolContext,
         _arguments: Value,
     ) -> ToolResponse {
-        if let Some(session) = state.session().await {
-            let authenticated = state.scraper().is_authenticated(&session).await;
+        if let Some(entry) = state.session_entry().await {
+            let Some(scraper) = state.scraper_for(&entry.provider) else {
+                return ToolResponse::error(format!(
+                    "Session provider '{}' is not served by this instance",
+                    entry.provider
+                ));
+            };
+            let authenticated = scraper.is_authenticated(&entry.session).await;
             let result = json!({
                 "authenticated": authenticated,
-                "session_id": session.session_id,
-                "created_at": session.created_at.to_rfc3339(),
-                "expires_at": session.expires_at.map(|t| t.to_rfc3339()),
-                "cookie_count": session.cookies.len(),
+                "session_id": entry.session.session_id,
+                "provider": entry.provider,
+                "created_at": entry.session.created_at.to_rfc3339(),
+                "expires_at": entry.session.expires_at.map(|t| t.to_rfc3339()),
+                "cookie_count": entry.session.cookies.len(),
             });
             ToolResponse::text(serde_json::to_string_pretty(&result).unwrap_or_default())
         } else {
@@ -57,7 +64,7 @@ impl McpTool<ServerState> for AuthStatusTool {
     }
 }
 
-/// Launch browser for user to log in to Strava
+/// Launch browser for user to log in to a provider
 pub struct BrowserLoginTool;
 
 #[async_trait]
@@ -65,10 +72,15 @@ impl McpTool<ServerState> for BrowserLoginTool {
     fn definition(&self) -> Tool {
         Tool {
             name: "browser_login".to_owned(),
-            description: "Open a browser window for the user to log in to Strava. No API credentials needed — the user logs in directly on strava.com and session cookies are captured.".to_owned(),
+            description: "Open a browser window for the user to log in to the provider. No API credentials needed — the user logs in directly on the provider site and session cookies are captured.".to_owned(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Provider to log into (e.g. \"garmin\", \"strava\"). Optional when the server serves exactly one provider."
+                    }
+                },
                 "required": []
             }),
             annotations: None,
@@ -79,26 +91,42 @@ impl McpTool<ServerState> for BrowserLoginTool {
         &self,
         state: &SharedState,
         _ctx: &ToolContext,
-        _arguments: Value,
+        arguments: Value,
     ) -> ToolResponse {
-        let session = match state.scraper().browser_login().await {
+        let requested = arguments.get("provider").and_then(Value::as_str);
+        let Ok(provider) = state.resolve_provider(requested) else {
+            return ToolResponse::error(format!(
+                "Pass \"provider\" — this server serves: {}",
+                state.provider_names().join(", ")
+            ));
+        };
+        let Some(scraper) = state.scraper_for(&provider) else {
+            return ToolResponse::error(format!("Provider '{provider}' is not served"));
+        };
+
+        let session = match scraper.browser_login().await {
             Ok(s) => s,
             Err(e) => return ToolResponse::error(format!("Login failed: {e}")),
         };
 
-        if let Err(e) = auth::save_session(&session).await {
-            return ToolResponse::error(format!("Login succeeded but failed to save session: {e}"));
+        if state.single_provider() {
+            if let Err(e) = auth::save_session(&session).await {
+                return ToolResponse::error(format!(
+                    "Login succeeded but failed to save session: {e}"
+                ));
+            }
         }
 
         let session_id = session.session_id.clone();
         let cookie_count = session.cookies.len();
-        state.set_session(session).await;
+        state.add_session(session, provider.clone()).await;
 
         let result = json!({
             "authenticated": true,
             "session_id": session_id,
+            "provider": provider,
             "cookie_count": cookie_count,
-            "message": "Successfully logged in to Strava"
+            "message": format!("Successfully logged in to {provider}")
         });
         ToolResponse::text(serde_json::to_string_pretty(&result).unwrap_or_default())
     }

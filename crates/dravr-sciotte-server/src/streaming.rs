@@ -29,8 +29,9 @@ use dravr_sciotte::js_utils;
 use dravr_sciotte::models::{AuthSession, CookieData};
 use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::ScrapePermit;
+use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
-use dravr_sciotte_mcp::state::SharedState;
+use dravr_sciotte_mcp::state::{FlowLookupError, ProviderResolveError, SharedState};
 
 use crate::error_response::scraper_error_response;
 use futures::stream::SplitSink;
@@ -106,6 +107,10 @@ pub struct CredentialLoginRequest {
     /// Login method: "email" (default), "google", "apple"
     #[serde(default = "default_login_method")]
     pub method: String,
+    /// Provider to log into (e.g. "garmin", "strava"). Optional when this
+    /// instance serves exactly one provider.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 fn default_login_method() -> String {
@@ -117,6 +122,10 @@ fn default_login_method() -> String {
 pub struct TwoFactorSelectRequest {
     /// The 2FA option id (e.g., "otp", "app", "sms")
     pub option_id: String,
+    /// Pending login flow to continue (from the `two_factor_choice` response).
+    /// Optional when exactly one flow is pending.
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 /// Request body for OTP/2FA code submission
@@ -124,6 +133,10 @@ pub struct TwoFactorSelectRequest {
 pub struct OtpSubmitRequest {
     /// One-time password or 2FA code
     pub code: String,
+    /// Pending login flow to continue (from the `otp_required` response).
+    /// Optional when exactly one flow is pending.
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 /// Query parameters for the WebSocket login endpoint
@@ -133,6 +146,9 @@ pub struct BrowserLoginParams {
     token: Option<String>,
     /// Login method: "direct" (default), "google", "apple"
     method: Option<String>,
+    /// Provider to log into (e.g. "garmin", "strava"). Optional when this
+    /// instance serves exactly one provider.
+    provider: Option<String>,
 }
 
 /// WebSocket upgrade handler for browser login streaming.
@@ -157,6 +173,11 @@ pub async fn browser_login_ws(
         }
     }
 
+    let provider_name = match state.resolve_provider(params.provider.as_deref()) {
+        Ok(name) => name,
+        Err(err) => return provider_resolve_response(&state, &err),
+    };
+
     let limiter = state.limiter().clone();
     let permit = match limiter.acquire().await {
         Ok(p) => p,
@@ -164,18 +185,52 @@ pub async fn browser_login_ws(
     };
 
     let method = params.method.unwrap_or_default();
-    ws.on_upgrade(move |socket| handle_browser_login(socket, state, method, permit))
+    ws.on_upgrade(move |socket| handle_browser_login(socket, state, provider_name, method, permit))
         .into_response()
+}
+
+/// 400 for an unknown provider, 409 when several are served and none named.
+pub(crate) fn provider_resolve_response(
+    state: &SharedState,
+    err: &ProviderResolveError,
+) -> Response {
+    let available = state.provider_names();
+    match err {
+        ProviderResolveError::Unknown(name) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "unknown_provider",
+                "provider": name,
+                "available": available,
+            })),
+        )
+            .into_response(),
+        ProviderResolveError::Ambiguous => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "provider_required",
+                "message": "This instance serves several providers — pass \"provider\".",
+                "available": available,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// Core WebSocket handler that manages the Chrome session
 async fn handle_browser_login(
     socket: WebSocket,
     state: SharedState,
+    provider_name: String,
     method: String,
     permit: ScrapePermit,
 ) {
-    let provider = state.scraper().inner().inner().provider().clone();
+    let Some(provider) = state.config_for(&provider_name).cloned() else {
+        // resolve_provider validated this before the upgrade; a miss here means
+        // the provider set changed mid-upgrade, which it cannot (built at boot).
+        error!(provider = %provider_name, "Provider config vanished after resolve");
+        return;
+    };
 
     info!(
         provider = %provider.provider.name,
@@ -262,12 +317,13 @@ async fn run_streaming_session(
                     }
                     let session_id = session.session_id.clone();
                     let cookie_count = session.cookies.len();
-                    state.add_session(session).await;
+                    state.add_session(session, provider.provider.name.clone()).await;
 
                     let msg = serde_json::json!({
                         "type": "login_success",
                         "session_id": session_id,
                         "cookie_count": cookie_count,
+                        "provider": provider.provider.name,
                     });
                     let _ = ws_sender.send(Message::Text(msg.to_string().into())).await;
                     info!(session_id = %session_id, "Login successful via browser stream");
@@ -382,56 +438,92 @@ async fn poll_for_login(
 }
 
 // ============================================================================
-// Login result → HTTP response helper
+// Credential login plane (flow_id-keyed pending logins — ADR-021)
 // ============================================================================
+//
+// Each interactive login runs on an EPHEMERAL ChromeScraper owned by its flow,
+// with the concurrency permit held in the flow entry — so N users (or one user
+// on two providers) can log in concurrently, bounded by the limiter, and a
+// stale flow's browser + permit are reclaimed together by the reaper. This is
+// the platform's per-user PENDING_OTP_SCRAPERS moved server-side.
 
-/// Convert a login result into an HTTP response, saving the session on success.
-async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedState) -> Response {
+/// Conclude one step of an interactive login: park the flow on a continuation
+/// (returning `flow_id` so the caller can resume it), store the session on
+/// success, and release everything on a terminal failure.
+async fn conclude_login_step(
+    state: &SharedState,
+    provider: String,
+    scraper: ChromeScraper,
+    permit: ScrapePermit,
+    flow_id: String,
+    result: ScraperResult<LoginResult>,
+) -> Response {
     match result {
         Ok(LoginResult::Success(session)) => {
-            if let Err(e) = auth::save_session(&session).await {
-                warn!(error = %e, "Failed to persist session to disk");
+            // Disk persistence only makes sense single-provider (untagged
+            // file); multi-provider instances rely on the platform's
+            // session-of-record re-import instead (ADR-021).
+            if state.single_provider() {
+                if let Err(e) = auth::save_session(&session).await {
+                    warn!(error = %e, "Failed to persist session to disk");
+                }
             }
             let session_id = session.session_id.clone();
             let cookie_count = session.cookies.len();
-            state.add_session(session).await;
-            info!(session_id = %session_id, "Login successful");
+            state.add_session(session, provider.clone()).await;
+            info!(session_id = %session_id, provider = %provider, "Login successful");
             Json(json!({
                 "status": "authenticated",
                 "session_id": session_id,
                 "cookie_count": cookie_count,
                 // Reported so the platform persists under the right provider
                 // without tracking it across the multi-step flow (ADR-021).
-                "provider": state.provider_name(),
+                "provider": provider,
             }))
             .into_response()
         }
         Ok(LoginResult::OtpRequired) => {
-            info!("OTP/2FA code required");
+            info!(flow_id = %flow_id, provider = %provider, "OTP/2FA code required");
+            state
+                .park_login_flow(flow_id.clone(), scraper, provider.clone(), permit)
+                .await;
             Json(json!({
                 "status": "otp_required",
                 "reason": "Provider requires a one-time password or 2FA verification",
+                "flow_id": flow_id,
+                "provider": provider,
             }))
             .into_response()
         }
         Ok(LoginResult::TwoFactorChoice(options)) => {
-            info!(count = options.len(), "2FA method selection required");
+            info!(flow_id = %flow_id, count = options.len(), "2FA method selection required");
+            state
+                .park_login_flow(flow_id.clone(), scraper, provider.clone(), permit)
+                .await;
             Json(json!({
                 "status": "two_factor_choice",
                 "options": options,
+                "flow_id": flow_id,
+                "provider": provider,
             }))
             .into_response()
         }
         Ok(LoginResult::NumberMatch(number)) => {
-            info!(number = %number, "Number matching challenge");
+            info!(flow_id = %flow_id, number = %number, "Number matching challenge");
+            state
+                .park_login_flow(flow_id.clone(), scraper, provider.clone(), permit)
+                .await;
             Json(json!({
                 "status": "number_match",
                 "number": number,
+                "flow_id": flow_id,
+                "provider": provider,
             }))
             .into_response()
         }
         Ok(LoginResult::Failed(reason)) => {
-            warn!(reason = %reason, "Login rejected");
+            warn!(reason = %reason, provider = %provider, "Login rejected");
+            // scraper + permit drop here: browser dies, slot frees.
             (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "status": "failed", "reason": reason })),
@@ -439,168 +531,112 @@ async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedS
                 .into_response()
         }
         Err(e) => {
-            error!(error = %e, "Login error");
+            error!(error = %e, provider = %provider, "Login error");
             scraper_error_response(&e)
         }
     }
 }
 
-// ============================================================================
-// Credential Login (Flow 1 — no streaming, delegates to core library)
-// ============================================================================
+/// 404 for an unknown/expired flow, 409 when several are pending and none named.
+fn flow_lookup_response(err: FlowLookupError) -> Response {
+    match err {
+        FlowLookupError::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "no_pending_login",
+                "message": "No pending login flow — start with /auth/login-with-credentials.",
+            })),
+        )
+            .into_response(),
+        FlowLookupError::Ambiguous => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "flow_id_required",
+                "message": "Several login flows are pending — pass \"flow_id\".",
+            })),
+        )
+            .into_response(),
+    }
+}
 
 /// POST /auth/login-with-credentials handler.
 ///
-/// Delegates to the core library's `credential_login()` which launches headless Chrome,
-/// fills email/password via JS, submits the form, and polls for login success.
+/// Runs the credential login on an ephemeral scraper owned by a new flow;
+/// continuations park the flow under the returned `flow_id`.
 pub async fn credential_login(
     State(state): State<SharedState>,
     Json(request): Json<CredentialLoginRequest>,
 ) -> impl IntoResponse {
-    let result = state
-        .scraper()
+    let provider = match state.resolve_provider(request.provider.as_deref()) {
+        Ok(name) => name,
+        Err(err) => return provider_resolve_response(&state, &err),
+    };
+    let Some(scraper) = state.new_login_scraper(&provider) else {
+        // resolve_provider guarantees the config exists; guard for completeness.
+        return provider_resolve_response(&state, &ProviderResolveError::Unknown(provider));
+    };
+
+    let permit = match state.limiter().acquire().await {
+        Ok(p) => p,
+        Err(err) => return scraper_error_response(&err.into_scraper_error()),
+    };
+
+    let flow_id = generate_session_id();
+    let result = scraper
         .credential_login(&request.email, &request.password, &request.method)
         .await;
 
-    handle_login_result(result, &state).await
+    conclude_login_step(&state, provider, scraper, permit, flow_id, result).await
 }
 
 /// POST /auth/submit-otp handler.
 ///
-/// Submits a one-time password / 2FA code after `credential_login` returned `otp_required`.
+/// Submits a one-time password / 2FA code to the pending flow (by `flow_id`,
+/// or the sole pending flow when none is given).
 pub async fn submit_otp(
     State(state): State<SharedState>,
     Json(request): Json<OtpSubmitRequest>,
 ) -> impl IntoResponse {
-    let result: ScraperResult<LoginResult> = state.scraper().submit_otp(&request.code).await;
+    let (flow_id, flow) = match state.take_login_flow(request.flow_id.as_deref()).await {
+        Ok(taken) => taken,
+        Err(err) => return flow_lookup_response(err),
+    };
 
-    match result {
-        Ok(LoginResult::Success(session)) => {
-            if let Err(e) = auth::save_session(&session).await {
-                warn!(error = %e, "Failed to persist session to disk");
-            }
-            let session_id = session.session_id.clone();
-            let cookie_count = session.cookies.len();
-            state.add_session(session).await;
-
-            info!(session_id = %session_id, "OTP verification successful");
-            Json(json!({
-                "status": "authenticated",
-                "session_id": session_id,
-                "cookie_count": cookie_count,
-                "provider": state.provider_name(),
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::OtpRequired) => {
-            info!("OTP submitted but another verification step required");
-            Json(json!({
-                "status": "otp_required",
-                "reason": "Additional verification step required",
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::TwoFactorChoice(options)) => {
-            info!(count = options.len(), "OTP led to 2FA method selection");
-            Json(json!({
-                "status": "two_factor_choice",
-                "options": options,
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::NumberMatch(number)) => {
-            info!(number = %number, "Number matching challenge after OTP");
-            Json(json!({
-                "status": "number_match",
-                "number": number,
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::Failed(reason)) => {
-            warn!(reason = %reason, "OTP verification rejected");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "failed",
-                    "reason": reason,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            error!(error = %e, "OTP submission error");
-            scraper_error_response(&e)
-        }
-    }
+    let result = flow.scraper.submit_otp(&request.code).await;
+    conclude_login_step(
+        &state,
+        flow.provider,
+        flow.scraper,
+        flow.permit,
+        flow_id,
+        result,
+    )
+    .await
 }
 
 /// POST /auth/select-2fa handler.
 ///
-/// Selects a 2FA method after `credential_login` returned `two_factor_choice`.
+/// Selects a 2FA method on the pending flow (by `flow_id`, or the sole
+/// pending flow when none is given).
 pub async fn select_two_factor(
     State(state): State<SharedState>,
     Json(request): Json<TwoFactorSelectRequest>,
 ) -> impl IntoResponse {
-    let result: ScraperResult<LoginResult> =
-        state.scraper().select_two_factor(&request.option_id).await;
+    let (flow_id, flow) = match state.take_login_flow(request.flow_id.as_deref()).await {
+        Ok(taken) => taken,
+        Err(err) => return flow_lookup_response(err),
+    };
 
-    match result {
-        Ok(LoginResult::Success(session)) => {
-            if let Err(e) = auth::save_session(&session).await {
-                warn!(error = %e, "Failed to persist session to disk");
-            }
-            let session_id = session.session_id.clone();
-            let cookie_count = session.cookies.len();
-            state.add_session(session).await;
-
-            info!(session_id = %session_id, "2FA method completed successfully");
-            Json(json!({
-                "status": "authenticated",
-                "session_id": session_id,
-                "cookie_count": cookie_count,
-                "provider": state.provider_name(),
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::OtpRequired) => {
-            info!("2FA method requires code entry");
-            Json(json!({
-                "status": "otp_required",
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::TwoFactorChoice(options)) => {
-            info!(count = options.len(), "2FA method led to another choice");
-            Json(json!({
-                "status": "two_factor_choice",
-                "options": options,
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::NumberMatch(number)) => {
-            info!(number = %number, "Number matching challenge after 2FA selection");
-            Json(json!({
-                "status": "number_match",
-                "number": number,
-            }))
-            .into_response()
-        }
-        Ok(LoginResult::Failed(reason)) => {
-            warn!(reason = %reason, "2FA method failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({
-                    "status": "failed",
-                    "reason": reason,
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            error!(error = %e, "2FA selection error");
-            scraper_error_response(&e)
-        }
-    }
+    let result = flow.scraper.select_two_factor(&request.option_id).await;
+    conclude_login_step(
+        &state,
+        flow.provider,
+        flow.scraper,
+        flow.permit,
+        flow_id,
+        result,
+    )
+    .await
 }
 
 // ============================================================================

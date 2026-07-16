@@ -9,14 +9,14 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::DateTime;
 use dravr_sciotte::auth;
 use dravr_sciotte::models::{ActivityParams, AuthSession, HealthParams};
 use dravr_sciotte::ActivityScraper;
-use dravr_sciotte_mcp::state::SharedState;
+use dravr_sciotte_mcp::state::{SessionEntry, SharedState};
 use dravr_tronc::mcp::transport::http;
 use dravr_tronc::McpServer;
 use serde::Deserialize;
@@ -90,7 +90,7 @@ pub fn build_router(state: SharedState) -> Router {
 }
 
 // ============================================================================
-// Session resolution helper
+// Session resolution helpers
 // ============================================================================
 
 /// Extract session ID from the `X-Session-Id` header, falling back to the latest session
@@ -101,28 +101,81 @@ fn resolve_session_id(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
+/// Resolve the request's session entry (session + its provider): by
+/// `X-Session-Id` when given, else the latest session.
+async fn resolve_session_entry(state: &SharedState, headers: &HeaderMap) -> Option<SessionEntry> {
+    match resolve_session_id(headers) {
+        Some(id) => state.get_session_entry(&id).await,
+        None => state.session_entry().await,
+    }
+}
+
+/// 401 for a request with no resolvable session.
+fn session_not_found_response() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "session_not_found", "message": "Provide X-Session-Id header or login first."})),
+    )
+        .into_response()
+}
+
+/// 500 for a session whose provider is not served by this instance — only
+/// possible when an import named a provider this instance doesn't run.
+fn provider_not_served_response(provider: &str, state: &SharedState) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "provider_not_served",
+            "provider": provider,
+            "available": state.provider_names(),
+        })),
+    )
+        .into_response()
+}
+
+/// Query naming a provider for endpoints that act before any session exists.
+#[derive(Deserialize, Default)]
+struct ProviderQuery {
+    provider: Option<String>,
+}
+
 // ============================================================================
 // Auth Handlers
 // ============================================================================
 
-/// POST /auth/login — launch browser for user login
-async fn login_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let session = match state.scraper().browser_login().await {
+/// POST /auth/login — launch browser for user login (`?provider=` picks the
+/// provider; optional when this instance serves exactly one)
+async fn login_handler(
+    State(state): State<SharedState>,
+    Query(query): Query<ProviderQuery>,
+) -> impl IntoResponse {
+    let provider = match state.resolve_provider(query.provider.as_deref()) {
+        Ok(name) => name,
+        Err(err) => return streaming::provider_resolve_response(&state, &err),
+    };
+    let Some(scraper) = state.scraper_for(&provider) else {
+        return provider_not_served_response(&provider, &state);
+    };
+
+    let session = match scraper.browser_login().await {
         Ok(s) => s,
         Err(e) => return scraper_error_response(&e),
     };
 
-    if let Err(e) = auth::save_session(&session).await {
-        tracing::warn!(error = %e, "Failed to persist session to disk");
+    if state.single_provider() {
+        if let Err(e) = auth::save_session(&session).await {
+            tracing::warn!(error = %e, "Failed to persist session to disk");
+        }
     }
 
     let session_id = session.session_id.clone();
-    state.add_session(session).await;
+    state.add_session(session, provider.clone()).await;
 
-    info!("Login successful, session established");
+    info!(provider = %provider, "Login successful, session established");
     Json(json!({
         "status": "authenticated",
         "session_id": session_id,
+        "provider": provider,
     }))
     .into_response()
 }
@@ -132,32 +185,37 @@ async fn auth_status_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(id) => state.get_session(&id).await,
-        None => state.session().await,
-    };
-
-    if let Some(session) = session {
-        let authenticated = state.scraper().is_authenticated(&session).await;
+    if let Some(entry) = resolve_session_entry(&state, &headers).await {
+        let Some(scraper) = state.scraper_for(&entry.provider) else {
+            return provider_not_served_response(&entry.provider, &state);
+        };
+        let authenticated = scraper.is_authenticated(&entry.session).await;
         Json(json!({
             "authenticated": authenticated,
-            "session_id": session.session_id,
-            "created_at": session.created_at.to_rfc3339(),
+            "session_id": entry.session.session_id,
+            "provider": entry.provider,
+            "created_at": entry.session.created_at.to_rfc3339(),
         }))
+        .into_response()
     } else {
         Json(json!({
             "authenticated": false,
             "message": "No active session. POST /auth/login or connect to /browser/login."
         }))
+        .into_response()
     }
 }
 
-/// GET /auth/sessions — list all active session IDs
+/// GET /auth/sessions — list all active sessions with their providers
 async fn list_sessions_handler(State(state): State<SharedState>) -> impl IntoResponse {
-    let session_ids = state.list_session_ids().await;
+    let sessions = state.list_sessions().await;
     Json(json!({
-        "count": session_ids.len(),
-        "sessions": session_ids,
+        "count": sessions.len(),
+        "sessions": sessions.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        "providers": sessions
+            .iter()
+            .map(|(id, provider)| json!({"session_id": id, "provider": provider}))
+            .collect::<Vec<_>>(),
     }))
 }
 
@@ -185,7 +243,7 @@ async fn export_session_handler(
     State(state): State<SharedState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    state.get_session(&session_id).await.map_or_else(
+    state.get_session_entry(&session_id).await.map_or_else(
         || {
             (
                 StatusCode::NOT_FOUND,
@@ -193,12 +251,27 @@ async fn export_session_handler(
             )
                 .into_response()
         },
-        |session| Json(session).into_response(),
+        |entry| {
+            Json(json!({
+                "provider": entry.provider,
+                "session": entry.session,
+            }))
+            .into_response()
+        },
     )
 }
 
+/// Body for `/auth/import-session`: the session plus the provider it belongs
+/// to, so scrapes route to the right provider's scraper (symmetric with the
+/// export shape).
+#[derive(Deserialize)]
+struct ImportSessionRequest {
+    provider: String,
+    session: AuthSession,
+}
+
 /// POST /auth/import-session — re-hydrate the in-memory store from a
-/// platform-supplied [`AuthSession`].
+/// platform-supplied [`AuthSession`] tagged with its provider.
 ///
 /// Lets a subsequent scrape run after this instance has scaled to zero or been
 /// redeployed: the platform re-passes the durable session it persisted at login,
@@ -207,12 +280,24 @@ async fn export_session_handler(
 /// simply overwrites the stored copy.
 async fn import_session_handler(
     State(state): State<SharedState>,
-    Json(session): Json<AuthSession>,
+    Json(request): Json<ImportSessionRequest>,
 ) -> impl IntoResponse {
-    let session_id = session.session_id.clone();
-    state.add_session(session).await;
-    info!(session_id = %session_id, "Session imported from platform");
-    Json(json!({"status": "imported", "session_id": session_id}))
+    if state.scraper_for(&request.provider).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "unknown_provider",
+                "provider": request.provider,
+                "available": state.provider_names(),
+            })),
+        )
+            .into_response();
+    }
+    let session_id = request.session.session_id.clone();
+    state.add_session(request.session, request.provider.clone()).await;
+    info!(session_id = %session_id, provider = %request.provider, "Session imported from platform");
+    Json(json!({"status": "imported", "session_id": session_id, "provider": request.provider}))
+        .into_response()
 }
 
 // ============================================================================
@@ -224,20 +309,14 @@ async fn athlete_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(id) => state.get_session(&id).await,
-        None => state.session().await,
+    let Some(entry) = resolve_session_entry(&state, &headers).await else {
+        return session_not_found_response();
+    };
+    let Some(scraper) = state.scraper_for(&entry.provider) else {
+        return provider_not_served_response(&entry.provider, &state);
     };
 
-    let Some(session) = session else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "session_not_found"})),
-        )
-            .into_response();
-    };
-
-    match state.scraper().get_athlete(&session).await {
+    match scraper.get_athlete(&entry.session).await {
         Ok(profile) => Json(json!(profile)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -260,17 +339,11 @@ async fn activities_handler(
     headers: HeaderMap,
     Query(query): Query<ActivityQuery>,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(id) => state.get_session(&id).await,
-        None => state.session().await,
+    let Some(entry) = resolve_session_entry(&state, &headers).await else {
+        return session_not_found_response();
     };
-
-    let Some(session) = session else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "session_not_found", "message": "Provide X-Session-Id header or login first."})),
-        )
-            .into_response();
+    let Some(scraper) = state.scraper_for(&entry.provider) else {
+        return provider_not_served_response(&entry.provider, &state);
     };
 
     let params = ActivityParams {
@@ -282,7 +355,7 @@ async fn activities_handler(
         ..Default::default()
     };
 
-    match state.scraper().get_activities(&session, &params).await {
+    match scraper.get_activities(&entry.session, &params).await {
         Ok(activities) => Json(json!({
             "count": activities.len(),
             "activities": activities,
@@ -309,27 +382,21 @@ async fn activity_detail_handler(
     Path(id): Path<String>,
     Query(query): Query<ActivityDetailQuery>,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(sid) => state.get_session(&sid).await,
-        None => state.session().await,
+    let Some(entry) = resolve_session_entry(&state, &headers).await else {
+        return session_not_found_response();
     };
-
-    let Some(session) = session else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "session_not_found"})),
-        )
-            .into_response();
+    let Some(scraper) = state.scraper_for(&entry.provider) else {
+        return provider_not_served_response(&entry.provider, &state);
     };
 
     if query.raw {
-        return match state.scraper().get_activity_raw(&session, &id).await {
+        return match scraper.get_activity_raw(&entry.session, &id).await {
             Ok(value) => Json(value).into_response(),
             Err(e) => scraper_error_response(&e),
         };
     }
 
-    match state.scraper().get_activity(&session, &id).await {
+    match scraper.get_activity(&entry.session, &id).await {
         Ok(activity) => Json(json!(activity)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -350,17 +417,11 @@ async fn daily_summary_handler(
     headers: HeaderMap,
     Query(query): Query<DailySummaryQuery>,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(id) => state.get_session(&id).await,
-        None => state.session().await,
+    let Some(entry) = resolve_session_entry(&state, &headers).await else {
+        return session_not_found_response();
     };
-
-    let Some(session) = session else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "session_not_found"})),
-        )
-            .into_response();
+    let Some(scraper) = state.scraper_for(&entry.provider) else {
+        return provider_not_served_response(&entry.provider, &state);
     };
 
     let Ok(date) = chrono::NaiveDate::parse_from_str(&query.date, "%Y-%m-%d") else {
@@ -373,7 +434,7 @@ async fn daily_summary_handler(
 
     let params = HealthParams { date };
 
-    match state.scraper().get_daily_summary(&session, &params).await {
+    match scraper.get_daily_summary(&entry.session, &params).await {
         Ok(summary) => Json(json!(summary)).into_response(),
         Err(e) => scraper_error_response(&e),
     }
@@ -390,20 +451,14 @@ async fn list_page_probe_handler(
     State(state): State<SharedState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let session = match resolve_session_id(&headers) {
-        Some(id) => state.get_session(&id).await,
-        None => state.session().await,
+    let Some(entry) = resolve_session_entry(&state, &headers).await else {
+        return session_not_found_response();
+    };
+    let Some(scraper) = state.scraper_for(&entry.provider) else {
+        return provider_not_served_response(&entry.provider, &state);
     };
 
-    let Some(session) = session else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "session_not_found"})),
-        )
-            .into_response();
-    };
-
-    match state.scraper().probe_list_page_for_gps(&session).await {
+    match scraper.probe_list_page_for_gps(&entry.session).await {
         Ok(report) => Json(report).into_response(),
         Err(e) => scraper_error_response(&e),
     }

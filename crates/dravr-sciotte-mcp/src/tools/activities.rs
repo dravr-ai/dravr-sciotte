@@ -46,11 +46,17 @@ impl McpTool<ServerState> for GetActivitiesTool {
         _ctx: &ToolContext,
         arguments: Value,
     ) -> ToolResponse {
-        let Some(session) = state.session().await else {
+        let Some(entry) = state.session_entry().await else {
             return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
+        };
+        let Some(scraper) = state.scraper_for(&entry.provider) else {
+            return ToolResponse::error(format!(
+                "Session provider '{}' is not served by this instance",
+                entry.provider
+            ));
         };
 
         let params = ActivityParams {
@@ -59,7 +65,7 @@ impl McpTool<ServerState> for GetActivitiesTool {
             ..Default::default()
         };
 
-        match state.scraper().get_activities(&session, &params).await {
+        match scraper.get_activities(&entry.session, &params).await {
             Ok(activities) => {
                 let result = json!({
                     "count": activities.len(),
@@ -101,18 +107,24 @@ impl McpTool<ServerState> for GetActivityTool {
         _ctx: &ToolContext,
         arguments: Value,
     ) -> ToolResponse {
-        let Some(session) = state.session().await else {
+        let Some(entry) = state.session_entry().await else {
             return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
+        };
+        let Some(scraper) = state.scraper_for(&entry.provider) else {
+            return ToolResponse::error(format!(
+                "Session provider '{}' is not served by this instance",
+                entry.provider
+            ));
         };
 
         let Some(activity_id) = arguments["activity_id"].as_str() else {
             return ToolResponse::error("Missing required parameter: activity_id".to_owned());
         };
 
-        match state.scraper().get_activity(&session, activity_id).await {
+        match scraper.get_activity(&entry.session, activity_id).await {
             Ok(activity) => {
                 ToolResponse::text(serde_json::to_string_pretty(&activity).unwrap_or_default())
             }

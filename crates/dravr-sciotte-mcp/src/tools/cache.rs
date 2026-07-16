@@ -35,8 +35,13 @@ impl McpTool<ServerState> for CacheStatusTool {
         _ctx: &ToolContext,
         _arguments: Value,
     ) -> ToolResponse {
-        let cache_stats = shared.scraper().stats();
-        ToolResponse::text(serde_json::to_string_pretty(&cache_stats).unwrap_or_default())
+        let cache_stats: serde_json::Map<String, Value> = shared
+            .scrapers()
+            .map(|(name, scraper)| (name.to_owned(), json!(scraper.stats())))
+            .collect();
+        ToolResponse::text(
+            serde_json::to_string_pretty(&Value::Object(cache_stats)).unwrap_or_default(),
+        )
     }
 }
 
@@ -64,7 +69,9 @@ impl McpTool<ServerState> for CacheClearTool {
         _ctx: &ToolContext,
         _arguments: Value,
     ) -> ToolResponse {
-        shared.scraper().clear();
+        for (_, scraper) in shared.scrapers() {
+            scraper.clear();
+        }
         ToolResponse::text(json!({"status": "ok", "message": "Cache cleared"}).to_string())
     }
 }

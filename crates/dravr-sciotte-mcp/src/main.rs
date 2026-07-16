@@ -20,9 +20,11 @@ use std::sync::Arc;
 
 use clap::Parser;
 use dravr_sciotte::cache::CachedScraper;
-use dravr_sciotte::config::CacheConfig;
+use dravr_sciotte::config::{CacheConfig, ScraperConfig};
+use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
+use dravr_sciotte_mcp::state::AppScraper;
 use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 use dravr_tronc::mcp::server::McpServer;
 use dravr_tronc::mcp::transport::{http, stdio};
@@ -60,11 +62,22 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = SciotteLimiter::new(queue_config);
     let watchdog = limiter.spawn_watchdog();
 
-    let chrome = ChromeScraper::default_config()?;
-    let provider_name = chrome.provider_name().to_owned();
-    let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
-    let cached = CachedScraper::new(queued, &CacheConfig::default());
-    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
+    // Serve both built-in providers, matching dravr-sciotte-server's bare
+    // `serve` (one multi-provider instance — ADR-021).
+    let providers = vec![
+        ProviderConfig::strava_default()?,
+        ProviderConfig::garmin_default()?,
+    ];
+    let pairs: Vec<(ProviderConfig, AppScraper)> = providers
+        .into_iter()
+        .map(|provider| {
+            let chrome = ChromeScraper::new(ScraperConfig::default(), provider.clone());
+            let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
+            let cached = CachedScraper::new(queued, &CacheConfig::default());
+            (provider, cached)
+        })
+        .collect();
+    let state = Arc::new(ServerState::new(pairs, Arc::clone(&limiter), None));
     let tool_registry = build_tool_registry();
     let server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",

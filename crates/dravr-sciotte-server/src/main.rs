@@ -30,6 +30,7 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
+use dravr_sciotte_mcp::state::LoginScraperDecorator;
 use dravr_sciotte_mcp::state::AppScraper;
 use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 use dravr_sciotte_server::router;
@@ -46,9 +47,11 @@ use tracing::info;
     about = "Sport activity scraper"
 )]
 struct Cli {
-    /// Provider config file (default: built-in strava)
-    #[arg(long, short, global = true)]
-    provider: Option<String>,
+    /// Provider config file(s). Repeatable for `serve` (one server, several
+    /// providers). No flag: `serve` loads the built-in strava + garmin pair;
+    /// single-provider CLI commands (login, activities) default to strava.
+    #[arg(long, short, global = true, action = clap::ArgAction::Append)]
+    provider: Vec<String>,
 
     /// Transport mode for MCP (when no subcommand)
     #[arg(long, default_value = "http")]
@@ -114,11 +117,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
     tracing_init::init_with_notifications(&cli.transport);
 
-    let provider = load_provider_config(cli.provider.as_deref())?;
-
     match cli.command {
-        Some(Command::Serve { host, port }) => run_server(host, port, provider).await,
-        Some(Command::Login) => run_login(provider).await,
+        Some(Command::Serve { host, port }) => {
+            run_server(host, port, load_provider_configs(&cli.provider)?).await
+        }
+        Some(Command::Login) => run_login(load_single_provider_config(&cli.provider)?).await,
         Some(Command::Activities {
             limit,
             sport_type,
@@ -129,7 +132,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             detail,
         }) => {
             let params = build_activity_params(limit, sport_type, after, before, detail);
-            run_activities(params, format, login, provider).await
+            run_activities(
+                params,
+                format,
+                login,
+                load_single_provider_config(&cli.provider)?,
+            )
+            .await
         }
         Some(Command::AuthStatus) => run_auth_status().await,
         Some(Command::CacheClear) => {
@@ -138,19 +147,43 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         None => {
             if cli.transport == "stdio" {
-                run_mcp_stdio(provider).await
+                run_mcp_stdio(load_provider_configs(&cli.provider)?).await
             } else {
-                run_server(cli.host, cli.port, provider).await
+                run_server(cli.host, cli.port, load_provider_configs(&cli.provider)?).await
             }
         }
     }
 }
 
-/// Load provider config from a TOML file path, or use the built-in Strava default
-fn load_provider_config(
-    path: Option<&str>,
+/// Load the provider configs a server instance will serve.
+///
+/// Explicit `--provider` files load verbatim; no flag loads the built-in
+/// strava + garmin pair, so a bare `serve` is multi-provider out of the box
+/// (one service serves every sciotte-scraped provider — ADR-021).
+fn load_provider_configs(
+    paths: &[String],
+) -> Result<Vec<ProviderConfig>, Box<dyn Error + Send + Sync>> {
+    if paths.is_empty() {
+        return Ok(vec![
+            ProviderConfig::strava_default()?,
+            ProviderConfig::garmin_default()?,
+        ]);
+    }
+    paths
+        .iter()
+        .map(|p| {
+            info!(provider = %p, "Loading provider config");
+            Ok(ProviderConfig::from_file(Path::new(p))?)
+        })
+        .collect()
+}
+
+/// Single-provider CLI commands (login, activities): the first `--provider`
+/// file, or the built-in Strava default when none is given.
+fn load_single_provider_config(
+    paths: &[String],
 ) -> Result<ProviderConfig, Box<dyn Error + Send + Sync>> {
-    match path {
+    match paths.first() {
         Some(p) => {
             info!(provider = %p, "Loading provider config");
             Ok(ProviderConfig::from_file(Path::new(p))?)
@@ -183,9 +216,19 @@ fn build_limiter() -> Result<Arc<SciotteLimiter>, Box<dyn Error + Send + Sync>> 
     Ok(SciotteLimiter::new(config))
 }
 
-fn create_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> AppScraper {
+/// Build one provider's scrape-plane scraper, applying the vision decorator
+/// when one is enabled (vision matters on the login fallbacks the scrape
+/// plane's `browser_login` path can still hit).
+fn create_scraper(
+    provider: ProviderConfig,
+    limiter: Arc<SciotteLimiter>,
+    decorator: Option<&LoginScraperDecorator>,
+) -> AppScraper {
     let config = ScraperConfig::default();
-    let chrome = ChromeScraper::new(config, provider);
+    let mut chrome = ChromeScraper::new(config, provider);
+    if let Some(decorate) = decorator {
+        chrome = decorate(chrome);
+    }
     let queued = QueuedScraper::new(chrome, limiter);
     CachedScraper::new(queued, &CacheConfig::default())
 }
@@ -231,48 +274,82 @@ impl dravr_sciotte::VisionModel for EmbacleVisionModel {
     }
 }
 
-/// Create a scraper with vision-based login via Copilot Headless LLM
+/// Build the vision decorator when the configured login mode uses it: a
+/// closure attaching one shared Copilot-headless vision model to every
+/// scrape-plane scraper and every ephemeral login-flow scraper.
 #[cfg(feature = "vision")]
-fn create_vision_scraper(provider: ProviderConfig, limiter: Arc<SciotteLimiter>) -> AppScraper {
-    let headless_config = embacle::CopilotHeadlessConfig::from_env();
-    info!("Initializing Copilot Headless LLM for vision login...");
-    let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config));
-
+fn build_login_decorator() -> Option<LoginScraperDecorator> {
     let config = ScraperConfig::default();
-    info!(login_mode = ?config.login_mode, "Vision scraper ready");
-    let chrome = ChromeScraper::new(config, provider).with_llm(Arc::new(EmbacleVisionModel(llm)));
-    let queued = QueuedScraper::new(chrome, limiter);
-    CachedScraper::new(queued, &CacheConfig::default())
+    if matches!(config.login_mode, LoginMode::Vision | LoginMode::Hybrid) {
+        let headless_config = embacle::CopilotHeadlessConfig::from_env();
+        info!(login_mode = ?config.login_mode, "Initializing Copilot Headless LLM for vision login...");
+        let llm = Arc::new(embacle::CopilotHeadlessRunner::with_config(headless_config));
+        let vision: Arc<dyn dravr_sciotte::VisionModel> = Arc::new(EmbacleVisionModel(llm));
+        Some(Box::new(move |scraper: ChromeScraper| {
+            scraper.with_llm(Arc::clone(&vision))
+        }))
+    } else {
+        None
+    }
+}
+
+/// Vision feature disabled: no decorator, selector login only.
+#[cfg(not(feature = "vision"))]
+fn build_login_decorator() -> Option<LoginScraperDecorator> {
+    None
+}
+
+/// Build the shared server state serving every loaded provider (ADR-021:
+/// one multi-tenant, multi-provider instance).
+fn build_state(
+    providers: Vec<ProviderConfig>,
+    limiter: &Arc<SciotteLimiter>,
+) -> Arc<ServerState> {
+    let decorator = build_login_decorator();
+    let pairs: Vec<(ProviderConfig, AppScraper)> = providers
+        .into_iter()
+        .map(|provider| {
+            let scraper = create_scraper(provider.clone(), Arc::clone(limiter), decorator.as_ref());
+            (provider, scraper)
+        })
+        .collect();
+    Arc::new(ServerState::new(pairs, Arc::clone(limiter), decorator))
+}
+
+/// Load the disk-persisted session into the store — only meaningful for a
+/// single-provider instance: the session file carries no provider tag, so a
+/// multi-provider server relies on the platform re-importing its
+/// sessions-of-record instead (ADR-021).
+async fn load_persisted_session(state: &Arc<ServerState>) {
+    if !state.single_provider() {
+        return;
+    }
+    if let Ok(Some(session)) = auth::load_session().await {
+        if let Ok(provider) = state.resolve_provider(None) {
+            info!("Loaded persisted session");
+            state.add_session(session, provider).await;
+        }
+    }
 }
 
 async fn run_server(
     host: String,
     port: u16,
-    provider: ProviderConfig,
+    providers: Vec<ProviderConfig>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    // Capture before `provider` is moved into the scraper — reported in the
-    // authenticated login responses so the platform persists under it (ADR-021).
-    let provider_name = provider.provider.name.clone();
     let limiter = build_limiter()?;
     let watchdog = limiter.spawn_watchdog();
 
-    #[cfg(feature = "vision")]
-    let cached = {
-        let config = ScraperConfig::default();
-        if matches!(config.login_mode, LoginMode::Vision | LoginMode::Hybrid) {
-            create_vision_scraper(provider, Arc::clone(&limiter))
-        } else {
-            create_scraper(provider, Arc::clone(&limiter))
-        }
-    };
-    #[cfg(not(feature = "vision"))]
-    let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
+    let state = build_state(providers, &limiter);
+    info!(providers = ?state.provider_names(), "Serving providers");
+    // Reap abandoned interactive logins on the same cadence and TTL as the
+    // limiter's parked permits — each stale flow frees a browser and a slot.
+    let flow_reaper = state.spawn_login_flow_reaper(
+        limiter.config().parked_permit_ttl,
+        limiter.config().watchdog_interval,
+    );
 
-    if let Ok(Some(session)) = auth::load_session().await {
-        info!("Loaded persisted session");
-        state.set_session(session).await;
-    }
+    load_persisted_session(&state).await;
 
     let app = router::build_router(state);
 
@@ -281,21 +358,17 @@ async fn run_server(
     info!(address = %addr, "Server listening");
     let serve_result = axum::serve(listener, app).await;
     watchdog.abort();
+    flow_reaper.abort();
     serve_result?;
     Ok(())
 }
 
-async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let provider_name = provider.provider.name.clone();
+async fn run_mcp_stdio(providers: Vec<ProviderConfig>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = build_limiter()?;
     let watchdog = limiter.spawn_watchdog();
 
-    let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
-
-    if let Ok(Some(session)) = auth::load_session().await {
-        state.set_session(session).await;
-    }
+    let state = build_state(providers, &limiter);
+    load_persisted_session(&state).await;
 
     let server = Arc::new(McpServer::new(
         "dravr-sciotte",
@@ -310,7 +383,7 @@ async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + S
 
 async fn run_login(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = build_limiter()?;
-    let cached = create_scraper(provider, limiter);
+    let cached = create_scraper(provider, limiter, build_login_decorator().as_ref());
 
     println!("Opening browser for login...");
     println!("Complete the login in the browser window that opens.");
@@ -358,7 +431,7 @@ async fn run_activities(
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let limiter = build_limiter()?;
-    let cached = create_scraper(provider, limiter);
+    let cached = create_scraper(provider, limiter, build_login_decorator().as_ref());
 
     let session = if force_login {
         println!("Opening browser for login...");

@@ -42,11 +42,17 @@ impl McpTool<ServerState> for GetDailySummaryTool {
         _ctx: &ToolContext,
         arguments: Value,
     ) -> ToolResponse {
-        let Some(session) = state.session().await else {
+        let Some(entry) = state.session_entry().await else {
             return ToolResponse::error(
                 "Not authenticated. Use auth_status to check and browser_login to start login."
                     .to_owned(),
             );
+        };
+        let Some(scraper) = state.scraper_for(&entry.provider) else {
+            return ToolResponse::error(format!(
+                "Session provider '{}' is not served by this instance",
+                entry.provider
+            ));
         };
 
         let Some(date_str) = arguments["date"].as_str() else {
@@ -61,7 +67,7 @@ impl McpTool<ServerState> for GetDailySummaryTool {
 
         let params = HealthParams { date };
 
-        match state.scraper().get_daily_summary(&session, &params).await {
+        match scraper.get_daily_summary(&entry.session, &params).await {
             Ok(summary) => {
                 ToolResponse::text(serde_json::to_string_pretty(&summary).unwrap_or_default())
             }
