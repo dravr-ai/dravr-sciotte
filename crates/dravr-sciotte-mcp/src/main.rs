@@ -61,9 +61,10 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let watchdog = limiter.spawn_watchdog();
 
     let chrome = ChromeScraper::default_config()?;
+    let provider_name = chrome.provider_name().to_owned();
     let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
     let cached = CachedScraper::new(queued, &CacheConfig::default());
-    let state = Arc::new(ServerState::new(cached, limiter));
+    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
     let tool_registry = build_tool_registry();
     let server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",

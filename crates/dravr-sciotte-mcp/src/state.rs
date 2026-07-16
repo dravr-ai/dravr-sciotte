@@ -41,21 +41,34 @@ pub struct ServerState {
     scraper: AppScraper,
     limiter: Arc<SciotteLimiter>,
     sessions: RwLock<SessionStore>,
+    provider: String,
 }
 
 impl ServerState {
-    /// Create server state with the given cached+queued scraper and limiter.
-    pub fn new(scraper: AppScraper, limiter: Arc<SciotteLimiter>) -> Self {
+    /// Create server state with the given cached+queued scraper, limiter, and the
+    /// provider name this instance serves (from its `ProviderConfig`).
+    ///
+    /// The provider is reported in the `authenticated` login responses so a
+    /// platform caller can persist the session under the right provider without
+    /// tracking it itself across the multi-step 2FA flow (ADR-021).
+    pub fn new(scraper: AppScraper, limiter: Arc<SciotteLimiter>, provider: String) -> Self {
         Self {
             scraper,
             limiter,
             sessions: RwLock::new(SessionStore::default()),
+            provider,
         }
     }
 
     /// Get a reference to the cached scraper
     pub const fn scraper(&self) -> &AppScraper {
         &self.scraper
+    }
+
+    /// The provider name this instance serves (e.g. `"garmin"`, `"strava"`).
+    #[must_use]
+    pub fn provider_name(&self) -> &str {
+        &self.provider
     }
 
     /// Get a reference to the shared backpressure limiter

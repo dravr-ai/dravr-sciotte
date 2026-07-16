@@ -128,6 +128,12 @@ pub struct ChromeScraper {
 }
 
 impl ChromeScraper {
+    /// The provider name this scraper serves (e.g. `"garmin"`, `"strava"`).
+    #[must_use]
+    pub fn provider_name(&self) -> &str {
+        &self.provider.provider.name
+    }
+
     /// Create a scraper with explicit provider and browser config
     #[must_use]
     pub fn new(config: ScraperConfig, provider: ProviderConfig) -> Self {

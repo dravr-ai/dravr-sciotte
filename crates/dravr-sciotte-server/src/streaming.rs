@@ -400,6 +400,9 @@ async fn handle_login_result(result: ScraperResult<LoginResult>, state: &SharedS
                 "status": "authenticated",
                 "session_id": session_id,
                 "cookie_count": cookie_count,
+                // Reported so the platform persists under the right provider
+                // without tracking it across the multi-step flow (ADR-021).
+                "provider": state.provider_name(),
             }))
             .into_response()
         }
@@ -485,6 +488,7 @@ pub async fn submit_otp(
                 "status": "authenticated",
                 "session_id": session_id,
                 "cookie_count": cookie_count,
+                "provider": state.provider_name(),
             }))
             .into_response()
         }
@@ -554,6 +558,7 @@ pub async fn select_two_factor(
                 "status": "authenticated",
                 "session_id": session_id,
                 "cookie_count": cookie_count,
+                "provider": state.provider_name(),
             }))
             .into_response()
         }

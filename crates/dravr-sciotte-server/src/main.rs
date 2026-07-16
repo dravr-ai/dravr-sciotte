@@ -250,6 +250,9 @@ async fn run_server(
     port: u16,
     provider: ProviderConfig,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Capture before `provider` is moved into the scraper — reported in the
+    // authenticated login responses so the platform persists under it (ADR-021).
+    let provider_name = provider.provider.name.clone();
     let limiter = build_limiter()?;
     let watchdog = limiter.spawn_watchdog();
 
@@ -264,7 +267,7 @@ async fn run_server(
     };
     #[cfg(not(feature = "vision"))]
     let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(ServerState::new(cached, limiter));
+    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
 
     if let Ok(Some(session)) = auth::load_session().await {
         info!("Loaded persisted session");
@@ -283,11 +286,12 @@ async fn run_server(
 }
 
 async fn run_mcp_stdio(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let provider_name = provider.provider.name.clone();
     let limiter = build_limiter()?;
     let watchdog = limiter.spawn_watchdog();
 
     let cached = create_scraper(provider, Arc::clone(&limiter));
-    let state = Arc::new(ServerState::new(cached, limiter));
+    let state = Arc::new(ServerState::new(cached, limiter, provider_name));
 
     if let Ok(Some(session)) = auth::load_session().await {
         state.set_session(session).await;
