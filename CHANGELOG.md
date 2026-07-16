@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0] — 2026-07-16
+
+### Added
+
+- feat(server): one multi-provider instance — scraper map, provider-tagged sessions, flow_id login plane (ADR-021) Bare serve loads garmin+strava (repeatable --provider overrides); sessions carry their provider so import/export ({provider, session}) and every scrape route to the right scraper; interactive logins run on ephemeral per-flow scrapers parked under a server-minted flow_id with the permit held in the flow (N concurrent users/providers, TTL-reaped), replacing the single-scraper parking; MCP tools/health follow. +7 routing/flow tests; validated live: garmin OTP login + scrape via the platform.
+- feat(server): accept before/after epoch window on GET /api/activities (ADR-021) ActivityQuery gains after/before Unix-epoch params mapped into ActivityParams so the platform's remote scrape can request a historical window, matching the in-process path.
+- feat(server): report provider in the authenticated login responses (ADR-021) ServerState carries the provider name (from its ProviderConfig) and includes it in every authenticated response (login-with-credentials / submit-otp / select-2fa), so a platform caller persists the session under the right provider without tracking it across the multi-step 2FA flow — the platform stays stateless (no DB/Redis pointer). Adds ChromeScraper::provider_name.
+
+### Fixed
+
+- fix(vision): 2FA continuations carry credentials + resolve option ids against the parked chooser analysis select_two_factor now drives the same page types as the login driver (oauth_password fillable — the parked flow carries email/password; chained choosers re-park; passkey bypass), resolves the echoed option id against the STORED analysis (LLM ids are non-deterministic per analysis; coords stay valid on the unchanged page), and the server re-parks the flow on continuation errors instead of burning browser+permit. +scripted-VisionModel regression test; validated live: Strava via Google (password chooser -> 2SV phone-tap) through the platform.
+
+### Other
+
+- build(docker): vision feature + Copilot CLI in the service image The deployed service runs DRAVR_SCIOTTE_LOGIN_MODE=hybrid; vision login needs the feature compiled in and the pinned Copilot CLI (>=1.0.59, mirroring the pierre image) available at runtime.
+
+
+
 ## [0.7.16] — 2026-07-13
 
 
