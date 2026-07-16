@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
+use axum::response::Response;
 use chrono::Utc;
 use dravr_sciotte::cache::CachedScraper;
 use dravr_sciotte::config::{CacheConfig, ScraperConfig};
@@ -60,7 +61,7 @@ fn test_session(id: &str) -> AuthSession {
     }
 }
 
-async fn body_json(response: axum::response::Response) -> Value {
+async fn body_json(response: Response) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
@@ -283,19 +284,14 @@ async fn stale_login_flows_are_evicted() {
 
     // A generous TTL keeps the fresh flow…
     assert_eq!(
-        state
-            .evict_stale_login_flows(Duration::from_secs(3600))
-            .await,
+        state.evict_stale_login_flows(Duration::from_hours(1)).await,
         0
     );
     assert_eq!(state.login_flow_count().await, 1);
 
     // …a zero TTL reaps it, freeing its permit back to the limiter.
     let before = state.limiter().available_permits();
-    assert_eq!(
-        state.evict_stale_login_flows(Duration::ZERO).await,
-        1
-    );
+    assert_eq!(state.evict_stale_login_flows(Duration::ZERO).await, 1);
     assert_eq!(state.login_flow_count().await, 0);
     assert_eq!(state.limiter().available_permits(), before + 1);
 }

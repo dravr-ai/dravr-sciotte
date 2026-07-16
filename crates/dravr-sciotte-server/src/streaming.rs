@@ -450,6 +450,13 @@ async fn poll_for_login(
 /// Conclude one step of an interactive login: park the flow on a continuation
 /// (returning `flow_id` so the caller can resume it), store the session on
 /// success, and release everything on a terminal failure.
+///
+/// `repark_on_error` keeps the flow resumable when a continuation step errors
+/// (e.g. a mis-matched 2FA option id): the scraper still holds the parked
+/// browser internally, so dropping it here would burn a live login the caller
+/// could retry. First-step errors pass `false` — a failed initial login holds
+/// no browser worth keeping, and re-parking it would pin a permit until the
+/// TTL reaper ran.
 async fn conclude_login_step(
     state: &SharedState,
     provider: String,
@@ -457,6 +464,7 @@ async fn conclude_login_step(
     permit: ScrapePermit,
     flow_id: String,
     result: ScraperResult<LoginResult>,
+    repark_on_error: bool,
 ) -> Response {
     match result {
         Ok(LoginResult::Success(session)) => {
@@ -532,6 +540,11 @@ async fn conclude_login_step(
         }
         Err(e) => {
             error!(error = %e, provider = %provider, "Login error");
+            if repark_on_error {
+                state
+                    .park_login_flow(flow_id, scraper, provider, permit)
+                    .await;
+            }
             scraper_error_response(&e)
         }
     }
@@ -586,7 +599,7 @@ pub async fn credential_login(
         .credential_login(&request.email, &request.password, &request.method)
         .await;
 
-    conclude_login_step(&state, provider, scraper, permit, flow_id, result).await
+    conclude_login_step(&state, provider, scraper, permit, flow_id, result, false).await
 }
 
 /// POST /auth/submit-otp handler.
@@ -610,6 +623,7 @@ pub async fn submit_otp(
         flow.permit,
         flow_id,
         result,
+        true,
     )
     .await
 }
@@ -635,6 +649,7 @@ pub async fn select_two_factor(
         flow.permit,
         flow_id,
         result,
+        true,
     )
     .await
 }

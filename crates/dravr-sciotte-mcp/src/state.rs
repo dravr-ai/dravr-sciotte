@@ -317,9 +317,7 @@ impl ServerState {
     ) -> Result<(String, LoginFlow), FlowLookupError> {
         let mut flows = self.login_flows.lock().await;
         match flow_id {
-            Some(id) => flows
-                .remove_entry(id)
-                .ok_or(FlowLookupError::NotFound),
+            Some(id) => flows.remove_entry(id).ok_or(FlowLookupError::NotFound),
             None => match flows.len() {
                 0 => Err(FlowLookupError::NotFound),
                 1 => {

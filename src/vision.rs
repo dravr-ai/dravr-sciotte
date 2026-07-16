@@ -34,6 +34,23 @@ use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 use crate::vision_model::VisionModel;
 
+/// An in-flight interactive login parked between steps: the live browser plus
+/// the credentials later steps may still need — e.g. Google shows its password
+/// page only after the user picks "Enter your password" on the verification
+/// chooser, so `select_two_factor` must be able to fill it. Held in memory only
+/// (never logged, never persisted), same lifetime and TTL as the browser itself.
+/// `two_factor_options` snapshots the chooser analysis that produced a parked
+/// `TwoFactorChoice`: the LLM assigns non-deterministic option ids per analysis,
+/// so the echoed id must resolve against the SAME analysis the caller saw (its
+/// coordinates stay valid — the parked page hasn't changed).
+struct ParkedVisionLogin {
+    browser: Browser,
+    page: chromiumoxide::Page,
+    email: String,
+    password: String,
+    two_factor_options: Vec<TwoFactorOptionCoords>,
+}
+
 /// Vision-based scraper that uses LLM screenshot analysis instead of CSS selectors.
 ///
 /// Implements the same `ActivityScraper` trait as `ChromeScraper` but extracts data
@@ -48,10 +65,10 @@ pub struct VisionScraper {
     provider: ProviderConfig,
     llm: Arc<dyn VisionModel>,
     browser: Mutex<Option<Arc<Browser>>>,
-    /// Browser + page parked between vision-driven `credential_login` and a
-    /// follow-up 2FA call. Wrapped in `PendingLogin` so abandoned flows are
-    /// evicted after `ScraperConfig::pending_login_ttl_secs`.
-    pending_login: Mutex<Option<PendingLogin<(Browser, chromiumoxide::Page)>>>,
+    /// Parked login flow (browser + page + credentials) between vision-driven
+    /// `credential_login` and a follow-up 2FA call. Wrapped in `PendingLogin`
+    /// so abandoned flows are evicted after `ScraperConfig::pending_login_ttl_secs`.
+    pending_login: Mutex<Option<PendingLogin<ParkedVisionLogin>>>,
 }
 
 impl VisionScraper {
@@ -69,14 +86,14 @@ impl VisionScraper {
     /// Park an in-flight 2FA login so a follow-up `submit_otp` /
     /// `select_two_factor` can resume the same Chrome page. Drops any
     /// previously parked session so the field stays a single-slot queue.
-    async fn store_pending_login(&self, browser: Browser, page: chromiumoxide::Page) {
-        *self.pending_login.lock().await = Some(PendingLogin::new((browser, page)));
+    async fn store_pending_login(&self, parked: ParkedVisionLogin) {
+        *self.pending_login.lock().await = Some(PendingLogin::new(parked));
     }
 
     /// Take the parked 2FA login if it was stored less than
     /// `config.pending_login_ttl_secs` ago. Expired entries are dropped on
     /// access — chromiumoxide's `kill_on_drop` reaps the held Chrome.
-    async fn take_pending_login(&self) -> Option<(Browser, chromiumoxide::Page)> {
+    async fn take_pending_login(&self) -> Option<ParkedVisionLogin> {
         let parked = self.pending_login.lock().await.take()?;
         let ttl = Duration::from_secs(self.config.pending_login_ttl_secs);
         let result = parked.into_inner_if_fresh(ttl);
@@ -236,6 +253,97 @@ impl VisionScraper {
             )
             .await;
             time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        }
+    }
+
+    /// Poll the parked page after a 2FA option click until a terminal outcome.
+    ///
+    /// Same page-type coverage as the `credential_login` driver: a 2FA choice
+    /// can lead anywhere in the provider's flow — Google's "Enter your
+    /// password" lands on the `oauth_password` page (fillable because the
+    /// parked flow carries the credentials), a chained chooser re-parks as
+    /// another `TwoFactorChoice`, and a phone tap surfaces as `NumberMatch`.
+    async fn await_two_factor_outcome(
+        &self,
+        parked: ParkedVisionLogin,
+        timeout_secs: u64,
+    ) -> ScraperResult<LoginResult> {
+        let ParkedVisionLogin {
+            browser,
+            page,
+            email,
+            password,
+            ..
+        } = parked;
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if Instant::now() > deadline {
+                return Err(ScraperError::Auth {
+                    reason: "2FA verification timed out".to_owned(),
+                });
+            }
+
+            let result_analysis = self.analyze_page(&page).await?;
+            match result_analysis.page_type.as_str() {
+                "oauth_email" => {
+                    info!("Vision: 2FA continuation — filling email field");
+                    self.vision_fill_and_submit(&page, &result_analysis, &email)
+                        .await?;
+                }
+                "oauth_password" => {
+                    info!("Vision: 2FA continuation — filling password field");
+                    self.vision_fill_and_submit(&page, &result_analysis, &password)
+                        .await?;
+                }
+                "passkey_challenge" => {
+                    info!("Vision: 2FA continuation — bypassing passkey challenge");
+                    self.handle_passkey_challenge(&page, &self.config).await;
+                }
+                "two_factor_selection" | "phone_approval" | "number_match" => {
+                    if let Some(result) = Self::handle_2fa_page(&result_analysis) {
+                        // Chained chooser: re-park with ITS options so the next
+                        // selection resolves against the analysis the caller saw.
+                        let two_factor_options = result_analysis.two_factor_options.clone();
+                        self.store_pending_login(ParkedVisionLogin {
+                            browser,
+                            page,
+                            email,
+                            password,
+                            two_factor_options,
+                        })
+                        .await;
+                        return Ok(result);
+                    }
+                    time::sleep(Duration::from_millis(self.config.login_poll_interval_ms)).await;
+                }
+                "otp_entry" => {
+                    let two_factor_options = result_analysis.two_factor_options.clone();
+                    self.store_pending_login(ParkedVisionLogin {
+                        browser,
+                        page,
+                        email,
+                        password,
+                        two_factor_options,
+                    })
+                    .await;
+                    return Ok(LoginResult::OtpRequired);
+                }
+                "success" => {
+                    let session = capture_cookies_as_session(&page).await?;
+                    return Ok(LoginResult::Success(session));
+                }
+                "error" => {
+                    return Ok(LoginResult::Failed(
+                        result_analysis
+                            .error_message
+                            .unwrap_or_else(|| "2FA failed".to_owned()),
+                    ));
+                }
+                _ => {
+                    time::sleep(Duration::from_millis(self.config.login_poll_interval_ms)).await;
+                }
+            }
         }
     }
 
@@ -483,7 +591,14 @@ impl ActivityScraper for VisionScraper {
                 }
                 "two_factor_selection" | "otp_entry" | "phone_approval" | "number_match" => {
                     if let Some(result) = Self::handle_2fa_page(&analysis) {
-                        self.store_pending_login(browser, page).await;
+                        self.store_pending_login(ParkedVisionLogin {
+                            browser,
+                            page,
+                            email: email.to_owned(),
+                            password: password.to_owned(),
+                            two_factor_options: analysis.two_factor_options.clone(),
+                        })
+                        .await;
                         return Ok(result);
                     }
                     time::sleep(Duration::from_secs(3)).await;
@@ -511,12 +626,18 @@ impl ActivityScraper for VisionScraper {
     }
 
     async fn submit_otp(&self, code: &str) -> ScraperResult<LoginResult> {
-        let (browser, page) =
-            self.take_pending_login()
-                .await
-                .ok_or_else(|| ScraperError::Auth {
-                    reason: "No pending OTP session".to_owned(),
-                })?;
+        let ParkedVisionLogin {
+            browser,
+            page,
+            email,
+            password,
+            ..
+        } = self
+            .take_pending_login()
+            .await
+            .ok_or_else(|| ScraperError::Auth {
+                reason: "No pending OTP session".to_owned(),
+            })?;
 
         let analysis = self.analyze_page(&page).await?;
         self.vision_fill_and_submit(&page, &analysis, code).await?;
@@ -534,33 +655,61 @@ impl ActivityScraper for VisionScraper {
                     .unwrap_or_else(|| "OTP verification failed".to_owned()),
             )),
             _ => {
-                self.store_pending_login(browser, page).await;
+                let two_factor_options = result_analysis.two_factor_options.clone();
+                self.store_pending_login(ParkedVisionLogin {
+                    browser,
+                    page,
+                    email,
+                    password,
+                    two_factor_options,
+                })
+                .await;
                 Ok(LoginResult::OtpRequired)
             }
         }
     }
 
     async fn select_two_factor(&self, option_id: &str) -> ScraperResult<LoginResult> {
-        let (browser, page) =
-            self.take_pending_login()
-                .await
-                .ok_or_else(|| ScraperError::Auth {
-                    reason: "No pending 2FA session".to_owned(),
-                })?;
+        let parked = self
+            .take_pending_login()
+            .await
+            .ok_or_else(|| ScraperError::Auth {
+                reason: "No pending 2FA session".to_owned(),
+            })?;
 
-        let analysis = self.analyze_page(&page).await?;
-        let option = analysis
-            .two_factor_options
-            .iter()
-            .find(|o| o.id == option_id);
-
-        if let Some(opt) = option {
-            browser_utils::cdp_click_at(&page, opt.x, opt.y).await?;
-        } else {
-            self.store_pending_login(browser, page).await;
-            return Err(ScraperError::Auth {
-                reason: format!("2FA option '{option_id}' not found"),
-            });
+        // Resolve the echoed id against the SAME analysis that presented the
+        // chooser: the LLM assigns non-deterministic ids per analysis, so a
+        // fresh re-analysis can rename every option ("phone_tap" → "tap_yes")
+        // and strand the caller. The stored coordinates stay valid — the
+        // parked page hasn't changed since the choice was offered. A fresh
+        // analysis is the fallback for flows parked before options existed.
+        let clicked =
+            if let Some(opt) = parked.two_factor_options.iter().find(|o| o.id == option_id) {
+                browser_utils::cdp_click_at(&parked.page, opt.x, opt.y).await?;
+                true
+            } else {
+                let analysis = self.analyze_page(&parked.page).await?;
+                match analysis
+                    .two_factor_options
+                    .iter()
+                    .find(|o| o.id == option_id)
+                {
+                    Some(opt) => {
+                        browser_utils::cdp_click_at(&parked.page, opt.x, opt.y).await?;
+                        true
+                    }
+                    None => false,
+                }
+            };
+        if !clicked {
+            let known: Vec<&str> = parked
+                .two_factor_options
+                .iter()
+                .map(|o| o.id.as_str())
+                .collect();
+            let reason = format!("2FA option '{option_id}' not found (offered: {known:?})");
+            self.store_pending_login(parked).await;
+            return Err(ScraperError::Auth { reason });
         }
 
         let timeout = if option_id == "app" {
@@ -570,37 +719,7 @@ impl ActivityScraper for VisionScraper {
         };
 
         time::sleep(Duration::from_secs(self.config.page_load_wait_secs)).await;
-
-        let deadline = Instant::now() + Duration::from_secs(timeout);
-        loop {
-            if Instant::now() > deadline {
-                return Err(ScraperError::Auth {
-                    reason: "2FA verification timed out".to_owned(),
-                });
-            }
-
-            let result_analysis = self.analyze_page(&page).await?;
-            match result_analysis.page_type.as_str() {
-                "otp_entry" => {
-                    self.store_pending_login(browser, page).await;
-                    return Ok(LoginResult::OtpRequired);
-                }
-                "success" => {
-                    let session = capture_cookies_as_session(&page).await?;
-                    return Ok(LoginResult::Success(session));
-                }
-                "error" => {
-                    return Ok(LoginResult::Failed(
-                        result_analysis
-                            .error_message
-                            .unwrap_or_else(|| "2FA failed".to_owned()),
-                    ));
-                }
-                _ => {
-                    time::sleep(Duration::from_millis(self.config.login_poll_interval_ms)).await;
-                }
-            }
-        }
+        self.await_two_factor_outcome(parked, timeout).await
     }
 
     async fn is_authenticated(&self, session: &AuthSession) -> bool {
@@ -749,7 +868,7 @@ struct PageAction {
 }
 
 /// A 2FA option with click coordinates
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 struct TwoFactorOptionCoords {
     id: String,
     label: String,

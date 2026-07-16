@@ -294,7 +294,9 @@ async fn import_session_handler(
             .into_response();
     }
     let session_id = request.session.session_id.clone();
-    state.add_session(request.session, request.provider.clone()).await;
+    state
+        .add_session(request.session, request.provider.clone())
+        .await;
     info!(session_id = %session_id, provider = %request.provider, "Session imported from platform");
     Json(json!({"status": "imported", "session_id": session_id, "provider": request.provider}))
         .into_response()

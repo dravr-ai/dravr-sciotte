@@ -30,8 +30,8 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte::ActivityScraper;
-use dravr_sciotte_mcp::state::LoginScraperDecorator;
 use dravr_sciotte_mcp::state::AppScraper;
+use dravr_sciotte_mcp::state::LoginScraperDecorator;
 use dravr_sciotte_mcp::{build_tool_registry, ServerState};
 use dravr_sciotte_server::router;
 use dravr_tronc::mcp::transport::stdio;
@@ -301,10 +301,7 @@ fn build_login_decorator() -> Option<LoginScraperDecorator> {
 
 /// Build the shared server state serving every loaded provider (ADR-021:
 /// one multi-tenant, multi-provider instance).
-fn build_state(
-    providers: Vec<ProviderConfig>,
-    limiter: &Arc<SciotteLimiter>,
-) -> Arc<ServerState> {
+fn build_state(providers: Vec<ProviderConfig>, limiter: &Arc<SciotteLimiter>) -> Arc<ServerState> {
     let decorator = build_login_decorator();
     let pairs: Vec<(ProviderConfig, AppScraper)> = providers
         .into_iter()
