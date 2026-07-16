@@ -7,14 +7,21 @@
 FROM rust:1.96-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp
+# --features vision: the deployed service runs DRAVR_SCIOTTE_LOGIN_MODE=hybrid,
+# where selector-login failures degrade to LLM screenshot reasoning instead of
+# hard errors (validated live: the Strava/Google login path requires it).
+RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp \
+    --features dravr-sciotte-server/vision
 
 FROM debian:bookworm-slim
 
+# nodejs + npm + git: required by the Copilot CLI the vision login's LLM
+# provider (embacle copilot_headless) spawns at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium \
     fonts-liberation \
+    git \
     libappindicator3-1 \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -30,8 +37,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
+    nodejs \
+    npm \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# GitHub Copilot CLI for the vision LLM (ACP mode). Pinned for reproducible
+# builds — must stay >=1.0.59, the first release whose `initialize` advertises
+# the mcpCapabilities the native tool-calling bridge relies on (mirrors the
+# pierre server image's pin; bump both together after validating).
+ARG COPILOT_CLI_VERSION=1.0.59
+RUN npm install -g "@github/copilot-linux-x64@${COPILOT_CLI_VERSION}" \
+    && ln -sf "$(npm prefix -g)/bin/copilot-linux-x64" /usr/local/bin/copilot \
+    && copilot --version
 
 RUN useradd --create-home --shell /bin/bash dravr
 
