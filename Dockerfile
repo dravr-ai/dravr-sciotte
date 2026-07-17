@@ -53,11 +53,23 @@ RUN npm install -g "@github/copilot-linux-x64@${COPILOT_CLI_VERSION}" \
 
 RUN useradd --create-home --shell /bin/bash dravr
 
+# Headless-Chromium wrapper: Cloud Run has no X server, and Debian's chromium
+# dies on X11 Ozone init under --headless=new without --ozone-platform=headless.
+# The wrapper injects it (mirrors the pierre server image). Fail the build early
+# if the expected chromium binary path is wrong for this base image.
+COPY docker/chromium-headless.sh /usr/local/bin/chromium-headless
+RUN chmod +x /usr/local/bin/chromium-headless \
+    && test -x /usr/lib/chromium/chromium
+
 COPY --from=builder /build/target/release/dravr-sciotte-server /usr/local/bin/
 COPY --from=builder /build/target/release/dravr-sciotte-mcp /usr/local/bin/
 COPY --from=builder /build/providers/ /app/providers/
 
-ENV CHROME_PATH=/usr/bin/chromium
+# Point both the dravr-sciotte config (CHROME_PATH) and chromiumoxide's
+# auto-detection (CHROME) at the headless wrapper so every launch path — the
+# credential-login stack and the WebSocket streaming login — is display-less-safe.
+ENV CHROME_PATH=/usr/local/bin/chromium-headless
+ENV CHROME=/usr/local/bin/chromium-headless
 
 USER dravr
 WORKDIR /home/dravr
