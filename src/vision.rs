@@ -34,6 +34,16 @@ use crate::provider::ProviderConfig;
 use crate::types::ActivityScraper;
 use crate::vision_model::VisionModel;
 
+/// JPEG quality (0-100) for vision-analysis screenshots. Low enough to keep a
+/// full-page SSO login screenshot far under the model's request-size cap, high
+/// enough for the LLM to read field labels and buttons.
+const VISION_SCREENSHOT_QUALITY: i64 = 55;
+
+/// Raw screenshot bytes above which we drop from full-page to viewport-only
+/// before base64-encoding. The vision request has a ~5 MB cap and base64
+/// inflates by 4/3, so keep raw under ~3 MB to leave headroom for the prompt.
+const MAX_VISION_SCREENSHOT_BYTES: usize = 3_000_000;
+
 /// An in-flight interactive login parked between steps: the live browser plus
 /// the credentials later steps may still need — e.g. Google shows its password
 /// page only after the user picks "Enter your password" on the verification
@@ -125,19 +135,42 @@ impl VisionScraper {
         Ok(browser)
     }
 
-    /// Take a full-page screenshot and encode as base64 PNG
+    /// Capture the current page as a base64 JPEG for the vision LLM.
+    ///
+    /// JPEG — not PNG — because a full-page PNG of a tall SSO login page can
+    /// exceed the model's request-size cap (a real Garmin login hit 7.4 MB vs a
+    /// 5 MB limit and was rejected as "image too large", silently breaking
+    /// vision login). JPEG at [`VISION_SCREENSHOT_QUALITY`] keeps the same
+    /// full-page context an order of magnitude smaller. If a JPEG is *still*
+    /// oversized (a pathologically long page), fall back to a viewport-only
+    /// capture so page analysis always has an image to reason about rather than
+    /// erroring — a partial view beats no view.
     async fn screenshot_base64(&self, page: &chromiumoxide::Page) -> ScraperResult<String> {
-        let params = ScreenshotParams::builder()
-            .format(CaptureScreenshotFormat::Png)
-            .full_page(true)
-            .build();
+        let capture = |full_page: bool| {
+            ScreenshotParams::builder()
+                .format(CaptureScreenshotFormat::Jpeg)
+                .quality(VISION_SCREENSHOT_QUALITY)
+                .full_page(full_page)
+                .build()
+        };
 
-        let data = page
-            .screenshot(params)
-            .await
-            .map_err(|e| ScraperError::Browser {
-                reason: format!("Failed to take screenshot: {e}"),
-            })?;
+        let shot = |params| async {
+            page.screenshot(params)
+                .await
+                .map_err(|e| ScraperError::Browser {
+                    reason: format!("Failed to take screenshot: {e}"),
+                })
+        };
+
+        let mut data = shot(capture(true)).await?;
+        if data.len() > MAX_VISION_SCREENSHOT_BYTES {
+            warn!(
+                bytes = data.len(),
+                cap = MAX_VISION_SCREENSHOT_BYTES,
+                "Full-page vision screenshot over the model size cap — retrying viewport-only"
+            );
+            data = shot(capture(false)).await?;
+        }
 
         Ok(BASE64_STANDARD.encode(&data))
     }

@@ -13,11 +13,20 @@ COPY . .
 RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp \
     --features dravr-sciotte-server/vision
 
-FROM debian:bookworm-slim
+# trixie (not bookworm): runs the SAME chromium build the pierre server image
+# proves in production, eliminating a base-image version divergence for the
+# headless-Chrome launch. `apt-get upgrade -y` + the cache-bust ARG patch CVEs
+# on every build — this container renders untrusted provider login pages, so
+# staying current matters (mirrors the pierre image's posture).
+FROM debian:trixie-slim
+
+ARG APT_SECURITY_EPOCH=2026-07-17
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "apt security epoch: ${APT_SECURITY_EPOCH}" \
+    && apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium \
     fonts-liberation \
