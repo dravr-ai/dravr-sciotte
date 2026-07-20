@@ -137,6 +137,14 @@ pub struct ListPagination {
     /// JavaScript accept so existing providers are unchanged.
     #[serde(default = "default_list_accept")]
     pub accept: String,
+    /// Optional fresh-head list XHR fetched once before an interval walk, with
+    /// `{page}` substituted by [`first_page`](Self::first_page). Interval-mode
+    /// sources (Strava's `graph_date_range` training-log feed) only carry
+    /// complete weeks, so the newest days never appear in them; this fetch
+    /// stashes the live list's first page into `window.__dravrCaptures` so the
+    /// provider's `js_extract` can merge the fresh head in (deduped by id).
+    #[serde(default)]
+    pub fresh_url_template: Option<String>,
 }
 
 const fn default_first_page() -> u32 {
@@ -328,6 +336,24 @@ mod tests {
         assert_eq!(config.provider.name, "strava");
         assert!(config.list_page.url.contains("athlete/training"));
         assert!(config.detail_page.url_template.contains("{id}"));
+    }
+
+    #[test]
+    fn strava_default_pairs_interval_walk_with_fresh_head_fetch() {
+        let config = ProviderConfig::strava_default().unwrap(); // Safe: test fixture
+        let pagination = config.list_page.pagination.unwrap(); // Safe: test fixture
+                                                               // Interval mode alone only sees complete weeks; the fresh-head
+                                                               // template is what keeps the newest days visible.
+        assert!(pagination.url_template.contains("{interval}"));
+        let fresh = pagination.fresh_url_template.unwrap(); // Safe: bundled config
+        assert!(fresh.contains("/athlete/training_activities"));
+        assert!(fresh.contains("{page}"));
+        // The js_extract must merge the fresh capture, not just fetch it.
+        assert!(config
+            .list_page
+            .js_extract
+            .as_deref()
+            .is_some_and(|js| js.contains("training_activities")));
     }
 
     #[test]

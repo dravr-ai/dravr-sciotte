@@ -191,6 +191,57 @@ js_extract = '''
         } catch (e) {}
     }
 
+    // Fresh-head merge: the interval feed above only carries complete weeks,
+    // so the newest days exist solely in the live-list capture stashed by the
+    // pagination fresh_url_template fetch (training_activities {models:[...]}).
+    // Interval entries win on id collision (granular type + the exact field
+    // semantics the parser expects); models only fill the missing head.
+    // start_time is "YYYY-MM-DDTHH:MM:SS+0000"; normalize to Z-suffixed
+    // RFC3339 for the Rust parser. start_date_local_raw is a tz-shifted LOCAL
+    // epoch (last resort); start_date is the date-only display string (worst).
+    function startIso(m) {
+        if (m.start_time) {
+            var d = new Date(m.start_time);
+            if (!isNaN(d.getTime())) return d.toISOString().replace(/\.\d+Z$/, "Z");
+        }
+        if (m.start_date_local_raw) {
+            var dl = new Date(Number(m.start_date_local_raw) * 1000);
+            if (!isNaN(dl.getTime())) return dl.toISOString().replace(/\.\d+Z$/, "Z");
+        }
+        return m.start_date || "";
+    }
+
+    for (var fk in captures) {
+        if (!/\/athlete\/training_activities/.test(fk)) continue;
+        try {
+            var fentry = captures[fk];
+            if (!fentry || (fentry.status != null && fentry.status !== 200)) continue;
+            var parsed = JSON.parse(fentry.body);
+            var arr = (parsed && parsed.models) || parsed;
+            if (!Array.isArray(arr)) continue;
+            for (var mi = 0; mi < arr.length; mi++) {
+                var m = arr[mi];
+                if (!m) continue;
+                var mid = m.id != null ? String(m.id) : "";
+                if (!mid || seen[mid]) continue;
+                seen[mid] = true;
+                out.push({
+                    id: mid,
+                    name: m.name || "Untitled",
+                    type: m.sport_type || m.display_type || "",
+                    date: startIso(m),
+                    // elapsed_time_raw matches the interval entries' elapsedTime
+                    // semantics so one merged list reports one time meaning;
+                    // moving_time_raw only when elapsed is absent.
+                    time: (m.elapsed_time_raw != null ? m.elapsed_time_raw : m.moving_time_raw),
+                    distance: (m.distance_raw != null ? m.distance_raw : ""),
+                    elevation: (m.elevation_gain_raw != null ? m.elevation_gain_raw : ""),
+                    suffer_score: (m.suffer_score != null ? m.suffer_score : undefined)
+                });
+            }
+        } catch (e) {}
+    }
+
     return JSON.stringify(out);
 })()
 '''
@@ -206,6 +257,11 @@ js_extract = '''
 # `&page=N` list pages — fast enough to finish before a serverless instance is
 # reclaimed. The js_extract above reads these captures.
 url_template = "https://www.strava.com/athletes/{athlete_id}/graph_date_range?chart_type=miles&interval_type=month&interval={interval}&year_offset={year_offset}"
+# Fresh-head top-up fetched once before the interval walk: graph_date_range
+# only carries complete weeks, so without this the newest days (current week)
+# never appear no matter how recent the start month. Page 1 of the live list
+# XHR (~20 rows) covers the gap; the js_extract merges it deduped by id.
+fresh_url_template = "https://www.strava.com/athlete/training_activities?keywords=&sport_type=&tags=&commute=&private_activities=&trainer=&gear=&new_activity_only=false&page={page}"
 
 [list_page.fields]
 name = 'a[data-field-name="name"]'

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
@@ -3356,6 +3357,30 @@ async fn paginate_via_interval(
         max_months, date_bounded, "Starting interval-based (month-at-a-time) list pagination"
     );
 
+    // Fresh-head top-up: `graph_date_range` only carries complete weeks, so the
+    // newest days are invisible to the interval walk no matter how recent the
+    // start month is. Fetch the live list's first page (stashed into
+    // `window.__dravrCaptures`; the js_extract merges it deduped by id) so the
+    // head of the list is as fresh as the site. Best-effort with one retry —
+    // a failure degrades to interval-only coverage, never aborts the scrape.
+    // Not counted toward `collected`: its rows overlap the current month's
+    // interval capture, and inflating the count could stop the walk early.
+    if let Some(template) = pagination.fresh_url_template.as_deref() {
+        const PAGE_PLACEHOLDER: &str = "{page}";
+        let url = template.replace(PAGE_PLACEHOLDER, &pagination.first_page.to_string());
+        let mut fresh =
+            fetch_list_page(page, &url, &pagination.csrf_header, &pagination.accept).await;
+        if fresh.is_none() {
+            warn!("Fresh head page fetch failed; retrying once");
+            fresh = fetch_list_page(page, &url, &pagination.csrf_header, &pagination.accept).await;
+        }
+        if let Some(summary) = fresh {
+            info!(count = summary.count, "Fresh head page fetched");
+        } else {
+            warn!("Fresh head page fetch failed twice — list head may lag the site");
+        }
+    }
+
     loop {
         let interval = cursor.interval_param();
         let url = pagination
@@ -3438,6 +3463,10 @@ fn apply_activity_filters(activities: &mut Vec<Activity>, params: &ActivityParam
 
     activities.retain(|a| in_window(a, params));
 
+    // Newest-first before the limit cut: rows arrive in capture order (the
+    // fresh-head page lands after the interval months), not date order, so
+    // truncating unsorted could keep a stale head and drop the newest days.
+    activities.sort_by_key(|a| Reverse(a.start_date));
     if let Some(limit) = params.limit {
         activities.truncate(limit as usize);
     }
@@ -3625,6 +3654,36 @@ mod tests {
 
     fn at(y: i32, m: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, 12, 0, 0).single().unwrap() // Safe: test fixture
+    }
+
+    #[test]
+    fn filters_sort_newest_first_before_the_limit_cut() {
+        let item = |id: &str, date: &str| {
+            build_activity_from_js_item(
+                id,
+                &serde_json::json!({ "name": id, "type": "Ride", "date": date, "time": 3600 }),
+            )
+        };
+        // Capture order = interval months first, fresh-head page appended last,
+        // so the newest activity arrives at the END of the vec.
+        let mut activities = vec![
+            item("stale-1", "2026-07-18T12:00:00Z"),
+            item("stale-2", "2026-07-17T12:00:00Z"),
+            item("fresh-1", "2026-07-20T12:00:00Z"),
+        ];
+        apply_activity_filters(
+            &mut activities,
+            &ActivityParams {
+                limit: Some(2),
+                ..ActivityParams::default()
+            },
+        );
+        let ids: Vec<&str> = activities.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["fresh-1", "stale-1"],
+            "the limit cut must keep the newest rows regardless of capture order"
+        );
     }
 
     #[test]
