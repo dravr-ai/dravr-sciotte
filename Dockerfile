@@ -20,7 +20,7 @@ RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp \
 # staying current matters (mirrors the pierre image's posture).
 FROM debian:trixie-slim
 
-ARG APT_SECURITY_EPOCH=2026-07-20
+ARG APT_SECURITY_EPOCH=2026-08-03
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
