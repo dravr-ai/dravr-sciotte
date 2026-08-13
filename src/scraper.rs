@@ -1608,6 +1608,115 @@ async fn parse_two_fa_options(page: &chromiumoxide::Page) -> Vec<TwoFactorOption
     serde_json::from_str(&json_str).unwrap_or_default()
 }
 
+/// Poll `parse_two_fa_options` until the page yields options or `budget` elapses.
+///
+/// The parser drops any element whose `getBoundingClientRect()` is still
+/// zero-sized, so a genuine 2FA chooser sampled before layout completes is
+/// indistinguishable from a page carrying no 2FA options at all. Sampling once
+/// after a fixed sleep made that a race against how fast the runner lays out the
+/// page — and losing it sends the caller down the sign-in-method-chooser branch,
+/// which clicks "Enter your password" and navigates away from a page it misread.
+///
+/// Polling is what makes a generous `budget` affordable: it is abandoned the
+/// moment options appear, so a real 2FA chooser pays only the latency it needs
+/// while a slow runner gets many more chances than a single sample allowed.
+async fn poll_two_fa_options(
+    page: &chromiumoxide::Page,
+    config: &ScraperConfig,
+    budget: Duration,
+) -> Vec<TwoFactorOptionWithCoords> {
+    let deadline = Instant::now() + budget;
+    loop {
+        let options = parse_two_fa_options(page).await;
+        if !options.is_empty() {
+            return options;
+        }
+        if Instant::now() >= deadline {
+            debug!(
+                budget_secs = budget.as_secs(),
+                "No 2FA options after polling the full budget — treating as a sign-in method chooser"
+            );
+            return Vec::new();
+        }
+        time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+    }
+}
+
+/// How long to keep re-parsing the challenge selection page before concluding it
+/// carries no 2FA options.
+///
+/// Deliberately far larger than `page_load_wait_secs`. That value has to stay
+/// small because it is paid as an unconditional sleep on every step; this one is
+/// a *ceiling* that [`poll_two_fa_options`] abandons the moment options appear,
+/// so a page that is a 2FA chooser never pays it. Only a genuine
+/// sign-in-method chooser waits the full budget, and delaying that rare branch a
+/// few seconds is far cheaper than misreading a 2FA page and navigating away
+/// from it — the failure that flaked `google_oauth_2fa_number_match` twice.
+const TWO_FA_OPTIONS_SETTLE_BUDGET: Duration = Duration::from_secs(8);
+
+/// Outcome of one poll iteration on Google's challenge selection page.
+enum ChallengeSelectionOutcome {
+    /// Real 2FA options were found — return this to the caller.
+    Resolved(LoginResult),
+    /// Still on the chooser (or the one-shot password recovery just fired) —
+    /// the poll loop should `continue`.
+    KeepPolling,
+}
+
+/// Handle a single poll iteration on Google's challenge selection page.
+///
+/// The page is either a 2FA chooser or a sign-in-method chooser, and the two are
+/// told apart by whether any `[data-challengetype]` element parses. That test is
+/// only meaningful once layout has given those elements a non-zero rect, hence
+/// the polling in [`poll_two_fa_options`].
+async fn handle_challenge_selection(
+    page: &chromiumoxide::Page,
+    config: &ScraperConfig,
+    password: Option<&str>,
+    tried_enter_password: &mut bool,
+) -> ChallengeSelectionOutcome {
+    let options = poll_two_fa_options(page, config, TWO_FA_OPTIONS_SETTLE_BUDGET).await;
+    if !options.is_empty() {
+        // Real 2FA options found — return to caller for orchestration
+        let choices: Vec<TwoFactorOption> = options
+            .into_iter()
+            .map(|o| TwoFactorOption {
+                id: o.id,
+                label: o.label,
+            })
+            .collect();
+        return ChallengeSelectionOutcome::Resolved(LoginResult::TwoFactorChoice(choices));
+    }
+
+    // No 2FA options — treat as the sign-in method chooser: click "Enter your
+    // password", re-fill, submit.
+    //
+    // Latched like `tried_another_way`: the click navigates away, so firing it
+    // on every poll of a page whose options never became measurable would keep
+    // re-submitting the password against whatever we landed on. Once is a
+    // recovery attempt; repeatedly is a loop.
+    if *tried_enter_password {
+        time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
+        return ChallengeSelectionOutcome::KeepPolling;
+    }
+    *tried_enter_password = true;
+
+    info!("No 2FA options found, clicking 'Enter your password'");
+    cdp_click_enter_password(page).await;
+    time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+    if let Some(pwd) = password {
+        let pwd_selector = r#"input[type="password"], input[name="Passwd"]"#;
+        if element_exists(page, pwd_selector).await {
+            info!("Re-filling password after sign-in method selection");
+            let _ = fill_input_field(page, pwd_selector, pwd).await;
+            time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
+            let _ = click_element(page, "#passwordNext button, #passwordNext, text:Next").await;
+            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+        }
+    }
+    ChallengeSelectionOutcome::KeepPolling
+}
+
 /// CDP-click a 2FA option by its id, using stored coordinates
 async fn cdp_click_two_fa_option(page: &chromiumoxide::Page, option_id: &str) -> bool {
     let options = parse_two_fa_options(page).await;
@@ -1705,6 +1814,9 @@ async fn poll_credential_login_result(
 ) -> ScraperResult<LoginResult> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut tried_another_way = false;
+    // Latches the one-shot "Enter your password" recovery on the challenge
+    // selection page; see the call site for why it must not repeat.
+    let mut tried_enter_password = false;
     // Counts consecutive polls spent stuck on /challenge/dp after the single
     // "Try another way" click failed to navigate. Bounded so Hybrid login can
     // escalate to vision quickly instead of polling to the full timeout.
@@ -1794,40 +1906,12 @@ async fn poll_credential_login_result(
         if url.contains(CHALLENGE_URL_PATTERN)
             && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
         {
-            info!(url = %url, "Challenge selection page detected");
-            // Wait for the page DOM to render before parsing options —
-            // without this, slow runners (Windows CI) may see an empty DOM
-            // and misclassify a 2FA page as a sign-in method chooser.
-            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            let options = parse_two_fa_options(page).await;
-            if !options.is_empty() {
-                // Real 2FA options found — return to caller for orchestration
-                let choices: Vec<TwoFactorOption> = options
-                    .into_iter()
-                    .map(|o| TwoFactorOption {
-                        id: o.id,
-                        label: o.label,
-                    })
-                    .collect();
-                return Ok(LoginResult::TwoFactorChoice(choices));
+            match handle_challenge_selection(page, config, password, &mut tried_enter_password)
+                .await
+            {
+                ChallengeSelectionOutcome::Resolved(result) => return Ok(result),
+                ChallengeSelectionOutcome::KeepPolling => continue,
             }
-            // No 2FA options — this is the sign-in method chooser page.
-            // Click "Enter your password", re-fill password, and submit.
-            info!("No 2FA options found, clicking 'Enter your password'");
-            cdp_click_enter_password(page).await;
-            time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-            if let Some(pwd) = password {
-                let pwd_selector = r#"input[type="password"], input[name="Passwd"]"#;
-                if element_exists(page, pwd_selector).await {
-                    info!("Re-filling password after sign-in method selection");
-                    let _ = fill_input_field(page, pwd_selector, pwd).await;
-                    time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
-                    let _ =
-                        click_element(page, "#passwordNext button, #passwordNext, text:Next").await;
-                    time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
-                }
-            }
-            continue;
         }
 
         // Check for error messages on the login page
