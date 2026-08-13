@@ -61,15 +61,38 @@ async fn start_fixture_server() -> (SocketAddr, JoinHandle<()>) {
 async fn handle_http(stream: TcpStream, fixtures_dir: PathBuf) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut buf = vec![0u8; 4096];
     let (mut reader, mut writer) = stream.into_split();
 
-    let n = reader.read(&mut buf).await.unwrap_or(0);
-    if n == 0 {
+    // Read until the header block is complete rather than assuming the whole
+    // request lands in one segment. A single read() is a race: when the request
+    // arrives split across TCP segments — far likelier on a loaded CI runner —
+    // the first chunk may not carry a complete request line, the path parses to
+    // something meaningless and this server answers 404. A 404'd fixture page
+    // has no [data-challengetype] elements, so the scraper's 2FA options never
+    // parse, it never navigates, and it spins to the step timeout still
+    // reporting the page it asked for. That is the shape of the
+    // `google_oauth_2fa_number_match` flake, and it is a bug in this harness
+    // rather than in the scraper under test.
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break; // peer closed — includes Chrome's speculative preconnects
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break; // headers complete; these fixtures never carry a body
+        }
+        if buf.len() > 64 * 1024 {
+            break; // refuse to buffer without bound
+        }
+    }
+    if buf.is_empty() {
         return;
     }
 
-    let request = String::from_utf8_lossy(&buf[..n]);
+    let request = String::from_utf8_lossy(&buf);
     let path = request
         .lines()
         .next()
