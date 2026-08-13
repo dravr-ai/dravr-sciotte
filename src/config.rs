@@ -239,9 +239,45 @@ mod tests {
         assert_eq!(env_u64("DRAVR_SCIOTTE_TEST_NONEXISTENT_VAR_12345", 42), 42);
     }
 
+    /// Env keys this test asserts the compiled-in fallbacks for.
+    const DEFAULTED_ENV_KEYS: &[&str] = &[
+        "DRAVR_SCIOTTE_LOGIN_POLL_INTERVAL_MS",
+        "DRAVR_SCIOTTE_LOGIN_TIMEOUT",
+        "DRAVR_SCIOTTE_PAGE_LOAD_WAIT",
+        "DRAVR_SCIOTTE_FORM_DELAY_MS",
+        "DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT",
+        "DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT",
+        "DRAVR_SCIOTTE_PHONE_TAP_TIMEOUT",
+        "DRAVR_SCIOTTE_STUCK_CHALLENGE_MAX_POLLS",
+        "DRAVR_SCIOTTE_PENDING_LOGIN_TTL",
+    ];
+
     #[test]
     fn scraper_config_default_values() {
+        // `ScraperConfig::default()` layers env overrides onto the compiled-in
+        // fallbacks, so asserting them requires clearing those keys first —
+        // otherwise this reads whatever the developer's shell exports and is
+        // not a defaults test at all. dravr-platform's .envrc sets
+        // DRAVR_SCIOTTE_LOGIN_TIMEOUT=300, which failed this test on nothing
+        // but a loaded direnv.
+        let saved: Vec<(&str, Option<String>)> = DEFAULTED_ENV_KEYS
+            .iter()
+            .map(|key| (*key, env::var(key).ok()))
+            .collect();
+        for key in DEFAULTED_ENV_KEYS {
+            env::remove_var(key); // Safe: edition 2021 test mutation, restored below
+        }
+
         let config = ScraperConfig::default();
+
+        // Restore before asserting: a failing assertion panics, and leaving the
+        // process env clobbered would cascade into every later test.
+        for (key, value) in &saved {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            }
+        }
+
         assert_eq!(config.login_poll_interval_ms, 500);
         assert_eq!(config.login_timeout_secs, 120);
         assert_eq!(config.page_load_wait_secs, 3);
@@ -251,6 +287,24 @@ mod tests {
         assert_eq!(config.phone_tap_timeout_secs, 60);
         assert_eq!(config.stuck_challenge_max_polls, 12);
         assert_eq!(config.pending_login_ttl_secs, 300);
+    }
+
+    #[test]
+    fn scraper_config_env_overrides_the_default() {
+        // The complement of the test above: prove the override path is wired,
+        // so clearing env there cannot mask a broken env key.
+        let key = "DRAVR_SCIOTTE_LOGIN_TIMEOUT";
+        let saved = env::var(key).ok();
+
+        env::set_var(key, "417"); // Safe: edition 2021 test mutation, restored below
+        let overridden = ScraperConfig::default().login_timeout_secs;
+
+        match saved {
+            Some(value) => env::set_var(key, value),
+            None => env::remove_var(key),
+        }
+
+        assert_eq!(overridden, 417);
     }
 
     #[test]
