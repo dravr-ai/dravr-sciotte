@@ -1,0 +1,56 @@
+# ABOUTME: Tells dravr-platform a sciotte release exists so its pinned tag stops drifting
+# ABOUTME: Notifies only — the platform files an issue, a human integrates after testing
+#
+# Why notify rather than auto-bump: dravr-contremaitre pushes its bump straight to
+# platform main, which suits a config catalogue. sciotte ships a browser scraper whose
+# behaviour has to be exercised against a real provider before the platform depends on
+# it, so a release opens a tracked issue and a human integrates. The drift this replaces
+# was silent: the platform sat on v0.8.0 for five releases because nothing told it.
+
+name: "Notify Platform of Release"
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Tag to announce (defaults to the latest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Dispatch sciotte-released to dravr-platform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve the version being announced
+        id: v
+        env:
+          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${INPUT_VERSION:-$RELEASE_TAG}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not resolve a release tag to announce"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "announcing $VERSION"
+
+      - name: Fire repository_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          gh api -X POST repos/dravr-ai/dravr-platform/dispatches \
+            -f event_type=sciotte-released \
+            -F client_payload[version]="$VERSION" \
+            -F client_payload[sha]=${GITHUB_SHA}
