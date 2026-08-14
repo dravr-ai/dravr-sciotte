@@ -1832,6 +1832,23 @@ fn awaiting_post_submit_navigation(url: &str, initial_url: &str) -> bool {
     url == initial_url && !url.contains(CHALLENGE_URL_PATTERN)
 }
 
+/// Whether an OTP page reached right now should be reported to the caller.
+///
+/// Two kinds of caller ask opposite questions of this one loop. After submitting a
+/// password (`after_password`), arriving at an OTP page **is** the answer. After
+/// submitting a code or picking a 2FA method, the loop *starts* on the OTP page and
+/// must wait for it to redirect away — reporting it there would ask for the same code
+/// forever. The `password` argument already encodes which caller we are.
+///
+/// `url != initial_url` alone separated them only by luck: it assumes a password
+/// submit never finishes navigating before `initial_url` is sampled. Losing that race
+/// makes the OTP page the initial URL, and the password caller then never reports
+/// `OtpRequired` at all — it polls to its deadline on the code entry form.
+/// Reproduced in 2 of 6 runs before this guard existed.
+fn otp_page_should_be_reported(url: &str, initial_url: &str, after_password: bool) -> bool {
+    path_contains_any(url, OTP_URL_PATTERNS) && (url != initial_url || after_password)
+}
+
 /// Whether `url` is a challenge page worth parsing for 2FA options.
 ///
 /// Every challenge page except the chooser has a dedicated branch or no options at
@@ -1900,9 +1917,9 @@ async fn poll_credential_login_result(
             return Ok(LoginResult::Success(session));
         }
 
-        // Check OTP patterns — only if the URL has changed to a DIFFERENT OTP page.
-        // If we're still on the same OTP page we started on, keep waiting for redirect.
-        if url != initial_url && path_contains_any(&url, OTP_URL_PATTERNS) {
+        // Report an OTP page to the caller that submitted a password; keep waiting for
+        // a redirect when we started on one after submitting a code.
+        if otp_page_should_be_reported(&url, &initial_url, password.is_some()) {
             info!(url = %url, "OTP/2FA page detected");
             return Ok(LoginResult::OtpRequired);
         }
@@ -4381,6 +4398,41 @@ mod tests {
         assert!(!awaiting_post_submit_navigation(
             CHALLENGE_SELECTION,
             LOGIN_PAGE
+        ));
+    }
+
+    const TOTP_PAGE: &str = "https://accounts.google.com/v3/signin/challenge/totp";
+
+    #[test]
+    fn otp_page_is_reported_to_the_caller_that_submitted_a_password() {
+        // Won the race: URL changed to the OTP page.
+        assert!(otp_page_should_be_reported(TOTP_PAGE, LOGIN_PAGE, true));
+        // Lost it: the navigation landed before initial_url was sampled, so the OTP
+        // page IS the initial URL. Reported anyway — the password caller asked "what
+        // challenge appeared", and this is the answer regardless of sampling order.
+        assert!(otp_page_should_be_reported(TOTP_PAGE, TOTP_PAGE, true));
+    }
+
+    #[test]
+    fn otp_page_is_not_reported_back_to_the_caller_that_submitted_a_code() {
+        // submit_otp / select_two_factor start ON the OTP page and wait for it to
+        // redirect away. Reporting it here would ask for the same code forever.
+        assert!(!otp_page_should_be_reported(TOTP_PAGE, TOTP_PAGE, false));
+        // But a move to a DIFFERENT OTP page is a genuine new challenge.
+        assert!(otp_page_should_be_reported(
+            TOTP_PAGE,
+            "https://accounts.google.com/v3/signin/challenge/sms",
+            false
+        ));
+    }
+
+    #[test]
+    fn a_non_otp_page_is_never_reported_as_otp() {
+        assert!(!otp_page_should_be_reported(LOGIN_PAGE, LOGIN_PAGE, true));
+        assert!(!otp_page_should_be_reported(
+            CHALLENGE_SELECTION,
+            LOGIN_PAGE,
+            true
         ));
     }
 

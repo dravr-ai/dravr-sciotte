@@ -632,6 +632,29 @@ async fn google_oauth_direct_success() {
     );
 }
 
+/// Password submit that lands straight on a TOTP page, with no chooser in between.
+///
+/// Untested until now, and it is the path where `initial_url` can be sampled *after*
+/// the navigation has already landed — making the OTP page the initial URL. The poll
+/// must still report `OtpRequired` from that page rather than wait for it to "change".
+#[tokio::test]
+async fn google_oauth_direct_totp_requires_otp() {
+    let (addr, _server) = start_fixture_server().await;
+    let base = format!("http://{addr}");
+    let provider = fake_strava_google_provider(&base);
+    let scraper = ChromeScraper::new(test_config(), provider);
+
+    let result = scraper
+        .credential_login("test@example.com", "totp-password", "google")
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(result, LoginResult::OtpRequired),
+        "Expected OtpRequired from the TOTP page, got {result:?}"
+    );
+}
+
 // ============================================================================
 // Provider config tests
 // ============================================================================
