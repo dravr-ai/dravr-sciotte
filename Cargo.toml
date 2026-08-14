@@ -77,7 +77,7 @@ redundant_pub_crate = "allow"
 
 [package]
 name = "dravr-sciotte"
-version = "0.8.4"
+version = "0.8.5"
 publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"

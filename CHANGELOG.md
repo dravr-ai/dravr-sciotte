@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.5] — 2026-08-14
+
+### Fixed
+
+- fix(scraper): report an OTP page the poll started on
+- fix(scraper): read a challenge page the poll started on
+- fix: repair the SessionStart bootstrap guard for an empty .build
+- fix(tests): read the full request in the fixture server, not one segment
+- fix(server): answer 401 session_expired for auth-shaped scraper errors Auth/SessionExpired flattened to 500 paged operators for dead cookies; 401 lets the platform mint the athlete's reconnect link
+
+### Other
+
+- refactor(scraper): poll for 2FA options and latch the password fallback
+- test(config): make the defaults test hermetic instead of env-dependent
+- chore(deps): bump dravr-tronc 0.5.3 -> 0.6.2
+- chore(register): ledger + weekly phase review
+- chore(register): point at dravr-carnet, the dravr-family register
+
+
+
 ## [0.8.4] — 2026-07-20
 
 
