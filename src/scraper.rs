@@ -69,7 +69,18 @@ const TRY_ANOTHER_WAY_SELECTOR: &str = "text:Try another way, text:Essayer autre
 const CHALLENGE_URL_PATTERN: &str = "/challenge/";
 
 /// Challenge URL suffixes that are NOT 2FA selection pages (skip these for option parsing)
-const CHALLENGE_SKIP_PATTERNS: &[&str] = &["challenge/pk", "challenge/pwd", "challenge/dp"];
+///
+/// `challenge/number` is the phone-tap approval page shown *after* a method is
+/// chosen. It carries no `[data-challengetype]` elements at all, so parsing it for
+/// options polls the full settle budget to conclude what its URL already said, then
+/// clicks an "Enter your password" link that is not there. Every phone-tap login paid
+/// that, and logged a "no options matched" warning on each 200ms poll while it did.
+const CHALLENGE_SKIP_PATTERNS: &[&str] = &[
+    "challenge/pk",
+    "challenge/pwd",
+    "challenge/dp",
+    "challenge/number",
+];
 
 /// URL pattern for Google device prompt (phone tap without selection)
 const DEVICE_PROMPT_PATTERN: &str = "challenge/dp";
@@ -1804,6 +1815,32 @@ fn credential_login_timeout_error(last_url: &str, started: Instant) -> ScraperEr
     }
 }
 
+/// Whether the poll loop should keep waiting for the password submit to navigate.
+///
+/// `initial_url` is sampled when the poll begins, which races the navigation that
+/// submitting the password kicked off. Win that race and the initial URL is the
+/// password page, so the challenge branches downstream run as intended. Lose it —
+/// slower headless Chrome, a loaded runner, any delay between the click and the
+/// first sample — and a challenge page *is* the initial URL. Treating "URL
+/// unchanged" as "hasn't navigated yet" then skips those branches on every
+/// iteration, and the login dies at its deadline sitting on a fully rendered 2FA
+/// chooser it was never allowed to read.
+///
+/// Being on a challenge page is itself proof the submit navigated, which is the only
+/// thing this guard exists to establish.
+fn awaiting_post_submit_navigation(url: &str, initial_url: &str) -> bool {
+    url == initial_url && !url.contains(CHALLENGE_URL_PATTERN)
+}
+
+/// Whether `url` is a challenge page worth parsing for 2FA options.
+///
+/// Every challenge page except the chooser has a dedicated branch or no options at
+/// all, and parsing one of those costs the full settle budget to learn what the URL
+/// already said.
+fn is_two_fa_chooser_url(url: &str) -> bool {
+    url.contains(CHALLENGE_URL_PATTERN) && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
+}
+
 /// Poll for credential login result: success, OTP required, or failure with error message
 async fn poll_credential_login_result(
     page: &chromiumoxide::Page,
@@ -1870,8 +1907,8 @@ async fn poll_credential_login_result(
             return Ok(LoginResult::OtpRequired);
         }
 
-        // Wait for the URL to change from the initial page before checking challenge types
-        if url == initial_url {
+        // Wait for the submit to navigate before reading the page as a challenge.
+        if awaiting_post_submit_navigation(&url, &initial_url) {
             log_login_stall(&mut last_stall_log, &url, started);
             time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
             continue;
@@ -1903,9 +1940,7 @@ async fn poll_credential_login_result(
         }
 
         // Challenge selection page — could be 2FA options or sign-in method chooser.
-        if url.contains(CHALLENGE_URL_PATTERN)
-            && !CHALLENGE_SKIP_PATTERNS.iter().any(|p| url.contains(p))
-        {
+        if is_two_fa_chooser_url(&url) {
             match handle_challenge_selection(page, config, password, &mut tried_enter_password)
                 .await
             {
@@ -4298,5 +4333,78 @@ mod tests {
         let provider = ProviderConfig::garmin_default().unwrap(); // Safe: test fixture
         assert!(provider.provider.profile_url.is_some());
         assert!(provider.provider.profile_js_extract.is_some());
+    }
+
+    // The credential poll samples `initial_url` after submitting the password, which
+    // races the navigation that submit started. These pin both outcomes of that race,
+    // because only one of them used to work.
+    const LOGIN_PAGE: &str = "https://accounts.google.com/v3/signin/identifier";
+    const CHALLENGE_SELECTION: &str = "https://accounts.google.com/v3/signin/challenge/selection";
+
+    #[test]
+    fn poll_keeps_waiting_while_the_submit_has_not_navigated() {
+        // Still on the page we submitted from: nothing to read yet, keep polling.
+        assert!(awaiting_post_submit_navigation(LOGIN_PAGE, LOGIN_PAGE));
+    }
+
+    #[test]
+    fn poll_reads_a_challenge_page_it_started_on() {
+        // Lost the race: the navigation completed before `initial_url` was sampled, so
+        // the challenge page IS the initial URL. Waiting for it to "change" would skip
+        // the challenge branches until the deadline and fail the login on a rendered
+        // 2FA chooser — the timeout that reds google_oauth_2fa_number_match.
+        assert!(!awaiting_post_submit_navigation(
+            CHALLENGE_SELECTION,
+            CHALLENGE_SELECTION
+        ));
+    }
+
+    #[test]
+    fn poll_reads_every_challenge_kind_it_started_on() {
+        // The device prompt and passkey pages have their own branches in the same
+        // loop and are reachable as the initial URL by the same race.
+        for url in [
+            "https://accounts.google.com/v3/signin/challenge/dp",
+            "https://accounts.google.com/v3/signin/challenge/pk",
+            "https://accounts.google.com/v3/signin/challenge/totp",
+        ] {
+            assert!(
+                !awaiting_post_submit_navigation(url, url),
+                "{url} is a challenge page and must be read, not waited on"
+            );
+        }
+    }
+
+    #[test]
+    fn poll_proceeds_once_the_url_changed() {
+        // Won the race: the ordinary path, unaffected by the fix.
+        assert!(!awaiting_post_submit_navigation(
+            CHALLENGE_SELECTION,
+            LOGIN_PAGE
+        ));
+    }
+
+    #[test]
+    fn only_the_chooser_is_parsed_for_2fa_options() {
+        assert!(is_two_fa_chooser_url(CHALLENGE_SELECTION));
+
+        // Each of these either has its own branch in the poll loop or carries no
+        // [data-challengetype] elements at all. Parsing them spends the whole settle
+        // budget re-reading an empty list, then clicks an "Enter your password" link
+        // that is not on the page.
+        for url in [
+            "https://accounts.google.com/v3/signin/challenge/number",
+            "https://accounts.google.com/v3/signin/challenge/dp",
+            "https://accounts.google.com/v3/signin/challenge/pk",
+            "https://accounts.google.com/v3/signin/challenge/pwd",
+        ] {
+            assert!(
+                !is_two_fa_chooser_url(url),
+                "{url} carries no 2FA options and must not be parsed for them"
+            );
+        }
+
+        // Not a challenge page at all.
+        assert!(!is_two_fa_chooser_url(LOGIN_PAGE));
     }
 }
