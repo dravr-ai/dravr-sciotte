@@ -21,6 +21,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use dravr_sciotte::auth;
+use dravr_sciotte::browser_utils::{
+    dismiss_cookie_dialog, element_exists, launch_browser, open_page_with_stealth,
+};
 use dravr_sciotte::cache::CachedScraper;
 #[cfg(feature = "vision")]
 use dravr_sciotte::config::LoginMode;
@@ -37,7 +40,10 @@ use dravr_sciotte_server::router;
 use dravr_tronc::mcp::transport::stdio;
 use dravr_tronc::server::tracing_init;
 use dravr_tronc::McpServer;
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio::time;
 use tracing::info;
 
 #[derive(Parser)]
@@ -106,6 +112,13 @@ enum Command {
         #[arg(long)]
         detail: bool,
     },
+    /// Probe each provider's live login page for the selectors the scraper needs
+    ///
+    /// Reads no credentials and submits nothing — it loads the page and reports
+    /// whether the configured fields are present. Exits non-zero when any provider
+    /// is unhealthy, so a scheduled run surfaces DOM drift or a bot-challenge page
+    /// before a user meets it.
+    ProbeLogin,
     /// Check authentication status
     AuthStatus,
     /// Clear the activity cache
@@ -122,6 +135,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             run_server(host, port, load_provider_configs(&cli.provider)?).await
         }
         Some(Command::Login) => run_login(load_single_provider_config(&cli.provider)?).await,
+        Some(Command::ProbeLogin) => run_probe_login(load_provider_configs(&cli.provider)?).await,
         Some(Command::Activities {
             limit,
             sport_type,
@@ -398,6 +412,138 @@ async fn run_login(provider: ProviderConfig) -> Result<(), Box<dyn Error + Send 
     println!("Login successful! Session saved.");
     println!("Session ID: {}", session.session_id);
     println!("Cookies captured: {}", session.cookies.len());
+    Ok(())
+}
+
+/// Probe every provider's login page for the selectors the scraper depends on.
+///
+/// This exists because the login flow's real failure mode is the provider changing
+/// under us, not our code changing: a live Strava attempt on 2026-08-15 died with both
+/// selectors absent and a `challenge` marker in the body — an anti-bot interstitial, not
+/// a login form. A credential login would catch that too, but only by submitting real
+/// credentials and, on a 2FA account, pushing an MFA prompt to someone's phone every
+/// run. This reads the page and stops.
+/// How long to keep re-checking a login page before calling its selectors absent.
+///
+/// Generous because a false alarm is worse than a slow probe: this runs on a schedule,
+/// and a canary that cries wolf gets ignored precisely when it is right.
+const PROBE_SETTLE_BUDGET: Duration = Duration::from_secs(20);
+
+async fn run_probe_login(
+    providers: Vec<ProviderConfig>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let config = ScraperConfig::default();
+    let mut reports = Vec::new();
+    let mut unhealthy = 0_usize;
+
+    for provider in providers {
+        let name = provider.provider.name.clone();
+        let url = provider.provider.login_url.clone();
+
+        let mut browser = launch_browser(&config, true, None).await?;
+        let page = open_page_with_stealth(&browser, &url).await?;
+        time::sleep(Duration::from_secs(config.page_load_wait_secs)).await;
+
+        // Dismiss consent exactly as the login flow does before it touches anything.
+        // Strava fronts its form with a Cookiebot overlay, and `element_exists` only
+        // sees visible elements — so skipping this reports a perfectly healthy login
+        // page as missing every field. A canary that models the flow incorrectly
+        // raises alarms the real flow never hits.
+        dismiss_cookie_dialog(&page).await;
+
+        // Only the selectors the login actually drives. A provider that leaves one
+        // unset is not asserting anything about it, so absence is not a failure.
+        //
+        // Poll rather than sample once. A single read is a race against however long
+        // the provider takes to render its form, and losing it reports a healthy page
+        // as broken — the same mistake that made the 2FA chooser look absent to the
+        // scraper. Abandoned the moment every selector is present, so a healthy
+        // provider pays only the latency it needs.
+        let deadline = Instant::now() + PROBE_SETTLE_BUDGET;
+        let mut missing;
+        let mut checked;
+        loop {
+            missing = Vec::new();
+            checked = 0_usize;
+            for (label, selector) in [
+                ("email", provider.provider.login_email_selector.as_deref()),
+                (
+                    "password",
+                    provider.provider.login_password_selector.as_deref(),
+                ),
+                ("button", provider.provider.login_button_selector.as_deref()),
+            ] {
+                let Some(selector) = selector else { continue };
+                checked += 1;
+                if !element_exists(&page, selector).await {
+                    missing.push(json!({"field": label, "selector": selector}));
+                }
+            }
+            if missing.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+            time::sleep(Duration::from_millis(500)).await;
+        }
+
+        let title = page.get_title().await.ok().flatten().unwrap_or_default();
+
+        // On failure, inventory what the page DOES offer. "Selector missing" alone
+        // cannot distinguish stale selectors from a challenge interstitial, and those
+        // need opposite fixes — update the config, or stop being blocked.
+        let forensics = if missing.is_empty() {
+            Value::Null
+        } else {
+            page.evaluate(
+                r"(function() {
+                    var inputs = Array.from(document.querySelectorAll('input')).map(function(i) {
+                        return {type: i.type, name: i.name, id: i.id};
+                    });
+                    var text = (document.body ? document.body.innerText : '').slice(0, 300);
+                    return JSON.stringify({
+                        url: location.href,
+                        inputs: inputs.slice(0, 20),
+                        input_count: inputs.length,
+                        iframes: document.querySelectorAll('iframe').length,
+                        body_len: (document.body ? document.body.innerHTML.length : 0),
+                        text: text
+                    });
+                })()",
+            )
+            .await
+            .ok()
+            .and_then(|r| r.value().and_then(|v| v.as_str().map(String::from)))
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or(Value::Null)
+        };
+        let healthy = missing.is_empty() && checked > 0;
+        if !healthy {
+            unhealthy += 1;
+        }
+        reports.push(json!({
+            "provider": name,
+            "url": url,
+            "title": title,
+            "selectors_checked": checked,
+            "missing": missing,
+            "healthy": healthy,
+            "forensics": forensics,
+        }));
+
+        let _ = browser.close().await;
+    }
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({"providers": reports}))?
+    );
+
+    if unhealthy > 0 {
+        return Err(format!(
+            "{unhealthy} provider login page(s) missing expected selectors — \
+             the provider changed, or served a challenge page"
+        )
+        .into());
+    }
     Ok(())
 }
 
