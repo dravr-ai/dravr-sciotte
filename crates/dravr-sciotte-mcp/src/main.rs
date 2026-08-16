@@ -77,7 +77,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             (provider, cached)
         })
         .collect();
-    let state = Arc::new(ServerState::new(pairs, Arc::clone(&limiter), None));
+    let state = Arc::new(ServerState::new(
+        pairs,
+        Arc::clone(&limiter),
+        None,
+        ScraperConfig::default(),
+    ));
     let tool_registry = build_tool_registry();
     let server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",

@@ -310,7 +310,12 @@ fn build_state(providers: Vec<ProviderConfig>, limiter: &Arc<SciotteLimiter>) ->
             (provider, scraper)
         })
         .collect();
-    Arc::new(ServerState::new(pairs, Arc::clone(limiter), decorator))
+    Arc::new(ServerState::new(
+        pairs,
+        Arc::clone(limiter),
+        decorator,
+        ScraperConfig::default(),
+    ))
 }
 
 /// Load the disk-persisted session into the store — only meaningful for a

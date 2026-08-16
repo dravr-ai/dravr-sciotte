@@ -60,23 +60,14 @@ fn fixture_scraper_config() -> ScraperConfig {
     }
 }
 
-/// Configure the login path — which can only be done through the process environment.
+/// Clear the API key so the auth middleware lets these requests through.
 ///
-/// `ServerState::new_login_scraper` builds its scraper from `ScraperConfig::default()`,
-/// discarding the config handed to each provider's scraper. That config governs scrapes
-/// only; a login reads the environment and nothing else. Without this the fixtures are
-/// bypassed and the test quietly drives a real provider — which is exactly how this test
-/// first failed, on `input[type="email"]` against the live Google page.
-///
-/// Every test here sets identical values, so repeating it is safe under the parallel
-/// harness in a way that differing values would not be.
+/// Everything else the login needs now rides in the `ScraperConfig` handed to
+/// `ServerState::new` — the fixtures included. Before that config was honoured this
+/// helper also had to export `DRAVR_SCIOTTE_FAKE_LOGIN` and the step timeouts, because
+/// the login path rebuilt its scraper from the environment and silently discarded the
+/// caller's settings.
 fn configure_login_env() {
-    env::set_var("DRAVR_SCIOTTE_FAKE_LOGIN", "true");
-    env::set_var("DRAVR_SCIOTTE_CREDENTIAL_LOGIN_HEADLESS", "true");
-    env::set_var("DRAVR_SCIOTTE_PAGE_LOAD_WAIT", "3");
-    env::set_var("DRAVR_SCIOTTE_EMAIL_STEP_TIMEOUT", "30");
-    env::set_var("DRAVR_SCIOTTE_PASSWORD_STEP_TIMEOUT", "30");
-    env::set_var("DRAVR_SCIOTTE_LOGIN_TIMEOUT", "120");
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
 }
 
@@ -105,7 +96,12 @@ fn fixture_state() -> Arc<ServerState> {
         (provider, cached)
     })
     .collect();
-    Arc::new(ServerState::new(pairs, limiter, None))
+    Arc::new(ServerState::new(
+        pairs,
+        limiter,
+        None,
+        fixture_scraper_config(),
+    ))
 }
 
 async fn body_json(response: Response) -> Value {

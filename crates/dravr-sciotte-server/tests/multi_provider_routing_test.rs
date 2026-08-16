@@ -49,7 +49,12 @@ fn two_provider_state() -> Arc<ServerState> {
         (provider, cached)
     })
     .collect();
-    Arc::new(ServerState::new(pairs, limiter, None))
+    Arc::new(ServerState::new(
+        pairs,
+        limiter,
+        None,
+        ScraperConfig::default(),
+    ))
 }
 
 fn test_session(id: &str) -> AuthSession {

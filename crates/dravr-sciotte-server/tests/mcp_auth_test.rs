@@ -38,7 +38,12 @@ fn test_state() -> Arc<ServerState> {
     let chrome = ChromeScraper::new(ScraperConfig::default(), provider.clone());
     let queued = QueuedScraper::new(chrome, Arc::clone(&limiter));
     let cached: AppScraper = CachedScraper::new(queued, &CacheConfig::default());
-    Arc::new(ServerState::new(vec![(provider, cached)], limiter, None))
+    Arc::new(ServerState::new(
+        vec![(provider, cached)],
+        limiter,
+        None,
+        ScraperConfig::default(),
+    ))
 }
 
 /// The MCP transport must honor the same `DRAVR_SCIOTTE_API_KEY` gate as the REST API:

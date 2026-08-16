@@ -108,6 +108,13 @@ pub struct ServerState {
     sessions: RwLock<SessionStore>,
     login_flows: Mutex<HashMap<String, LoginFlow>>,
     login_decorator: Option<LoginScraperDecorator>,
+    /// Scraper settings for the ephemeral scrapers a login builds.
+    ///
+    /// Held rather than rebuilt from the environment, so a caller's configuration
+    /// governs logins as well as scrapes. Rebuilding meant an embedder could pass an
+    /// explicit config, see it honoured for every scrape, and have it silently ignored
+    /// for the one operation that drives a real provider's login page.
+    scraper_config: ScraperConfig,
 }
 
 impl ServerState {
@@ -120,6 +127,7 @@ impl ServerState {
         providers: Vec<(ProviderConfig, AppScraper)>,
         limiter: Arc<SciotteLimiter>,
         login_decorator: Option<LoginScraperDecorator>,
+        scraper_config: ScraperConfig,
     ) -> Self {
         let providers = providers
             .into_iter()
@@ -136,6 +144,7 @@ impl ServerState {
             sessions: RwLock::new(SessionStore::default()),
             login_flows: Mutex::new(HashMap::new()),
             login_decorator,
+            scraper_config,
         }
     }
 
@@ -199,7 +208,7 @@ impl ServerState {
     /// directly) with the vision decorator applied when configured.
     pub fn new_login_scraper(&self, provider: &str) -> Option<ChromeScraper> {
         let config = self.config_for(provider)?.clone();
-        let scraper = ChromeScraper::new(ScraperConfig::default(), config);
+        let scraper = ChromeScraper::new(self.scraper_config.clone(), config);
         Some(match &self.login_decorator {
             Some(decorate) => decorate(scraper),
             None => scraper,
