@@ -220,11 +220,11 @@ jobs:
   # Tell dravr-platform, which integrates and deploys from here
   # ---------------------------------------------------------------------------
   notify-platform:
-    name: Announce the release to dravr-platform
+    name: Announce the release to dravr-enforme
     # Waits for the artefacts, so the platform never starts integrating a version
     # whose binaries or image failed to publish.
     needs: [version, build-and-release, docker]
-    uses: ./.github/workflows/notify-platform-release.yml
+    uses: ./.github/workflows/notify-enforme-release.yml
     secrets: inherit
     with:
       version: v${{ needs.version.outputs.version }}

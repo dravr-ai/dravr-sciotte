@@ -1,14 +1,17 @@
-# ABOUTME: Tells dravr-platform a sciotte release exists so its pinned tag stops drifting
-# ABOUTME: The platform's sciotte-bump.yml takes it from there — bump, CI gate, merge, deploy
+# ABOUTME: Tells dravr-enforme a sciotte release exists, which starts the downstream chain
+# ABOUTME: enforme bumps and releases, and dravr-platform then moves both its pins together
 #
-# This is one end of the wire; dravr-platform's sciotte-bump.yml is the other. The
-# integration it triggers is still gated rather than blind: sciotte drives a headless
-# browser against live providers, so the platform validates the bump on a branch and
-# merges only on green. What this replaces is the silence — the platform sat on v0.8.0
-# for five releases because nothing told it, and production served the image from the
-# last day a human remembered to build one.
+# Why enforme and not the platform directly. dravr-enforme scrapes Garmin and Strava
+# through this crate, and dravr-platform pins this crate as well as depending on enforme
+# — a diamond. The platform hard-fails any build where a dravr-* crate resolves to two
+# versions, so a release announced straight to the platform produces a bump that cannot
+# merge until enforme has moved too. Announcing to enforme first makes the order the
+# dependency graph already requires the order the automation follows.
+#
+# The integration downstream is gated, not blind: this crate drives a headless browser
+# against live providers, so each hop validates on a branch and merges only on green.
 
-name: "Notify Platform of Release"
+name: "Notify Enforme of Release"
 
 # Called by release.yml rather than triggered by `on: release`. The release is
 # created by softprops/action-gh-release using the default GITHUB_TOKEN, and
@@ -36,13 +39,13 @@ permissions:
 
 jobs:
   notify:
-    name: Dispatch sciotte-released to dravr-platform
+    name: Dispatch sciotte-released to dravr-enforme
     runs-on: ubuntu-latest
     steps:
       - name: Resolve the version being announced
         id: v
         env:
-          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.DRAVR_DISPATCH_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           VERSION="${INPUT_VERSION:-}"
@@ -58,10 +61,10 @@ jobs:
 
       - name: Fire repository_dispatch
         env:
-          GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ secrets.DRAVR_DISPATCH_TOKEN }}
           VERSION: ${{ steps.v.outputs.version }}
         run: |
-          gh api -X POST repos/dravr-ai/dravr-platform/dispatches \
+          gh api -X POST repos/dravr-ai/dravr-enforme/dispatches \
             -f event_type=sciotte-released \
             -F client_payload[version]="$VERSION" \
             -F client_payload[sha]=${GITHUB_SHA}
