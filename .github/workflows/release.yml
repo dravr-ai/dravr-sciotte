@@ -215,3 +215,16 @@ jobs:
             ghcr.io/dravr-ai/dravr-sciotte:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Tell dravr-platform, which integrates and deploys from here
+  # ---------------------------------------------------------------------------
+  notify-platform:
+    name: Announce the release to dravr-platform
+    # Waits for the artefacts, so the platform never starts integrating a version
+    # whose binaries or image failed to publish.
+    needs: [version, build-and-release, docker]
+    uses: ./.github/workflows/notify-platform-release.yml
+    secrets: inherit
+    with:
+      version: v${{ needs.version.outputs.version }}

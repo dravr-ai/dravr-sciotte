@@ -1,17 +1,29 @@
 # ABOUTME: Tells dravr-platform a sciotte release exists so its pinned tag stops drifting
-# ABOUTME: Notifies only — the platform files an issue, a human integrates after testing
+# ABOUTME: The platform's sciotte-bump.yml takes it from there — bump, CI gate, merge, deploy
 #
-# Why notify rather than auto-bump: dravr-contremaitre pushes its bump straight to
-# platform main, which suits a config catalogue. sciotte ships a browser scraper whose
-# behaviour has to be exercised against a real provider before the platform depends on
-# it, so a release opens a tracked issue and a human integrates. The drift this replaces
-# was silent: the platform sat on v0.8.0 for five releases because nothing told it.
+# This is one end of the wire; dravr-platform's sciotte-bump.yml is the other. The
+# integration it triggers is still gated rather than blind: sciotte drives a headless
+# browser against live providers, so the platform validates the bump on a branch and
+# merges only on green. What this replaces is the silence — the platform sat on v0.8.0
+# for five releases because nothing told it, and production served the image from the
+# last day a human remembered to build one.
 
 name: "Notify Platform of Release"
 
+# Called by release.yml rather than triggered by `on: release`. The release is
+# created by softprops/action-gh-release using the default GITHUB_TOKEN, and
+# GitHub does not start workflow runs from events a GITHUB_TOKEN produced — so
+# an `on: release` trigger here could never fire, and never did: this workflow
+# had zero runs while five releases went out and the platform pin sat on v0.8.0.
+# A trigger that cannot fire is worse than no trigger, because it reads like the
+# wire is connected.
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      version:
+        description: "Tag to announce"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -32,9 +44,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.DRAVR_PLATFORM_DISPATCH_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          VERSION="${INPUT_VERSION:-$RELEASE_TAG}"
+          VERSION="${INPUT_VERSION:-}"
           if [ -z "$VERSION" ]; then
             VERSION=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
           fi
