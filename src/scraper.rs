@@ -4413,10 +4413,8 @@ mod tests {
         // The URL a real Garmin login lands on after the MFA code is accepted. It was
         // reported as a timeout because the patterns only matched the sub-pages Garmin
         // routes to afterwards, so an authenticated session looked like a failed login.
-        let success = ProviderConfig::garmin_default()
-            .expect("embedded garmin provider config")
-            .provider
-            .login_success_patterns;
+        let provider = ProviderConfig::garmin_default().unwrap(); // Safe: test fixture
+        let success = provider.provider.login_success_patterns;
         assert!(
             url_path_matches("https://connect.garmin.com/app/", &success),
             "the post-MFA landing page must count as success"
