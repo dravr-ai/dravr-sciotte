@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.6] — 2026-08-17
+
+### Added
+
+- feat(cli): probe-login checks each provider's live login page
+
+### Fixed
+
+- fix(test): use the repo's test-fixture unwrap idiom in the Garmin test
+- fix(ci): call the platform notifier instead of waiting on `on: release`
+- fix(scraper): repair three login paths broken against live providers
+- fix(state): honour the caller's ScraperConfig for logins
+
+### Other
+
+- test(server): drive the 2FA login chain over HTTP against the fixtures
+
+
+
 ## [0.8.5] — 2026-08-14
 
 ### Fixed
