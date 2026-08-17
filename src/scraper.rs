@@ -100,7 +100,12 @@ struct OAuthFormSelectors {
 }
 
 const GOOGLE_OAUTH_SELECTORS: OAuthFormSelectors = OAuthFormSelectors {
-    email: r#"input[type="email"]"#,
+    // Google's identifier field is `type="text"`, not `type="email"` — its stable
+    // handles are the id and name. Matching only on type meant the field was present
+    // and visible on a legitimate "Sign in to continue to Strava" page while the fill
+    // reported "Element not found", which reads as a blocked or changed page rather
+    // than a stale selector (seen 2026-08-17). Type is kept last as a fallback.
+    email: r#"#identifierId, input[name="identifier"], input[type="email"]"#,
     email_next: r"#identifierNext button, #identifierNext",
     password: r#"input[type="password"], input[name="Passwd"]"#,
     password_next: r"#passwordNext button, #passwordNext, text:Next",
@@ -436,6 +441,33 @@ impl ChromeScraper {
         .await
     }
 
+    /// Log what the page actually is when an OAuth field cannot be found.
+    ///
+    /// Without this an OAuth failure says only "Element not found for selector", which
+    /// cannot distinguish the provider's button click never navigating, the OAuth page
+    /// changing its markup, or the provider serving an interstitial instead.
+    async fn log_oauth_page_forensics(page: &chromiumoxide::Page, method: &str, selector: &str) {
+        let state = page
+        .evaluate(
+            r"(function() {
+                var inputs = Array.from(document.querySelectorAll('input'))
+                    .filter(function(i) { return i.offsetParent !== null; })
+                    .map(function(i) { return i.type + '|name=' + i.name + '|id=' + i.id; });
+                return JSON.stringify({
+                    url: location.href,
+                    title: document.title,
+                    visible_inputs: inputs.slice(0, 12),
+                    text: (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').slice(0, 300)
+                });
+            })()",
+        )
+        .await
+        .ok()
+        .and_then(|r| r.value().and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_else(|| "<page unreadable>".to_owned());
+        warn!(method, selector, page_state = %state, "OAuth login failure forensics");
+    }
+
     /// Log a forensic snapshot of the page after a selector login attempt fails.
     ///
     /// The intermittent selector failure (`element-not-found` / step timeout)
@@ -557,7 +589,13 @@ impl ChromeScraper {
 
         // Fill email on the OAuth provider's page
         debug!(selector = oauth_form.email, "Filling OAuth email field");
-        fill_input_field(page, oauth_form.email, email).await?;
+        if let Err(e) = fill_input_field(page, oauth_form.email, email).await {
+            // The selector-login path logs forensics on a missing field; this one did
+            // not, so an OAuth failure reported only the selector name and left no way
+            // to tell "the hop did not happen" from "the provider changed its page".
+            Self::log_oauth_page_forensics(page, method, oauth_form.email).await;
+            return Err(e);
+        }
         time::sleep(Duration::from_millis(config.form_interaction_delay_ms)).await;
         debug!("Clicking Next after OAuth email");
         click_element(page, oauth_form.email_next).await?;
@@ -900,6 +938,16 @@ impl ActivityScraper for ChromeScraper {
                     warn!(candidates = %v, "All 2-3 digit numbers found on page");
                 }
             }
+            // No number means this is Google's plain tap-Yes prompt, so wait for the
+            // approval here. The generic poll below would hand this page to the
+            // device-prompt handler, which clicks "Try another way" and navigates away
+            // from the prompt the user is approving.
+            wait_for_phone_approval(
+                &page,
+                config,
+                Duration::from_secs(config.phone_tap_timeout_secs),
+            )
+            .await;
         }
 
         // Phone tap needs longer — user must pick up their phone
@@ -1812,6 +1860,56 @@ fn credential_login_timeout_error(last_url: &str, started: Instant) -> ScraperEr
     );
     ScraperError::Auth {
         reason: format!("Credential login timed out after {elapsed}s — last page: {last_url}"),
+    }
+}
+
+/// Hold on Google's plain "tap Yes" prompt until the user approves it.
+///
+/// That prompt carries no number to match — it just says "open the Gmail app and tap
+/// Yes" — so the number-match path does not apply, and falling through to the poll loop
+/// hands the page to the device-prompt handler, which clicks "Try another way". That
+/// navigates away from the prompt the user is in the middle of approving and returns
+/// them to the chooser they just answered, so the login can never complete no matter how
+/// promptly they tap. Observed live on 2026-08-17.
+///
+/// Escaping is right when we reach the prompt without the user having asked for it; it
+/// is wrong once they have chosen the phone. Returns true when the prompt clears.
+async fn wait_for_phone_approval(
+    page: &chromiumoxide::Page,
+    config: &ScraperConfig,
+    budget: Duration,
+) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        let url = page.url().await.ok().flatten().unwrap_or_default();
+
+        // Leaving Google's challenge flow entirely is the approval landing. Waiting on
+        // "no longer the device prompt" instead does not work: selecting the method does
+        // not navigate to the prompt immediately, so that condition is already true on
+        // the chooser and the wait returns before the prompt even appears — which is how
+        // this reported an approval six seconds in, before anyone could tap.
+        if !url.contains(CHALLENGE_URL_PATTERN) {
+            info!(url = %url, "Phone approval received — left the challenge flow");
+            return true;
+        }
+
+        // A code-entry page instead of an approval: nothing to wait for, the caller
+        // reports OtpRequired. `challenge/dp` is excluded because "dp" is the prompt
+        // itself, not a code page.
+        if !url.contains(DEVICE_PROMPT_PATTERN) && path_contains_any(&url, OTP_URL_PATTERNS) {
+            info!(url = %url, "Code entry page appeared instead of a phone approval");
+            return false;
+        }
+
+        if Instant::now() >= deadline {
+            warn!(
+                budget_secs = budget.as_secs(),
+                url = %url,
+                "No phone approval within the budget — falling back to the other methods"
+            );
+            return false;
+        }
+        time::sleep(Duration::from_millis(config.login_poll_interval_ms)).await;
     }
 }
 
@@ -4308,6 +4406,30 @@ mod tests {
             &patterns
         ));
         assert!(!url_path_matches("https://www.strava.com/login", &patterns));
+    }
+
+    #[test]
+    fn garmin_post_mfa_landing_is_success() {
+        // The URL a real Garmin login lands on after the MFA code is accepted. It was
+        // reported as a timeout because the patterns only matched the sub-pages Garmin
+        // routes to afterwards, so an authenticated session looked like a failed login.
+        let success = ProviderConfig::garmin_default()
+            .expect("embedded garmin provider config")
+            .provider
+            .login_success_patterns;
+        assert!(
+            url_path_matches("https://connect.garmin.com/app/", &success),
+            "the post-MFA landing page must count as success"
+        );
+        // The pages it routes to next must keep matching.
+        assert!(url_path_matches(
+            "https://connect.garmin.com/app/home",
+            &success
+        ));
+        assert!(url_path_matches(
+            "https://connect.garmin.com/modern/activities",
+            &success
+        ));
     }
 
     #[test]

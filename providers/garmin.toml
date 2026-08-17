@@ -4,7 +4,12 @@
 [provider]
 name = "garmin"
 login_url = "https://sso.garmin.com/portal/sso/en-US/sign-in?clientId=GarminConnect&service=https%3A%2F%2Fconnect.garmin.com%2Fmodern"
-login_success_patterns = ["/app/home", "/app/activities", "/modern", "/dashboard"]
+# "/app" rather than "/app/home" + "/app/activities": after MFA, Garmin lands on a bare
+# https://connect.garmin.com/app/ and only later routes to a sub-page. Matching the
+# leaf paths meant a successful login polled to its timeout on the landing page and
+# reported "never reached a success URL" while actually authenticated (seen 2026-08-17).
+# "/app" subsumes both leaves; no Garmin SSO path contains it.
+login_success_patterns = ["/app", "/modern", "/dashboard"]
 login_failure_patterns = ["/sso/", "/sign-in", "/verify"]
 login_email_selector = '#email, input[name="username"], input[name="email"]'
 login_password_selector = '#password, input[name="password"]'
