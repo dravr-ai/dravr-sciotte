@@ -24,30 +24,24 @@ use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
-use crate::auth::auth_middleware;
+use crate::auth::{auth_middleware, verifier_from_env, AuthConfigError};
 use crate::error_response::scraper_error_response;
 use crate::health::health_handler;
 use crate::streaming;
 
 /// Build the complete Axum router for the unified server
-pub fn build_router(state: SharedState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
-        .allow_headers(Any);
-
+/// Every route except `/health`, with no authentication layered over them.
+///
+/// Private because production must not be able to serve this by accident;
+/// [`build_router`] adds the gate and [`routes`] exposes the ungated form to
+/// tests under a name that says so.
+fn protected_routes(state: &SharedState) -> Router {
     let mcp_server = Arc::new(McpServer::new(
         "dravr-sciotte-mcp",
         env!("CARGO_PKG_VERSION"),
         dravr_sciotte_mcp::build_tool_registry(),
-        Arc::clone(&state),
+        Arc::clone(state),
     ));
-    // Gate the MCP transport behind the same `DRAVR_SCIOTTE_API_KEY` bearer
-    // check as the REST API. The MCP tools scrape the same authenticated
-    // provider data as `/api/*`, so leaving `/mcp` unauthenticated would be an
-    // auth bypass around the REST gate. When the env var is unset the middleware
-    // passes through (localhost development mode), matching REST behavior.
-    let mcp_router = http::mcp_router(mcp_server).layer(middleware::from_fn(auth_middleware));
 
     let api_routes = Router::new()
         .route("/auth/login", post(login_handler))
@@ -70,23 +64,72 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/activities/{id}", get(activity_detail_handler))
         .route("/api/daily-summary", get(daily_summary_handler))
         .route("/debug/list-page-probe", get(list_page_probe_handler))
-        .layer(middleware::from_fn(auth_middleware))
-        .with_state(state.clone());
+        .with_state(Arc::clone(state));
 
     let browser_route = Router::new()
         .route("/browser/login", get(streaming::browser_login_ws))
-        .with_state(state.clone());
+        .with_state(Arc::clone(state));
+
+    api_routes
+        .merge(browser_route)
+        .merge(http::mcp_router(mcp_server))
+}
+
+/// The CORS layer applied to the whole surface.
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers(Any)
+}
+
+/// Build the complete Axum router for the unified server.
+///
+/// Authentication is **one layer over everything except `/health`**, rather than
+/// a layer each route group carries. That is the change that matters here:
+/// `/browser/login` was previously merged bare, so the WebSocket driving a
+/// provider browser login answered unauthenticated on a public URL. A gate every
+/// route has to remember is a gate that eventually gets forgotten, and this one
+/// had been. A single chokepoint cannot.
+///
+/// `/health` stays open because Cloud Run's startup and liveness probes carry no
+/// credentials, and gating it presents as a deploy that rolls back for no
+/// visible reason.
+///
+/// # Errors
+///
+/// [`AuthConfigError::MissingAudience`] when `DRAVR_SCIOTTE_AUDIENCE` is unset.
+pub fn build_router(state: &SharedState) -> Result<Router, AuthConfigError> {
+    let verifier = verifier_from_env(reqwest::Client::new())?;
 
     let health_route = Router::new()
         .route("/health", get(health_handler))
-        .with_state(state);
+        .with_state(Arc::clone(state));
 
-    Router::new()
-        .merge(api_routes)
-        .merge(browser_route)
-        .merge(mcp_router)
+    Ok(protected_routes(state)
+        .layer(middleware::from_fn(move |req, next| {
+            let verifier = Arc::clone(&verifier);
+            async move { auth_middleware(verifier, req, next).await }
+        }))
         .merge(health_route)
-        .layer(cors)
+        .layer(cors_layer()))
+}
+
+/// The same routes with no authentication.
+///
+/// Exists so handler behaviour — login flows, provider routing, MCP dispatch —
+/// can be asserted without a Google identity token, which CI cannot mint.
+/// Production never serves this: `main` calls [`build_router`], and
+/// `build_router_refuses_anonymous` asserts that what it returns rejects a
+/// caller with no token.
+pub fn routes(state: &SharedState) -> Router {
+    let health_route = Router::new()
+        .route("/health", get(health_handler))
+        .with_state(Arc::clone(state));
+
+    protected_routes(state)
+        .merge(health_route)
+        .layer(cors_layer())
 }
 
 // ============================================================================

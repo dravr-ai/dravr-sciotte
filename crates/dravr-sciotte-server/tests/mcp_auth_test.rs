@@ -18,7 +18,9 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte_mcp::state::{AppScraper, ServerState};
+use dravr_sciotte_server::auth::AUDIENCE_ENV;
 use dravr_sciotte_server::router::build_router;
+use serial_test::serial;
 use tower::ServiceExt;
 
 /// Build a minimal, browser-lazy state for router wiring tests. `ChromeScraper::new`
@@ -46,35 +48,60 @@ fn test_state() -> Arc<ServerState> {
     ))
 }
 
-/// The MCP transport must honor the same `DRAVR_SCIOTTE_API_KEY` gate as the REST API:
-/// an unauthenticated `POST /mcp` is rejected with 401 when the key is set, `/health`
-/// stays open, and a correct bearer token passes the gate.
+/// Every protected route must refuse a caller with no identity token, and
+/// `/health` must stay open for Cloud Run's probes.
+///
+/// `/browser/login` is named explicitly because it was the one that got this
+/// wrong: it used to be merged without the auth layer, so the WebSocket driving
+/// a provider browser login answered unauthenticated on a public URL. Auth is
+/// now a single layer over everything except health, so this asserts the
+/// property that made that possible is gone.
 #[tokio::test]
-async fn mcp_route_enforces_api_key_gate() {
-    const KEY: &str = "router-mcp-auth-test-key";
-    // Safe: edition 2021 set_var; single test mutates this key, removed below.
-    env::set_var("DRAVR_SCIOTTE_API_KEY", KEY);
+#[serial]
+async fn build_router_refuses_anonymous_on_every_protected_route() {
+    // Safe: edition 2021 set_var; this key is only read at router construction.
+    env::set_var(AUDIENCE_ENV, "dravr-sciotte-test-audience");
 
-    // Unauthenticated POST /mcp -> 401 (the gate that protects /api/*).
-    let app = build_router(test_state());
-    let unauth = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/mcp")
-                .body(Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("router responds");
-    assert_eq!(
-        unauth.status(),
-        StatusCode::UNAUTHORIZED,
-        "unauthenticated /mcp must be rejected"
-    );
+    for (method, path) in [
+        (Method::POST, "/mcp"),
+        (Method::GET, "/api/athlete"),
+        (Method::GET, "/auth/sessions"),
+        (Method::GET, "/auth/sessions/abc/export"),
+        (Method::GET, "/browser/login"),
+        (Method::GET, "/debug/list-page-probe"),
+    ] {
+        let app = build_router(&test_state()).expect("audience is set, so the router builds");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{path} answered {} to an anonymous caller, expected 401",
+            response.status()
+        );
+    }
 
-    // /health stays open even with the key set.
-    let app = build_router(test_state());
+    env::remove_var(AUDIENCE_ENV);
+}
+
+/// `/health` stays open, because Cloud Run's startup and liveness probes carry
+/// no credentials. If this ever starts requiring a token the container boots and
+/// then fails its probe, which presents as a deploy that rolls back for no
+/// visible reason.
+#[tokio::test]
+#[serial]
+async fn health_stays_open_for_probes() {
+    env::set_var(AUDIENCE_ENV, "dravr-sciotte-test-audience");
+
+    let app = build_router(&test_state()).expect("router builds");
     let health = app
         .oneshot(
             Request::builder()
@@ -86,24 +113,20 @@ async fn mcp_route_enforces_api_key_gate() {
         .expect("router responds");
     assert_eq!(health.status(), StatusCode::OK, "/health must stay open");
 
-    // A correct bearer token passes the gate (status is not 401).
-    let app = build_router(test_state());
-    let authed = app
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/mcp")
-                .header("authorization", format!("Bearer {KEY}"))
-                .body(Body::empty())
-                .expect("request builds"),
-        )
-        .await
-        .expect("router responds");
-    assert_ne!(
-        authed.status(),
-        StatusCode::UNAUTHORIZED,
-        "correct bearer token must pass the gate"
-    );
+    env::remove_var(AUDIENCE_ENV);
+}
 
-    env::remove_var("DRAVR_SCIOTTE_API_KEY");
+/// Without an audience the server must not start at all.
+///
+/// A scraper that does not know which audience to require would accept tokens
+/// minted for any other Google service. Refusing to build is the whole point of
+/// leaving a fail-open shared key behind.
+#[tokio::test]
+#[serial]
+async fn build_router_fails_closed_without_an_audience() {
+    env::remove_var(AUDIENCE_ENV);
+    assert!(
+        build_router(&test_state()).is_err(),
+        "router must refuse to build when the audience is unset"
+    );
 }

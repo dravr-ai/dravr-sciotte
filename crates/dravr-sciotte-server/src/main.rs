@@ -41,10 +41,12 @@ use dravr_tronc::mcp::transport::stdio;
 use dravr_tronc::server::tracing_init;
 use dravr_tronc::McpServer;
 use serde_json::{json, Value};
+use std::process;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::time;
-use tracing::info;
+
+use tracing::{error, info};
 
 #[derive(Parser)]
 #[command(
@@ -367,7 +369,15 @@ async fn run_server(
 
     load_persisted_session(&state).await;
 
-    let app = router::build_router(state);
+    // Fail closed and say why. A scraper that cannot pin the audience it accepts
+    // would take tokens minted for any other service, so not starting is right.
+    let app = match router::build_router(&state) {
+        Ok(app) => app,
+        Err(why) => {
+            error!(error = %why, "refusing to start");
+            process::exit(1);
+        }
+    };
 
     let addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&addr).await?;

@@ -32,7 +32,7 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte_mcp::state::{AppScraper, ServerState};
-use dravr_sciotte_server::router::build_router;
+use dravr_sciotte_server::router::routes;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -133,7 +133,7 @@ fn post(uri: &str, body: &Value) -> Request<Body> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chooser_then_phone_tap_reports_the_number_over_http() {
     configure_login_env();
-    let app = build_router(fixture_state());
+    let app = routes(&fixture_state());
 
     let login = app
         .clone()
@@ -192,7 +192,7 @@ async fn chooser_then_phone_tap_reports_the_number_over_http() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_totp_reports_otp_required_over_http() {
     configure_login_env();
-    let app = build_router(fixture_state());
+    let app = routes(&fixture_state());
 
     let login = app
         .oneshot(post(

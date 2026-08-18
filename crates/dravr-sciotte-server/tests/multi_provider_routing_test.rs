@@ -21,7 +21,7 @@ use dravr_sciotte::provider::ProviderConfig;
 use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte_mcp::state::{AppScraper, FlowLookupError, ServerState};
-use dravr_sciotte_server::router::build_router;
+use dravr_sciotte_server::router::routes;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -76,7 +76,7 @@ async fn body_json(response: Response) -> Value {
 #[tokio::test]
 async fn import_export_roundtrip_carries_provider() {
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
-    let app = build_router(two_provider_state());
+    let app = routes(&two_provider_state());
 
     let import = app
         .clone()
@@ -120,7 +120,7 @@ async fn import_export_roundtrip_carries_provider() {
 #[tokio::test]
 async fn import_unknown_provider_rejected_with_available_list() {
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
-    let app = build_router(two_provider_state());
+    let app = routes(&two_provider_state());
 
     let response = app
         .oneshot(
@@ -146,7 +146,7 @@ async fn import_unknown_provider_rejected_with_available_list() {
 #[tokio::test]
 async fn credential_login_requires_provider_when_multi() {
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
-    let app = build_router(two_provider_state());
+    let app = routes(&two_provider_state());
 
     let response = app
         .oneshot(
@@ -171,7 +171,7 @@ async fn credential_login_requires_provider_when_multi() {
 #[tokio::test]
 async fn submit_otp_without_pending_flow_is_404() {
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
-    let app = build_router(two_provider_state());
+    let app = routes(&two_provider_state());
 
     let response = app
         .oneshot(
@@ -193,7 +193,7 @@ async fn submit_otp_without_pending_flow_is_404() {
 #[tokio::test]
 async fn health_reports_providers_and_per_provider_cache() {
     env::remove_var("DRAVR_SCIOTTE_API_KEY");
-    let app = build_router(two_provider_state());
+    let app = routes(&two_provider_state());
 
     let response = app
         .oneshot(
