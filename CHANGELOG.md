@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.0] — 2026-08-21
+
+### Added
+
+- feat(server): serve ungated on loopback binds — the development mode
+- feat(auth): require a Google identity token, and gate every route once
+
+### Fixed
+
+- fix(docker): bump apt epoch past the chromium 76033 batch
+
+
+
 ## [0.8.6] — 2026-08-17
 
 ### Added
