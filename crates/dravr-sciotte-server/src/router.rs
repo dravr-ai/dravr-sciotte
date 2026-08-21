@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -22,7 +23,7 @@ use dravr_tronc::McpServer;
 use serde::Deserialize;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::auth::{auth_middleware, verifier_from_env, AuthConfigError};
 use crate::error_response::scraper_error_response;
@@ -115,13 +116,49 @@ pub fn build_router(state: &SharedState) -> Result<Router, AuthConfigError> {
         .layer(cors_layer()))
 }
 
+/// Whether a bind host is this machine's own loopback.
+///
+/// Parsed as an IP first so every loopback literal (`127.0.0.1`, `::1`,
+/// `127.0.0.53`, …) answers correctly; `localhost` is the one name accepted
+/// without resolving, because resolving would make the auth posture depend on
+/// `/etc/hosts`.
+#[must_use]
+pub fn is_loopback_host(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .map_or(host == "localhost", |ip| ip.is_loopback())
+}
+
+/// The router to serve for a given bind host.
+///
+/// A loopback bind is reachable only by this machine's own user, so it serves
+/// [`routes`] ungated — the development mode behind `scripts/sciotte-local.sh`,
+/// where no metadata server exists to mint the tokens the gate requires. The
+/// decision keys on the **bind address**, not an environment variable somebody
+/// could set in production: the container starts with `--host 0.0.0.0`
+/// (Dockerfile CMD), so a deployed instance always gets [`build_router`].
+///
+/// # Errors
+///
+/// [`AuthConfigError::MissingAudience`] when the bind is not loopback and
+/// `DRAVR_SCIOTTE_AUDIENCE` is unset.
+pub fn router_for_bind(host: &str, state: &SharedState) -> Result<Router, AuthConfigError> {
+    if is_loopback_host(host) {
+        warn!(host = %host, "loopback bind; serving without authentication (development mode)");
+        Ok(routes(state))
+    } else {
+        build_router(state)
+    }
+}
+
 /// The same routes with no authentication.
 ///
-/// Exists so handler behaviour — login flows, provider routing, MCP dispatch —
-/// can be asserted without a Google identity token, which CI cannot mint.
-/// Production never serves this: `main` calls [`build_router`], and
-/// `build_router_refuses_anonymous` asserts that what it returns rejects a
-/// caller with no token.
+/// Two callers, both scoped to this machine: tests assert handler behaviour —
+/// login flows, provider routing, MCP dispatch — without a Google identity
+/// token, which CI cannot mint; and `main` serves it for a **loopback bind**,
+/// the development mode behind `scripts/sciotte-local.sh`. A deployed instance
+/// can never get it: the container binds `0.0.0.0` (Dockerfile CMD), which
+/// routes `main` to [`build_router`], and `build_router_refuses_anonymous`
+/// asserts that what that returns rejects a caller with no token.
 pub fn routes(state: &SharedState) -> Router {
     let health_route = Router::new()
         .route("/health", get(health_handler))

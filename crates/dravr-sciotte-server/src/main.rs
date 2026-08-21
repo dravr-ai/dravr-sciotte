@@ -369,9 +369,11 @@ async fn run_server(
 
     load_persisted_session(&state).await;
 
-    // Fail closed and say why. A scraper that cannot pin the audience it accepts
-    // would take tokens minted for any other service, so not starting is right.
-    let app = match router::build_router(&state) {
+    // Loopback binds serve ungated (development); anything else fails closed
+    // and says why — a scraper that cannot pin the audience it accepts would
+    // take tokens minted for any other service, so not starting is right. The
+    // split itself lives in `router_for_bind`.
+    let app = match router::router_for_bind(&host, &state) {
         Ok(app) => app,
         Err(why) => {
             error!(error = %why, "refusing to start");

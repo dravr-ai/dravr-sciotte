@@ -1,5 +1,5 @@
-// ABOUTME: Regression test — the MCP transport honors the DRAVR_SCIOTTE_API_KEY gate
-// ABOUTME: unauth POST /mcp -> 401, /health stays open, a correct bearer passes (no auth bypass)
+// ABOUTME: Regression tests for the identity-token gate: anonymous callers 401 on every
+// ABOUTME: protected route, /health stays open, and only a loopback bind serves ungated
 //
 // SPDX-License-Identifier: MIT OR Apache-2.0
 // Copyright (c) 2026 dravr.ai
@@ -19,7 +19,7 @@ use dravr_sciotte::queue::{QueueConfig, QueuedScraper, SciotteLimiter};
 use dravr_sciotte::scraper::ChromeScraper;
 use dravr_sciotte_mcp::state::{AppScraper, ServerState};
 use dravr_sciotte_server::auth::AUDIENCE_ENV;
-use dravr_sciotte_server::router::build_router;
+use dravr_sciotte_server::router::{build_router, is_loopback_host, router_for_bind};
 use serial_test::serial;
 use tower::ServiceExt;
 
@@ -129,4 +129,79 @@ async fn build_router_fails_closed_without_an_audience() {
         build_router(&test_state()).is_err(),
         "router must refuse to build when the audience is unset"
     );
+}
+
+/// The serving policy keys on the bind address: a deployed bind (`0.0.0.0`,
+/// the Dockerfile CMD) keeps the token gate — or refuses to start without an
+/// audience — while a loopback bind serves ungated, which is the development
+/// mode behind `scripts/sciotte-local.sh` where no metadata server exists to
+/// mint tokens.
+#[tokio::test]
+#[serial]
+async fn router_for_bind_gates_by_bind_address() {
+    // Deployed bind + audience → the gate stands: an anonymous caller 401s.
+    env::set_var(AUDIENCE_ENV, "dravr-sciotte-test-audience");
+    let gated = router_for_bind("0.0.0.0", &test_state())
+        .expect("audience is set, so the gated router builds");
+    let response = gated
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/athlete")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a non-loopback bind must keep the identity-token gate"
+    );
+
+    // Deployed bind without an audience → refuses to start, same as build_router.
+    env::remove_var(AUDIENCE_ENV);
+    assert!(
+        router_for_bind("0.0.0.0", &test_state()).is_err(),
+        "a non-loopback bind without an audience must fail closed"
+    );
+
+    // Loopback bind, no audience → serves, and an anonymous request reaches
+    // the handler rather than a gate: the empty session list answers 200.
+    let dev =
+        router_for_bind("127.0.0.1", &test_state()).expect("a loopback bind needs no audience");
+    let response = dev
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/auth/sessions")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("router responds");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a loopback bind serves ungated for local development"
+    );
+}
+
+/// The loopback decision must hold for every loopback literal and reject
+/// everything routable — a wrong answer here either breaks local development
+/// or, far worse, serves the ungated router on a reachable interface.
+#[test]
+fn loopback_host_classification() {
+    for host in ["127.0.0.1", "127.0.0.53", "::1", "localhost"] {
+        assert!(is_loopback_host(host), "{host} is loopback");
+    }
+    for host in [
+        "0.0.0.0",
+        "::",
+        "10.0.0.7",
+        "192.168.1.20",
+        "sciotte.example.internal",
+    ] {
+        assert!(!is_loopback_host(host), "{host} is not loopback");
+    }
 }
