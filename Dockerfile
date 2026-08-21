@@ -20,7 +20,13 @@ RUN cargo build --release -p dravr-sciotte-server -p dravr-sciotte-mcp \
 # staying current matters (mirrors the pierre image's posture).
 FROM debian:trixie-slim
 
-ARG APT_SECURITY_EPOCH=2026-08-03
+# 2026-08-21: chromium 151.0.7922.169-1~deb13u1 closes the CVE-2026-76033..76052
+# batch (22 HIGH — site-isolation bypass, arbitrary code execution in Dawn and
+# V8, information disclosure). The same batch gated the platform's dev deploy on
+# the same day; this image ships the same chromium, so it reds on its next build
+# until the layer is rebuilt too. Bumping the two together is the whole point of
+# the shared ARG.
+ARG APT_SECURITY_EPOCH=2026-08-21
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
