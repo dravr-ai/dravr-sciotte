@@ -26,7 +26,14 @@ FROM debian:trixie-slim
 # the same day; this image ships the same chromium, so it reds on its next build
 # until the layer is rebuilt too. Bumping the two together is the whole point of
 # the shared ARG.
-ARG APT_SECURITY_EPOCH=2026-08-21
+#
+# 2026-08-31: chromium 151.0.7922.173-1~deb13u1 closes CVE-2026-76018, arbitrary
+# code execution via a crafted file in the Import component (2 HIGH — chromium,
+# chromium-common). It gated the platform's dev deploy the same day on a commit
+# that touched no Docker and no dependency: the cached apt layer was still
+# serving .169. Bumped here in the same session rather than left for this image's
+# next build to discover, which is the lag the ARG exists to prevent.
+ARG APT_SECURITY_EPOCH=2026-08-31
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
