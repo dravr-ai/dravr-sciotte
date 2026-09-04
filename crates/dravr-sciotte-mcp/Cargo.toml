@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [dependencies]
 dravr-sciotte = { path = "../..", version = "0.9.1" }
-dravr-tronc = "0.7"
+dravr-tronc = "0.11.0"
 async-trait = "0.1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
