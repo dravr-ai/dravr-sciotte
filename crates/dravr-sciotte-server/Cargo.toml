@@ -31,7 +31,7 @@ vision = ["dravr-sciotte/vision", "dep:embacle"]
 [dependencies]
 dravr-sciotte = { path = "../..", version = "0.9.1" }
 dravr-sciotte-mcp = { path = "../dravr-sciotte-mcp", version = "0.9.1" }
-dravr-tronc = { version = "0.7", features = ["notifications", "google-iam"] }
+dravr-tronc = { version = "0.11.0", features = ["notifications", "google-iam"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 embacle = { git = "https://github.com/dravr-ai/dravr-embacle.git", tag = "v0.17.0", features = ["copilot-headless"], optional = true }
 async-trait = "0.1"
