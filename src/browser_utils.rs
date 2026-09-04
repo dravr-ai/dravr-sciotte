@@ -40,12 +40,17 @@ pub async fn launch_browser(
         }
     }
 
+    // Fields sciotte does not own come from dravr-browser's env-driven defaults
+    // (`DRAVR_BROWSER_*`): sandbox off, which is `--no-sandbox` as root in a
+    // container, and the launch timeout. Spreading them means a field added
+    // upstream does not break this literal — 0.1.1 added two at once.
     let launch = BrowserLaunchConfig {
         chrome_path: config.chrome_path.clone(),
         headless,
         profile_base_dir: config.profile_base_dir.clone(),
         proxy_url: config.proxy_url.clone(),
         user_agent: None,
+        ..BrowserLaunchConfig::default()
     };
     dravr_browser::launch_browser(&launch, profile_id)
         .await
