@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.2] — 2026-09-04
+
+### Fixed
+
+- fix(build): spread BrowserLaunchConfig defaults into the literal
+
+### Other
+
+- chore(deps): bump dravr-browser to 0.1.1
+- chore(deps): bump dravr-tronc to 0.11.0
+
+
+
 ## [0.9.1] — 2026-09-04
 
 ### Fixed
