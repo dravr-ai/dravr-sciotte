@@ -54,11 +54,15 @@ jobs:
   test-linux:
     name: Tests (Linux)
     runs-on: ubuntu-latest
-    # A flaky Chrome launch in the real-browser integration tests (chromiumoxide's
-    # CDP handshake has no per-launch timeout) can wedge the single-threaded suite.
-    # Without this bound the job runs to GitHub's 6-hour hard cap before failing; a
-    # warm run is ~2 min and a cold-cache rebuild ~10 min, so 15 fails a hang fast
-    # while leaving headroom for a legitimate cold build.
+    # The real-browser integration tests launch Chrome through dravr-browser.
+    # Before 0.1.1 that launch was unbounded on our side — chromiumoxide caps
+    # only the wait for the DevTools endpoint (20s) and leaves the websocket
+    # connect after it open-ended — and a launch that never returned wedged this
+    # single-threaded suite twice at 15 minutes on 2026-09-04. dravr-browser
+    # >= 0.1.1 bounds the whole launch (DRAVR_BROWSER_LAUNCH_TIMEOUT, 30s by
+    # default). This cap stays as the outer guard: a warm run is ~2 min, a
+    # cold-cache rebuild ~10 min, and anything past 15 is a hang of another
+    # kind, not a build. Without it the job runs to GitHub's 6-hour hard cap.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
