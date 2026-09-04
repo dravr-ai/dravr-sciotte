@@ -59,11 +59,16 @@ jobs:
     # only the wait for the DevTools endpoint (20s) and leaves the websocket
     # connect after it open-ended — and a launch that never returned wedged this
     # single-threaded suite twice at 15 minutes on 2026-09-04. dravr-browser
-    # >= 0.1.1 bounds the whole launch (DRAVR_BROWSER_LAUNCH_TIMEOUT, 30s by
-    # default). This cap stays as the outer guard: a warm run is ~2 min, a
-    # cold-cache rebuild ~10 min, and anything past 15 is a hang of another
-    # kind, not a build. Without it the job runs to GitHub's 6-hour hard cap.
-    timeout-minutes: 15
+    # >= 0.1.1 bounds every launch (DRAVR_BROWSER_LAUNCH_TIMEOUT, 30s by
+    # default), so a hang can no longer run this job to GitHub's 6-hour cap; the
+    # worst case is fourteen launches timing out in sequence, about seven
+    # minutes. What this cap now guards against is a cold-cache rebuild under
+    # runner contention: a warm run is ~3 min, but a fresh branch that also
+    # brings a new dependency version compiled for 15m15s and was killed four
+    # times in one day (tronc 0.11.0 twice, 1.0.0 twice) with every other job
+    # green. 25 leaves that build its headroom and still fails a real stall
+    # well short of the six-hour default.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
