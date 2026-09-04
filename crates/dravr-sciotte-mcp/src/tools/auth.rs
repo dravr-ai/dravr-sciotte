@@ -28,6 +28,10 @@ impl McpTool<ServerState> for AuthStatusTool {
                 "required": []
             }),
             annotations: None,
+            // tronc 0.8.0 added these to `Tool`; a sciotte capture tool answers
+            // synchronously and returns an untyped result, so neither applies.
+            output_schema: None,
+            execution: None,
         }
     }
 
@@ -84,6 +88,10 @@ impl McpTool<ServerState> for BrowserLoginTool {
                 "required": []
             }),
             annotations: None,
+            // tronc 0.8.0 added these to `Tool`; a sciotte capture tool answers
+            // synchronously and returns an untyped result, so neither applies.
+            output_schema: None,
+            execution: None,
         }
     }
 

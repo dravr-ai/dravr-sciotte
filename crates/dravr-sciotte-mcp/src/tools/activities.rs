@@ -37,6 +37,10 @@ impl McpTool<ServerState> for GetActivitiesTool {
                 "required": []
             }),
             annotations: None,
+            // tronc 0.8.0 added these to `Tool`; a sciotte capture tool answers
+            // synchronously and returns an untyped result, so neither applies.
+            output_schema: None,
+            execution: None,
         }
     }
 
@@ -98,6 +102,10 @@ impl McpTool<ServerState> for GetActivityTool {
                 "required": ["activity_id"]
             }),
             annotations: None,
+            // tronc 0.8.0 added these to `Tool`; a sciotte capture tool answers
+            // synchronously and returns an untyped result, so neither applies.
+            output_schema: None,
+            execution: None,
         }
     }
 

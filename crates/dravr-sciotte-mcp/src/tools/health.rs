@@ -33,6 +33,10 @@ impl McpTool<ServerState> for GetDailySummaryTool {
                 "required": ["date"]
             }),
             annotations: None,
+            // tronc 0.8.0 added these to `Tool`; a sciotte capture tool answers
+            // synchronously and returns an untyped result, so neither applies.
+            output_schema: None,
+            execution: None,
         }
     }
 
