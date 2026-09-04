@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.1] — 2026-09-04
+
+### Fixed
+
+- fix(auth): hold a pending OTP login as long as the code is valid
+- fix(docker): bump apt epoch for the chromium 152 CVE batch, tested
+- fix(docker): bump apt epoch for the chromium 2026-08-31 CVE
+
+
+
 ## [0.9.0] — 2026-08-21
 
 ### Added
