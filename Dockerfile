@@ -33,7 +33,23 @@ FROM debian:trixie-slim
 # that touched no Docker and no dependency: the cached apt layer was still
 # serving .169. Bumped here in the same session rather than left for this image's
 # next build to discover, which is the lag the ARG exists to prevent.
-ARG APT_SECURITY_EPOCH=2026-08-31
+#
+# 2026-09-03: chromium 152.0.7977.75-1~deb13u1 closes CVE-2026-84349 (use after
+# free), CVE-2026-84351 (buffer overflow in GPU) and CVE-2026-84357 (improper
+# input validation) — 6 HIGH on the platform image, the same three CVEs counted
+# once per source package (chromium, chromium-common). Bumped here in the same
+# session the platform bumped, which is the lag the shared ARG exists to prevent:
+# this image had been left a batch behind twice running, and its next build would
+# have red on CVEs already fixed elsewhere.
+#
+# A major-version jump (151 -> 152) is the one that can break scraping rather
+# than just patch it, so it was tested rather than assumed. `tests/
+# automation_canary.rs` — real `launch_browser` + `apply_minimal_stealth` against
+# the local fixture — passes on the 152 engine (verified against Chrome
+# 152.0.7977.76, one patch off Debian's build): cdp_runtime_enable, webdriver_set,
+# plugins_empty, languages_empty, notif_mismatch and ua_headless_substring all
+# clean. Re-run it on the next major bump; that is what it is for.
+ARG APT_SECURITY_EPOCH=2026-09-03
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
