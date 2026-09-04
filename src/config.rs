@@ -137,6 +137,15 @@ pub struct ScraperConfig {
     /// `select_two_factor` call. Sessions older than this are evicted on
     /// the next access — the held Chrome process is closed via
     /// chromiumoxide's `kill_on_drop`, freeing memory for abandoned flows.
+    ///
+    /// Defaults to the 30 minutes a provider one-time code is actually valid
+    /// for. It was 5, which is shorter than the code the provider just mailed:
+    /// a human who fetches the code from their inbox and pastes it back can
+    /// easily take longer than that, and the flow was already evicted when they
+    /// did — `submit_otp` answered `no_pending_login` and the whole login had to
+    /// be repeated, which on Garmin then trips throttling. Holding a Chrome
+    /// process for the abandoned case is the cost; a code that cannot be
+    /// redeemed inside its own validity window is the alternative.
     pub pending_login_ttl_secs: u64,
     /// Hard cap on list-page "next" clicks during a single activity scrape.
     /// A date-bounded historical scrape pages back through the reverse-
@@ -172,7 +181,7 @@ impl Default for ScraperConfig {
             proxy_url: env::var("DRAVR_SCIOTTE_PROXY_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            pending_login_ttl_secs: env_u64("DRAVR_SCIOTTE_PENDING_LOGIN_TTL", 300),
+            pending_login_ttl_secs: env_u64("DRAVR_SCIOTTE_PENDING_LOGIN_TTL", 1800),
             max_scrape_pages: env_u32("DRAVR_SCIOTTE_MAX_SCRAPE_PAGES", 250),
         }
     }
@@ -286,7 +295,8 @@ mod tests {
         assert_eq!(config.password_step_timeout_secs, 30);
         assert_eq!(config.phone_tap_timeout_secs, 60);
         assert_eq!(config.stuck_challenge_max_polls, 12);
-        assert_eq!(config.pending_login_ttl_secs, 300);
+        // 30 minutes: the validity window of the code the provider sends.
+        assert_eq!(config.pending_login_ttl_secs, 1800);
     }
 
     #[test]
