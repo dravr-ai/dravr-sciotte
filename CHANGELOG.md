@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.0] — 2026-09-06
+
+### Added
+
+- feat(garmin): the route was already captured, now it is read
+
+### Fixed
+
+- fix(docker): bump the apt security epoch past the Skia use-after-free
+
+### Other
+
+- chore(deps): bump dravr-tronc 0.11.0 -> 1.0.0
+
+
+
 ## [0.9.2] — 2026-09-04
 
 ### Fixed
