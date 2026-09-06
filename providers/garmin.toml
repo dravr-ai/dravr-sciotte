@@ -328,6 +328,71 @@ js_extract = '''
         if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
         return { lat: String(lat), lng: String(lng) };
     }
+
+    // ---- Route geometry -------------------------------------------------
+    // The map on Garmin's activity page is fed by
+    //   /gc-api/activity-service/activity/{id}/details?...&maxPolylineSize=4000
+    // which the stealth payload already captures. Two sources of geometry sit
+    // in that one response and they are NOT interchangeable:
+    //
+    //   geoPolylineDTO.polyline  — GPS-valid points only, each carrying a null
+    //                              `altitude`, plus a precomputed bounding box.
+    //   activityDetailMetrics    — every sample, as flat rows indexed by
+    //                              metricDescriptors, carrying directLatitude,
+    //                              directLongitude AND directElevation together.
+    //
+    // We read the metrics array, because elevation there is complete and
+    // index-aligned with the coordinates by construction — no cross-array
+    // guesswork. Measured on a 6.6 km trail run: 1275 metric rows, 3 without a
+    // GPS fix, and geoPolylineDTO.polyline held exactly the remaining 1272. The
+    // bounding box is taken from geoPolylineDTO since Garmin already computed it.
+    function buildRoute() {
+        var detailsUrl = null;
+        for (var u in captures) {
+            if (u.indexOf("/details") !== -1 && u.indexOf("activity-service") !== -1) { detailsUrl = u; break; }
+        }
+        if (!detailsUrl) return null;
+        var body = captureBody(captures[detailsUrl]);
+        if (!body) return null;
+        var det;
+        try { det = JSON.parse(body); } catch (e) { return null; }
+
+        var idx = {};
+        (det.metricDescriptors || []).forEach(function(m) { idx[m.key] = m.metricsIndex; });
+        var la = idx.directLatitude, lo = idx.directLongitude;
+        var el = idx.directElevation, di = idx.sumDistance;
+        if (la == null || lo == null) return null;
+
+        var coords = [], elevs = [], dists = [];
+        (det.activityDetailMetrics || []).forEach(function(row) {
+            var m = row && row.metrics;
+            if (!m) return;
+            var lat = m[la], lon = m[lo];
+            // A sample without a fix breaks the polyline; drop it from every
+            // array at once so the three stay index-aligned.
+            if (lat == null || lon == null) return;
+            coords.push([lat, lon]);
+            elevs.push(el != null && m[el] != null ? m[el] : null);
+            dists.push(di != null && m[di] != null ? m[di] : null);
+        });
+        if (coords.length < 2) return null;
+
+        // A series with any gap is dropped whole: the Rust side keeps a series
+        // only when it is exactly as long as `coordinates`, and a padded array
+        // would misreport which samples were really measured.
+        function complete(a) { return a.every(function(v) { return v != null; }) ? a : null; }
+
+        var geo = det.geoPolylineDTO || {};
+        return {
+            coordinates: coords,
+            altitudes: complete(elevs),
+            distances: complete(dists),
+            bounds: (geo.minLat != null && geo.maxLat != null && geo.minLon != null && geo.maxLon != null)
+                ? { min_latitude: geo.minLat, max_latitude: geo.maxLat, min_longitude: geo.minLon, max_longitude: geo.maxLon }
+                : null
+        };
+    }
+
     var coord = pickCoord();
 
     return JSON.stringify({
@@ -370,7 +435,8 @@ js_extract = '''
         start_latitude: coord ? coord.lat : null,
         start_longitude: coord ? coord.lng : null,
         laps: Array.isArray(rawLaps) ? rawLaps.map(normalizeLap) : null,
-        splits: Array.isArray(rawSplits) ? rawSplits.map(normalizeSplit) : null
+        splits: Array.isArray(rawSplits) ? rawSplits.map(normalizeSplit) : null,
+        route: buildRoute()
     });
 })()
 '''

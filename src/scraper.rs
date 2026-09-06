@@ -33,8 +33,8 @@ use crate::config::ScraperConfig;
 use crate::error::{LoginResult, ScraperError, ScraperResult, TwoFactorOption};
 use crate::fake_login;
 use crate::models::{
-    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, Lap, Split,
-    SportType,
+    Activity, ActivityParams, AthleteProfile, AuthSession, DailySummary, HealthParams, Lap,
+    RouteBounds, RouteTrack, Split, SportType,
 };
 use crate::pending_login::PendingLogin;
 use crate::provider::{ListPagination, ProviderConfig};
@@ -2649,6 +2649,8 @@ fn build_activity_from_js_item(id: &str, item: &serde_json::Value) -> Activity {
         segment_efforts: None,
         splits: None,
         laps: None,
+        // The list page carries no track; the detail pass fills this in.
+        route: None,
         provider: "scraper".to_owned(),
     }
 }
@@ -2760,6 +2762,7 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
         segment_efforts: None,
         splits: parse_splits_from_detail(data),
         laps: parse_laps_from_detail(data),
+        route: parse_route_from_detail(data),
         provider: "scraper".to_owned(),
     }
 }
@@ -2775,6 +2778,72 @@ fn build_activity_from_detail(activity_id: &str, data: &serde_json::Value) -> Ac
 /// Missing `distance` or `elapsed_time` on an entry causes that entry
 /// to be skipped — a split without either is unusable for coach reasoning.
 /// Returns `None` when the array is absent or yields zero usable entries.
+/// Build a [`RouteTrack`] from the detail extract's `route` object.
+///
+/// The three series must stay index-aligned, so a coordinate pair that fails to
+/// parse drops the sample from every array at once rather than shortening one.
+/// `altitudes_meters` and `distances_meters` are kept only when the provider
+/// supplied a complete series — a partially-null elevation array cannot drive
+/// climb detection, and a caller reading a padded one cannot tell which samples
+/// were real.
+///
+/// Returns `None` for a track of fewer than two points: a single coordinate is
+/// the activity's start, which [`Activity::start_latitude`] already carries.
+fn parse_route_from_detail(data: &serde_json::Value) -> Option<RouteTrack> {
+    let route = data.get("route")?;
+    let raw = route.get("coordinates")?.as_array()?;
+
+    let mut coordinates = Vec::with_capacity(raw.len());
+    let mut keep = Vec::with_capacity(raw.len());
+    for (idx, pair) in raw.iter().enumerate() {
+        let pair = pair.as_array()?;
+        let (Some(lat), Some(lon)) = (
+            pair.first().and_then(serde_json::Value::as_f64),
+            pair.get(1).and_then(serde_json::Value::as_f64),
+        ) else {
+            continue;
+        };
+        if !lat.is_finite() || !lon.is_finite() {
+            continue;
+        }
+        coordinates.push((lat, lon));
+        keep.push(idx);
+    }
+    if coordinates.len() < 2 {
+        return None;
+    }
+
+    let expected = coordinates.len();
+    let series = |key: &str| -> Option<Vec<f64>> {
+        let arr = route.get(key)?.as_array()?;
+        let picked: Vec<f64> = keep
+            .iter()
+            .filter_map(|&i| arr.get(i).and_then(serde_json::Value::as_f64))
+            .filter(|v| v.is_finite())
+            .collect();
+        (picked.len() == expected).then_some(picked)
+    };
+
+    let altitudes_meters = series("altitudes");
+    let distances_meters = series("distances");
+
+    let bounds = route.get("bounds").and_then(|b| {
+        Some(RouteBounds {
+            min_latitude: b.get("min_latitude")?.as_f64()?,
+            max_latitude: b.get("max_latitude")?.as_f64()?,
+            min_longitude: b.get("min_longitude")?.as_f64()?,
+            max_longitude: b.get("max_longitude")?.as_f64()?,
+        })
+    });
+
+    Some(RouteTrack {
+        coordinates,
+        altitudes_meters,
+        distances_meters,
+        bounds,
+    })
+}
+
 fn parse_splits_from_detail(data: &serde_json::Value) -> Option<Vec<Split>> {
     let arr = data.get("splits")?.as_array()?;
     let parsed: Vec<Split> = arr
@@ -2951,6 +3020,15 @@ fn merge_detail_into_activity(activity: &mut Activity, detail: &serde_json::Valu
         activity.elapsed_time_seconds = detail["elapsed_time"]
             .as_str()
             .and_then(parse_duration_string);
+    }
+
+    // The list page never carries a track, so the detail page is the only
+    // source and there is nothing to preempt. Merged here as well as in
+    // `build_activity_from_detail` because the two paths do not share code: an
+    // enriched list scrape reaches only this function, and a field wired into
+    // the builder alone is silently absent from every multi-activity result.
+    if activity.route.is_none() {
+        activity.route = parse_route_from_detail(detail);
     }
 }
 
@@ -4084,6 +4162,113 @@ mod tests {
             (lng - -73.5673).abs() < 1e-4,
             "expected ~-73.5673, got {lng}"
         );
+    }
+
+    /// Real Garmin values, taken from a live `/activity-service/activity/{id}/details`
+    /// capture on 2026-09-06 (activity 24235239873, a 6.6 km trail run).
+    fn garmin_route_fixture() -> serde_json::Value {
+        serde_json::json!({
+            "route": {
+                "coordinates": [
+                    [45.852_678_017_690_78, -74.088_834_123_685_96],
+                    [45.852_725_878_357_89, -74.088_854_324_072_6],
+                    [45.852_734_511_718_154, -74.088_857_090_100_65],
+                    [45.852_844_985_201_955, -74.088_766_314_089_3]
+                ],
+                "altitudes": [274.6, 274.6, 274.8, 289.6],
+                "distances": [0.0, 5.4, 6.4, 6637.59],
+                "bounds": {
+                    "min_latitude": 45.845_002_289_861_44,
+                    "max_latitude": 45.854_990_249_499_68,
+                    "min_longitude": -74.111_985_946_074_13,
+                    "max_longitude": -74.088_766_314_089_3
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn parse_route_reads_coordinates_altitudes_and_bounds() {
+        let track = parse_route_from_detail(&garmin_route_fixture())
+            .expect("fixture carries a four-point track"); // Safe: literal test fixture
+
+        assert_eq!(track.coordinates.len(), 4);
+        assert!((track.coordinates[0].0 - 45.852_678).abs() < 1e-6);
+        assert!((track.coordinates[0].1 - -74.088_834).abs() < 1e-6);
+        assert!((track.coordinates[3].0 - 45.852_845).abs() < 1e-6);
+
+        let alt = track.altitudes_meters.expect("elevation is complete"); // Safe: literal test fixture
+        assert_eq!(alt.len(), 4);
+        assert!((alt[3] - 289.6).abs() < 1e-6);
+
+        let dist = track.distances_meters.expect("distance is complete"); // Safe: literal test fixture
+        assert!((dist[3] - 6637.59).abs() < 1e-6);
+
+        let b = track.bounds.expect("Garmin precomputes the box"); // Safe: literal test fixture
+        assert!((b.min_latitude - 45.845_002).abs() < 1e-6);
+        assert!((b.max_longitude - -74.088_766).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_route_drops_an_incomplete_series_but_keeps_the_track() {
+        // One missing elevation must not yield a shorter, silently misaligned
+        // array — the whole series goes, the coordinates stay.
+        let mut raw = garmin_route_fixture();
+        raw["route"]["altitudes"] = serde_json::json!([274.6, null, 274.8, 289.6]);
+
+        let track = parse_route_from_detail(&raw).expect("coordinates are still good"); // Safe: literal test fixture
+        assert_eq!(track.coordinates.len(), 4, "the track survives");
+        assert!(
+            track.altitudes_meters.is_none(),
+            "a gapped elevation series is dropped whole, not padded"
+        );
+        assert!(
+            track.distances_meters.is_some(),
+            "an unaffected series is untouched"
+        );
+    }
+
+    #[test]
+    fn parse_route_rejects_a_track_too_short_to_draw() {
+        let mut raw = garmin_route_fixture();
+        raw["route"]["coordinates"] = serde_json::json!([[45.85, -74.08]]);
+        raw["route"]["altitudes"] = serde_json::json!([274.6]);
+        raw["route"]["distances"] = serde_json::json!([0.0]);
+        assert!(
+            parse_route_from_detail(&raw).is_none(),
+            "one point is a start coordinate, not a route"
+        );
+    }
+
+    #[test]
+    fn parse_route_is_absent_when_the_provider_sends_no_track() {
+        let raw = serde_json::json!({ "name": "Treadmill", "distance": 5000.0 });
+        assert!(parse_route_from_detail(&raw).is_none());
+    }
+
+    #[test]
+    fn merge_detail_fills_route_when_list_had_none() {
+        // Guards the gap this field was most likely to fall into: the enriched
+        // list path reaches merge_detail_into_activity and never the builder,
+        // so a route wired only into the builder is absent from every
+        // multi-activity scrape.
+        let mut activity = build_activity_from_js_item(
+            "24235239873",
+            &serde_json::json!({
+                "name": "Prévost Trail",
+                "type": "trail_running",
+                "date": "2026-09-04",
+                "time": "0:54:51",
+                "distance": "6.6 km",
+            }),
+        );
+        assert!(activity.route.is_none(), "list page must not preempt");
+
+        merge_detail_into_activity(&mut activity, &garmin_route_fixture());
+
+        let track = activity.route.expect("detail pass supplies the track"); // Safe: merged from test JSON
+        assert_eq!(track.coordinates.len(), 4);
+        assert!((track.coordinates[0].0 - 45.852_678).abs() < 1e-6);
     }
 
     #[test]

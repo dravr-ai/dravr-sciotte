@@ -243,6 +243,56 @@ pub struct SegmentEffort {
 }
 
 // ============================================================================
+// Route track
+// ============================================================================
+
+/// A GPS track for one activity, held as parallel arrays.
+///
+/// Parallel arrays rather than a `Vec` of point structs because that is the
+/// shape both consumers already want: the platform's `TimeSeriesData` carries
+/// `gps_coordinates` and `altitude` side by side, and
+/// `pierre_fitness_compute::routes::build_route_summary_from_streams` takes
+/// `(&[(f64, f64)], &[f32])`. A struct per point would be rearranged at every
+/// boundary and would trade an 8-byte pair for a dozen mostly-absent fields
+/// across a track that routinely runs to thousands of samples.
+///
+/// `altitudes_meters` and `distances_meters` are either absent or exactly as
+/// long as `coordinates`. A provider that reports elevation for only part of a
+/// track supplies `None` rather than a padded array, because a half-filled
+/// series cannot drive climb detection and a caller cannot tell the difference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RouteTrack {
+    /// `(latitude, longitude)` in degrees, one entry per GPS-valid sample
+    pub coordinates: Vec<(f64, f64)>,
+    /// Elevation in meters, index-aligned with `coordinates`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub altitudes_meters: Option<Vec<f64>>,
+    /// Cumulative distance from the start in meters, index-aligned with `coordinates`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distances_meters: Option<Vec<f64>>,
+    /// Bounding box of the track, when the provider precomputed one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bounds: Option<RouteBounds>,
+}
+
+/// The latitude/longitude extent of a [`RouteTrack`].
+///
+/// Carried rather than derived because providers compute it themselves over the
+/// full-resolution track, which is a wider and more accurate box than one
+/// recomputed from a downsampled coordinate list.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct RouteBounds {
+    /// Southern edge, degrees
+    pub min_latitude: f64,
+    /// Northern edge, degrees
+    pub max_latitude: f64,
+    /// Western edge, degrees
+    pub min_longitude: f64,
+    /// Eastern edge, degrees
+    pub max_longitude: f64,
+}
+
+// ============================================================================
 // Split and Lap
 // ============================================================================
 
@@ -468,6 +518,10 @@ pub struct Activity {
     /// Provider-defined laps (athlete-triggered watch button, or auto-interval)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub laps: Option<Vec<Lap>>,
+
+    /// GPS track for the activity, when the provider's detail payload carries one
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteTrack>,
 
     /// Source provider (always "strava-scraper")
     pub provider: String,
@@ -850,6 +904,7 @@ mod tests {
             segment_efforts: None,
             splits: None,
             laps: None,
+            route: None,
             provider: "strava-scraper".to_owned(),
         };
         let json = serde_json::to_string(&activity).expect("serialize"); // Safe: test with serializable struct

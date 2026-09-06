@@ -1003,6 +1003,7 @@ fn parse_vision_activity(v: &serde_json::Value) -> Option<Activity> {
         segment_efforts: None,
         splits: None,
         laps: None,
+        route: None,
         provider: "vision-scraper".to_owned(),
     })
 }
@@ -1057,6 +1058,7 @@ fn parse_vision_activity_detail(id: &str, v: &serde_json::Value) -> Activity {
         segment_efforts: None,
         splits: None,
         laps: None,
+        route: None,
         provider: "vision-scraper".to_owned(),
     }
 }
