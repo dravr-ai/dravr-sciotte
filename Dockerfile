@@ -49,7 +49,7 @@ FROM debian:trixie-slim
 # 152.0.7977.76, one patch off Debian's build): cdp_runtime_enable, webdriver_set,
 # plugins_empty, languages_empty, notif_mismatch and ua_headless_substring all
 # clean. Re-run it on the next major bump; that is what it is for.
-ARG APT_SECURITY_EPOCH=2026-09-03
+ARG APT_SECURITY_EPOCH=2026-09-06
 
 # nodejs + npm + git: required by the Copilot CLI the vision login's LLM
 # provider (embacle copilot_headless) spawns at runtime.
